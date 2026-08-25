@@ -1,0 +1,255 @@
+A free and automated system that records every income and expense transaction from an iPhone, stores it in Google Sheets, and produces monthly summaries and rich analytics that show exactly where money comes from and where it goes. The design targets Indian banking, where most spending happens through UPI, credit cards, debit cards, and auto debits, and where bank SMS alerts are the main signal for every transaction.
+Goal
+Capture each transaction with very little effort, keep one clean history of all money movement, and compute monthly and category level analytics that answer where money is actually going, which bank account and which credit card it flows through, and how spending changes from month to month.
+Architecture Overview
+Each transaction is sent as a single pipe delimited line from an iPhone Shortcut to a Google Apps Script web app. The Shortcut can build the line from a parsed bank SMS or from a quick manual entry. Apps Script splits the line, normalizes it, and appends it as one row in a transactions sheet. A monthly job then aggregates all transactions into a monthly summary, a per card summary, and a per account summary, and computes month over month changes. Questions about spending are answered by reading these summaries, and later by a language model that reasons over them.
+Components
+iPhone Shortcut for capturing or pasting a transaction.
+Google Apps Script web app as the engine and scheduler.
+Google Sheet with tabs named TRANSACTIONS, MONTHLY, CARDS, ACCOUNTS, and CONFIG.
+A hosted language model API for categorization help and for answering questions.
+An optional push notification service for alerts on large or unusual spends.
+Storage Layout
+The Google Sheet separates raw records from computed summaries.
+TRANSACTIONS is the source of truth. It is append only, one row per transaction, and is never edited by hand.
+MONTHLY holds one row per month with totals for income, expense, savings, investments, and every spending category, along with month over month changes.
+CARDS holds one row per credit card per month, so spending on each card can be compared across months.
+ACCOUNTS holds one row per bank account per month, so inflow and outflow per account is clear.
+CONFIG holds the lists used for normalization, such as known banks, accounts, cards, categories, merchant rules, and monthly budgets. Keeping these in a tab lets behavior change without editing code.
+The Most Important Rule
+Accurate analytics depend on not double counting money that only moves between your own places. Three flows must be tagged and kept out of the spending totals.
+A transfer between your own accounts is not income and not expense.
+A credit card bill payment from a bank account is not a new expense, because the real spends were already recorded when each purchase happened on the card.
+A refund or reversal reduces the original expense rather than adding income.
+Every transaction therefore carries a type that marks whether it is income, expense, transfer, card payment, investment, or refund, and only true income and true expense feed the spending and savings analytics.
+Transaction Data Model
+Each transaction is one flat row in TRANSACTIONS. The fields below extend the original idea with the missing details needed to know which bank, which card, and which account a transaction used.
+txn_id, a unique id used to avoid storing the same transaction twice.
+datetime, the date and time of the transaction.
+amount, the value as a positive number.
+direction, debit or credit, meaning money out or money in.
+type, one of income, expense, transfer, card_payment, investment, or refund.
+instrument, how the money moved, such as UPI, Credit Card, Debit Card, Net Banking, NEFT or IMPS, Auto Debit or Mandate, Wallet, or Cash.
+bank, the bank involved, such as HDFC, ICICI, SBI, Axis, or Kotak.
+account, a nickname or the last four digits of the account used.
+account_type, such as Savings, Current, Credit Card, Wallet, or Cash.
+card_name, the specific credit card used, such as HDFC Millennia or Axis Flipkart, left empty when no card is involved.
+merchant, the payee or merchant name.
+category, the main spending or income category.
+subcategory, an optional finer label.
+counterparty, the UPI id or account on the other side, when available.
+ref_no, the UPI reference or bank reference number, useful for deduplication.
+balance_after, the account balance after the transaction when the SMS provides it.
+is_recurring, a flag for known recurring payments such as rent, EMI, or subscriptions.
+needs_review, a flag set when the category is uncertain and should be confirmed later.
+user_notes, a short free text note.
+original_message, the raw bank SMS or source text, kept for reference and later reparsing.
+Indian Context
+Instruments commonly seen
+UPI through apps such as Google Pay, PhonePe, and Paytm, credit cards, debit cards, net banking, NEFT and IMPS and RTGS transfers, auto debit mandates for SIPs and bills, prepaid wallets, FASTag for tolls, and cash.
+Income categories
+Salary.
+Freelance or business income.
+Interest from savings and fixed deposits.
+Dividends.
+Rental income.
+Cashback and rewards.
+Refunds and reversals.
+Reimbursements from employer.
+Capital gains from stocks or mutual funds.
+Maturity proceeds from deposits or insurance.
+Gifts received.
+Other income.
+Expense categories
+Housing and Utilities, covering rent, home loan EMI, society maintenance, electricity, water, piped or cylinder gas, and property tax.
+Food and Dining, covering groceries, restaurants, food delivery such as Swiggy and Zomato, and tea or coffee.
+Shopping, covering clothing, electronics, and online orders from Amazon, Flipkart, and Myntra.
+Bills and Subscriptions, covering mobile postpaid or recharge, broadband, DTH, and streaming services such as Netflix, Prime, Hotstar, and Spotify.
+Transportation, covering fuel, Ola and Uber, autos, metro, bus, train through IRCTC, flights, parking, FASTag tolls, and vehicle service.
+Healthcare, covering pharmacy, doctor consultations, diagnostics, hospital bills, and fitness or gym.
+Investments, covering mutual fund SIPs, stocks, PPF, NPS, fixed and recurring deposits, gold and sovereign gold bonds, and similar.
+Insurance, covering term and life premiums, health, and vehicle insurance.
+EMI and Loans, covering personal, home, car, and education loans and buy now pay later dues.
+Education, covering tuition, courses, books, and coaching.
+Personal Care, covering salon, grooming, and cosmetics.
+Entertainment, covering movies, events, games, and hobbies.
+Travel, covering hotels and holiday trips.
+Family and Dependents, covering money sent to parents or family.
+Gifts and Donations, covering gifts, charity, and religious giving.
+Taxes and Fees, covering income tax, GST, TDS, bank charges, late fees, and ATM fees.
+Cash Withdrawal, covering ATM withdrawals, where the actual spend is unknown until later categorized.
+Miscellaneous, for anything not yet classified.
+Pipe Delimited Input
+A transaction is sent as one line with fields in a fixed order separated by a vertical bar. Empty fields are allowed and are left blank between bars.
+The field order is datetime, amount, direction, type, instrument, bank, account, account_type, card_name, merchant, category, user_notes, original_message.
+Example expense on a credit card.
+2026-06-25 13:40|850|debit|expense|Credit Card|HDFC|Millennia|Credit Card|HDFC Millennia|Swiggy|Food and Dining|team lunch|Spent Rs 850 on HDFC Millennia card at SWIGGY
+Example UPI expense from a savings account.
+2026-06-25 19:10|1200|debit|expense|UPI|ICICI|xx4321|Savings||DMart|Shopping|monthly groceries|Rs 1200 debited via UPI to DMART
+Example salary credit.
+2026-06-01 10:00|90000|credit|income|Net Banking|HDFC|xx9988|Savings||Employer|Salary|june salary|Salary credited Rs 90000
+Example credit card bill payment, which must not count as a new expense.
+2026-06-05 11:00|24500|debit|card_payment|Net Banking|HDFC|xx9988|Savings|HDFC Millennia|HDFC Card|Credit Card Payment|june card bill|Payment of Rs 24500 to HDFC card
+Implementation Logic
+Each part below is a checklist of steps to build.
+Capture on the phone
+ Build a Shortcut that takes either a pasted bank SMS or a few quick manual inputs.
+ When given an SMS, extract amount, direction, bank, instrument, and merchant from the text.
+ Ask for or infer the type, category, and the card or account used.
+ Assemble the fields into one pipe delimited line in the fixed order.
+ Send the line as the body of a POST request to the Apps Script web app.
+Ingest into TRANSACTIONS
+ In doPost, read the body and split it on the vertical bar into fields.
+ Trim each field and map it to its column name.
+ Build a txn_id from datetime, amount, and ref_no so repeated sends are detected.
+ Skip the row if the txn_id already exists, otherwise append it.
+ Set needs_review when the category is missing so it can be fixed later.
+Normalize and categorize
+ Look up the merchant in CONFIG rules to assign a category automatically when possible.
+ Standardize bank, account, and card names against the CONFIG lists.
+ Mark known recurring payees such as rent, EMI, and subscriptions as recurring.
+ Leave needs_review set for anything the rules cannot classify.
+Build the monthly summary
+ Read all transactions for the target month.
+ Sum income from rows of type income, and expense from rows of type expense only.
+ Exclude transfer, card_payment, and investment rows from income and expense totals.
+ Compute savings as income minus expense, and the savings rate as savings divided by income.
+ Sum investment rows separately into an investments total.
+ Sum expense by category into one column per category.
+ Write one row for the month into MONTHLY and compute the change from the previous month.
+Build the card and account summaries
+ Group expense rows by card_name and by month, and write totals into CARDS.
+ For each card, compute the change versus the previous month so rising card spend is visible.
+ Group inflow and outflow by account and by month, and write totals into ACCOUNTS.
+Alert on unusual spends
+ When a single expense is far above the usual range, send a push notification.
+ When a category in the current month is well above its recent average, flag it.
+Schedule everything
+ Run ingestion on each incoming request through doPost.
+ Run a monthly job near the end of each month, and also allow a manual rebuild that recomputes all summaries from TRANSACTIONS.
+Implementation Examples
+Apps Script that receives a pipe delimited line and appends it.
+const COLS = ["datetime","amount","direction","type","instrument","bank",
+  "account","account_type","card_name","merchant","category","user_notes",
+  "original_message"];
+
+function doPost(e) {
+  const parts = e.postData.contents.split("|").map(s => s.trim());
+  const row = {};
+  COLS.forEach((c, i) => row[c] = parts[i] ?? "");
+  row.txn_id = makeId(row);
+  const sheet = SpreadsheetApp.getActive().getSheetByName("TRANSACTIONS");
+  if (existsId(sheet, row.txn_id)) return reply({ ok: true, duplicate: true });
+  sheet.appendRow(COLS.map(c => row[c]).concat([row.txn_id]));
+  return reply({ ok: true });
+}
+
+function makeId(r) {
+  return [r.datetime, r.amount, r.merchant].join("_");
+}
+
+function reply(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+Monthly aggregation logic in plain terms.
+function buildMonthly(month) {
+  const rows = getMonthRows(month);                 // all txns in the month
+  let income = 0, expense = 0, invest = 0;
+  const byCategory = {};
+  rows.forEach(r => {
+    const amt = Number(r.amount);
+    if (r.type === "income") income += amt;
+    else if (r.type === "expense") {
+      expense += amt;
+      byCategory[r.category] = (byCategory[r.category] || 0) + amt;
+    } else if (r.type === "investment") invest += amt;
+    // transfer and card_payment are ignored on purpose
+  });
+  const savings = income - expense;
+  writeMonthlyRow(month, income, expense, savings, invest, byCategory);
+}
+Analytics That Matter
+Focus on the few numbers that change financial decisions and avoid totals that only restate the obvious.
+Savings rate, meaning how much of income is kept after real expenses.
+Category share, meaning which categories take the largest part of spending.
+Month over month change per category, which shows what is quietly rising.
+Per card spend and its trend, which answers which credit card is being used the most and whether it is growing.
+Recurring versus one time spend, which separates fixed commitments from discretionary choices.
+Top merchants, which often reveal a small number of places taking a large share.
+Supported Queries
+Status questions.
+How much did I spend this month and how much did I earn?
+What is my savings rate this month?
+How much have I spent so far today and this week?
+How much is sitting across my accounts right now?
+How much of my credit card limit have I used this cycle?
+Category questions.
+Where did most of my money go this month?
+How much did I spend on food and dining this month?
+What share of my spending is fixed bills versus discretionary?
+How much did I spend on groceries compared to eating out?
+How much went to investments this month?
+Card and account questions.
+Which credit card did I spend the most on this month?
+Which card has higher spending than last month?
+How much did each bank account spend and receive this month?
+Which account is my highest outflow account?
+How much did I pay in total credit card bills this month?
+Trend and comparison questions.
+How does this month compare with last month overall?
+Which category increased the most compared to last month?
+Is my food spending trending up over the last three months?
+How has my savings rate changed over the last six months?
+Are my subscription bills slowly increasing?
+Merchant and behavior questions.
+Which merchants did I spend the most at this month?
+How much did I spend on Swiggy and Zomato together?
+How often do I withdraw cash and how much?
+What are my recurring payments and how much do they total?
+Which one time large purchases happened this month?
+Planning and saving questions.
+Which category should I cut to improve my savings rate?
+Am I on track against my monthly budget for each category?
+How much could I save by reducing food delivery?
+Based on recent months, what is a realistic savings target for next month?
+Which subscriptions look unused and worth reviewing?
+Tax and review questions.
+How much did I pay in bank charges and fees this year?
+How much did I invest this year across all instruments?
+How much reimbursable spending is still pending?
+Which transactions are still unreviewed and need a category?
+Future AI and Scalability
+These additions make the system smarter while keeping the same free and automated base.
+Automatic SMS parsing
+ Send the raw bank SMS to a language model to extract amount, direction, bank, merchant, and instrument.
+ Let the model propose the type and category, and only ask the user when confidence is low.
+Smart categorization that learns
+ Store merchant to category mappings in CONFIG and grow them from past confirmations.
+ When a new merchant appears, let the model suggest a category and remember the choice.
+Anomaly and fraud alerts
+ Learn the normal range per category and per merchant.
+ Flag a charge that is unusually large, a duplicate charge, or a new merchant on a card for quick review.
+Forecasting and cash flow
+ Use recurring payments and recent trends to project end of month spending early.
+ Warn when projected expense will push the savings rate below a target.
+Agent with tools
+ Expose actions such as get a month, get a category trend, get card spend, and set a budget.
+ Let the model plan and call these actions to answer free form money questions.
+Tiered summaries for years of data
+ Keep monthly summaries as the base, and roll them up into quarterly and yearly views.
+ Answer long range questions from the rolled up views so reports stay fast.
+Build Order
+Create the TRANSACTIONS tab and the doPost web app, then confirm one pipe delimited line stores correctly.
+Build the iPhone Shortcut to send a transaction, first manually and then from a pasted SMS.
+Add the type rule so transfers, card payments, and refunds are excluded from spending.
+Add the monthly job that fills MONTHLY with income, expense, savings, investments, and category totals.
+Add the CARDS and ACCOUNTS summaries with month over month changes.
+Add unusual spend notifications.
+Add the question branch so spending can be queried from the phone, and add AI categorization and forecasting later.
+Make steps one through four solid before adding AI, because clean and correctly typed transactions are most of the value.
+Constraints
+The pipeline runs automatically and needs no manual step beyond sending each transaction.
+The system uses free tier services so the running cost stays near zero.
+The iPhone is the main capture device, with bank SMS as the primary source.
+All amounts are tracked in Indian rupees.

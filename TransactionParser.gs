@@ -2,23 +2,23 @@
  * Personal Finance Web App
  *
  * Transaction Log schema (Transaction Log sheet):
- * The canonical Transaction Log schema is defined by TX_COL below (A:R).
- * Original Text is retained as temporary evidence for the current phase and
- * will migrate to a separate Source Log in the next design phase.
+ *  A: Transaction ID (YYYYMM-XXX, server-generated)
+ *  B: DateTime
+ *  C: Amount (Income +, Expense -)
+ *  D: Bank
+ *  E: Account Type
+ *  F: Merchant
+ *  G: Category
+ *  H: User Notes
+ *  I: Original Text (raw SMS or "[MANUAL]")
  *
  * Summary sheet (Monthly Summary) is read-only for this script.
  */
 
-function test_doGet_rent_case() {
-  const e = {
-    parameter: {
-      txnString: '2026-06-26 07:18:24 | -100 | Axis | Credit Card | Credit Card | expense | Bhavyas Tiffin Center | PENUMATSA S | REF123456',
-      originalText: 'Dummy'
-    }
-  };
-
-  const result = doGet(e);
-  Logger.log(result.getContent());
+function test_doGet_rent_case_scratch() {
+  // Deliberately logs only. Point tests at a scratch spreadsheet before enabling writes.
+  const parsed = parseTransactionString('2026-06-26 07:18:24 | -100.00 | Axis | Credit Card | Credit Card | expense | Bhavyas Tiffin Center | PENUMATSA S | REF123456 | NA', 'Dummy');
+  Logger.log(JSON.stringify(parsed));
 }
 
 // =============================
@@ -32,32 +32,24 @@ function test_doGet_rent_case() {
 const SHEET_ID = 'XXX';
 const TRANSACTION_SHEET_NAME = 'Transaction Log';
 const SUMMARY_SHEET_NAME = 'Monthly Summary';
+const SUGGESTION_RULES_SHEETNAME = 'Suggestion Rules';
 const SUGGESTION_RULES_SHEET_NAME = 'Suggestion Rules';
 const financeSheet = SpreadsheetApp.openById(SHEET_ID);
 const CONFIG_SHEET_NAME = 'CONFIG';
-const PARSED_TRANSACTION_FIELD_COUNT = 9;
-const SEMANTIC_TYPES = ['income', 'expense', 'transfer', 'card_payment', 'investment', 'refund'];
+const SOURCE_LOG_SHEET_NAME = 'Source Log';
+const CHANGE_LOG_SHEET_NAME = 'Change Log';
+const SCHEMA_VERSION = '3.0';
+const PARSER_FORMAT_VERSION = '10';
 
 // Transaction Log column indices (1-based)
 const TX_COL = {
-  ID: 1,              // A: Transaction ID
-  DATETIME: 2,        // B: DateTime
-  AMOUNT: 3,          // C: Amount
-  BANK: 4,            // D: Bank
-  ACCOUNT_TYPE: 5,    // E: Account Type
-  MERCHANT: 6,        // F: Merchant
-  CATEGORY: 7,        // G: Category
-  USER_NOTES: 8,      // H: User Notes
-  ORIGINAL_TEXT: 9,   // I: Original Text
-  TYPE: 10,           // J: Type
-  INSTRUMENT: 11,     // K: Instrument
-  ACCOUNT: 12,        // L: Account
-  CARD_NAME: 13,      // M: Card Name
-  IS_RECURRING: 14,   // N: Is Recurring (TRUE/FALSE)
-  NEEDS_REVIEW: 15,   // O: Needs Review (TRUE/FALSE)
-  COUNTERPARTY: 16,   // P: Counterparty
-  REF_NO: 17,         // Q: Ref No
-  BALANCE_AFTER: 18   // R: Balance After (optional)
+  ID: 1, DATETIME: 2, AMOUNT: 3, BANK: 4, ACCOUNT_TYPE: 5, MERCHANT: 6, CATEGORY: 7,
+  USER_NOTES: 8, ORIGINAL_TEXT: 9, TYPE: 10, INSTRUMENT: 11, ACCOUNT: 12, CARD_NAME: 13,
+  IS_RECURRING: 14, NEEDS_REVIEW: 15, COUNTERPARTY: 16, REF_NO: 17, BALANCE_AFTER: 18,
+  CREATED_AT: 19, LAST_UPDATED_AT: 20, SOURCE_HASH: 21, SOURCE_ID: 22, REVIEW_REASON: 23,
+  TYPE_SOURCE: 24, TYPE_CONFIDENCE: 25, CATEGORY_SOURCE: 26, RULES_APPLIED: 27, SCHEMA_VERSION: 28,
+  MATCH_KEY: 29, MERCHANT_NORMALIZED: 30, SUBCATEGORY: 31, PARSER_CONFIDENCE: 32,
+  VERIFICATION_STATUS: 33, VERIFICATION_SOURCE: 34, VERIFIED_AT: 35, SOURCE_COUNT: 36, FIRST_SEEN_AT: 37
 };
 
 /**
@@ -85,7 +77,7 @@ const TX_COL = {
  *
  * Supported patterns:
  * - SMS-based transaction:
- *     ?txnString=DateTime | Amount | Bank | Account Type | Instrument | Type | Merchant | Counterparty | RefNo&originalText=...
+ *     ?txnString=# | DateTime | Amount | Bank | Account Type | Merchant&originalText=...
  *
  * - Manual transaction (Shortcuts):
  *     ?dateTime=...&type=💰 Income|💵 Expenses&amount=...&bank=...&accountType=...&
@@ -96,7 +88,7 @@ const TX_COL = {
  * - Maintenance / retrieval:
  *     ?action=getLastInserted
  *     ?action=pendingReview&limit=10
- *     ?action=updateTransaction&transactionId=...&category=...&notes=...
+ *     ?action=updateTransaction&sheetRow=...&category=...&notes=...
  *     ?action=lastTransactions&limit=5
  *
  * - Monthly overview:
@@ -109,10 +101,15 @@ function doGet(e) {
   const p = event.parameter || {};
 
   try {
+    // 0) Explicit secondary-source ingestion/reconciliation
+    if (p.action === 'ingestSource' || p.sourceType) {
+      return ingestSecondarySource(p);
+    }
+
     // 1) SMS-based transaction
     if (p.txnString) {
       const originalText = p.originalText || '';
-      return handleRawTransaction(p.txnString, originalText);
+      return handleRawTransaction(p.txnString, originalText, 'SMS');
     }
 
     // 2) Explicit manual transaction route
@@ -126,25 +123,19 @@ function doGet(e) {
     }
 
     if (p.action === 'pendingReview') {
-      const limit = getBoundedLimit(p.limit, 10);
+      const limit = parseInt(p.limit, 10) || 10;
       return getTransactionsPendingReview(limit);
     }
 
     if (p.action === 'updateTransaction') {
-      let transactionId = (p.transactionId || '').toString().trim();
-      // Temporary compatibility for existing Shortcuts. New callers must send
-      // transactionId because row numbers can change when the sheet is sorted.
-      if (!transactionId && p.sheetRow) {
-        transactionId = getTransactionIdAtLegacyRow(p.sheetRow);
-      }
+      const sheetRow = parseInt(p.sheetRow, 10);
       const category = p.category || '';
-      const hasNotes = Object.prototype.hasOwnProperty.call(p, 'notes');
-      const userNotes = hasNotes ? p.notes : undefined;
-      return updateTransaction(transactionId, category, userNotes);
+      const userNotes = p.notes || '';
+      return updateTransaction(sheetRow, category, userNotes);
     }
 
     if (p.action === 'lastTransactions') {
-      const limit = getBoundedLimit(p.limit, 5);
+      const limit = parseInt(p.limit, 10) || 5;
       return getLastTransactions(limit);
     }
 
@@ -161,7 +152,7 @@ function doGet(e) {
     return sendJsonResponse(false, {
       errorCode: 'SERVER_ERROR',
       message: 'Something went wrong while processing your request.',
-      debug: `doGet: ${error.toString()}`
+      requestId: p.requestId || Utilities.getUuid()
     });
   }
 }
@@ -174,11 +165,11 @@ function doGet(e) {
  * Parse a pipe-delimited transaction string from SMS.
  *
  * Supported formats:
+ *   # | DateTime | Amount | Bank | Account Type | Merchant
  *   DateTime | Amount | Bank | Account Type | Merchant
- *   DateTime | Amount | Bank | Account Type | Instrument | Type | Merchant | Counterparty | RefNo
  *
- * The five-field form is retained only for legacy Shortcuts. New parser output
- * must always use the nine-field contract in Prompt.txt.
+ * The first field (#) is treated as an optional external reference only;
+ * the authoritative Transaction ID is generated server-side.
  */
 function parseTransactionString(txnString, originalText) {
   if (!txnString || typeof txnString !== 'string') {
@@ -189,44 +180,49 @@ function parseTransactionString(txnString, originalText) {
   const parts = trimmed.split('|').map(p => (p || '').trim());
   const originalCount = parts.length;
 
-  if (originalCount !== 5 && originalCount !== PARSED_TRANSACTION_FIELD_COUNT) {
+  if (originalCount !== 10 && originalCount !== 9 && originalCount !== 5) {
     return {
-      error: 'Invalid format. Expected exactly 5 legacy fields or 9 current fields.',
+      error: 'Invalid format. Expected 10 fields (or legacy 5/9 during migration).',
       example: '2026-06-26 07:18:24 | -100 | Axis | Credit Card | Credit Card | expense | Bhavyas Tiffin Center | PENUMATSA S | REF123456'
     };
   }
 
   let dateTime = parts[0] || '';
-  const amountText = parts[1] || '';
-  let amount = Number(amountText);
-  let bank = normalizeUnknownValue(parts[2]);
-  let accountType = normalizeUnknownValue(parts[3]);
+  let amount = parseFloat(parts[1]);
+  let bank = parts[2] || '';
+  let accountType = parts[3] || '';
 
   let instrument = '';
   let typeRaw = '';
   let rawMerchant = '';
   let counterparty = '';
   let refNo = '';
+  let balanceAfter = '';
 
   if (originalCount === 5) {
-    // Legacy format:
-    // datetime | signed_amount | bank | account_type | merchant_name
-    rawMerchant = normalizeUnknownValue(parts[4]);
+    rawMerchant = parts[4] || '';
+  } else if (originalCount === 9) {
+    instrument = parts[4] || '';
+    typeRaw = parts[5] || '';
+    rawMerchant = parts[6] || '';
+    counterparty = parts[7] || '';
+    refNo = parts[8] || '';
   } else {
-    // Current format:
-    // datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no
-    instrument = normalizeUnknownValue(parts[4]);
-    typeRaw = normalizeUnknownValue(parts[5]);
-    rawMerchant = normalizeUnknownValue(parts[6]);
-    counterparty = normalizeUnknownValue(parts[7]);
-    refNo = normalizeUnknownValue(parts[8]);
+    instrument = parts[4] || '';
+    typeRaw = parts[5] || '';
+    rawMerchant = parts[6] || '';
+    counterparty = parts[7] || '';
+    refNo = parts[8] || '';
+    balanceAfter = parts[9] || '';
   }
 
   if (!dateTime) return { error: 'DateTime is missing' };
-  if (!parseCanonicalDateTime(dateTime)) return { error: 'DateTime must use yyyy-MM-dd HH:mm:ss.' };
-  if (!/^[+-]?\d+(?:\.\d{1,2})?$/.test(amountText) || !isFinite(amount) || amount === 0) return { error: 'Amount is invalid or zero' };
+  if (isNaN(amount) || amount === 0) return { error: 'Amount is invalid or zero' };
   if (!bank) return { error: 'Bank name is missing' };
   if (!accountType) return { error: 'Account Type is missing' };
+
+  if (typeRaw === 'NA') typeRaw = '';
+  if (balanceAfter === 'NA') balanceAfter = '';
 
   if (!rawMerchant) {
     rawMerchant = 'Unspecified';
@@ -265,7 +261,7 @@ function parseTransactionString(txnString, originalText) {
     type: type || '',
     counterparty: counterparty || '',
     refNo: refNo || '',
-    balanceAfter: '',
+    balanceAfter: balanceAfter ? toNumber(balanceAfter) : '',
     account: '',
     cardName: '',
     originalText: originalText || ''
@@ -307,46 +303,28 @@ function inferInstrumentFromText(originalText, accountType) {
 }
 
 function normalizeSemanticType(typeRaw, amount, category, originalText, accountType, bank, merchantName) {
-  const t = (typeRaw || '').toLowerCase();
+  const t = (typeRaw || '').toString().trim().toLowerCase();
   const text = (originalText || '').toLowerCase();
   const cat = (category || '').toLowerCase();
 
-  // If the prompt supplied a valid semantic type, preserve it.
-  if (isSemanticType(t)) {
-    return t;
+  if (['income', 'expense', 'transfer', 'card_payment', 'investment', 'refund'].includes(t)) return t;
+
+  if (isCreditCardPayment(originalText, accountType, bank, merchantName)) return 'card_payment';
+
+  if (/\b(sip|mutual\s+fund|mf|stock|shares?|fd|rd|nps|ppf|investment)\b/i.test(text)) return 'investment';
+  if (/\b(refund|reversal|chargeback|money returned)\b/i.test(text)) return 'refund';
+
+  if (/\b(salary|interest|dividend|cashback|pension|bonus)\b/i.test(text)) return 'income';
+
+  if (/\b(transfer|neft|imps|rtgs)\b/i.test(text)) {
+    return 'transfer';
   }
 
-  // A positive refund must not be collapsed into generic income.
-  if (text.includes('refund') || text.includes('reversal') || text.includes('chargeback')) {
-    return 'refund';
-  }
+  if (amount < 0) return 'expense';
+  if (amount > 0 && cat === 'income') return 'income';
 
-  // Inflows
-  if (amount > 0) {
-    if (cat === 'income' || text.includes('salary') || text.includes('credited') || text.includes('interest') || text.includes('cashback')) {
-      return 'income';
-    }
-    return 'income';
-  }
-
-  // Outflows
-  if (isCreditCardPayment(originalText, accountType, bank, merchantName)) {
-    return 'card_payment';
-  }
-  if (cat === 'investment & savings' || text.includes('sip') || text.includes('mutual fund') || text.includes('stock') || text.includes('fd ') || text.includes('rd ')) {
-    return 'investment';
-  }
-
-  // Simple internal transfer heuristic: bank transfer with generic merchant names
-  const m = (merchantName || '').toLowerCase();
-  if (text.includes('transfer') || text.includes('neft') || text.includes('imps')) {
-    // You can refine this later using CONFIG
-    if (m.includes('self') || m.includes('wallet') || m.includes('axis') || m.includes('sbi')) {
-      return 'transfer';
-    }
-  }
-
-  return 'expense';
+  // Never force an unknown inflow into income. Let review handle it.
+  return '';
 }
 
 /**
@@ -355,38 +333,45 @@ function normalizeSemanticType(typeRaw, amount, category, originalText, accountT
  */
 function isLikelyDuplicateTransaction(sheet, parsed) {
   const lastRow = sheet.getLastRow();
-  if (lastRow <= 1) return false;
+  if (lastRow <= 1) return {exact: false, probable: false, row: null};
 
-  const checkStart = Math.max(2, lastRow - 49);
-  const numRows = lastRow - checkStart + 1;
-  const recentData = sheet.getRange(checkStart, 2, numRows, 5).getValues();
-  // B: DateTime, C: Amount, D: Bank, E: Account Type, F: Merchant
+  const rowCount = Math.min(lastRow - 1, 300);
+  const startRow = lastRow - rowCount + 1;
+  const data = sheet.getRange(startRow, 1, rowCount, Math.min(TX_COL.FIRST_SEEN_AT, sheet.getLastColumn())).getValues();
 
-  const targetDate = toDateKey(parsed.dateTime);
+  const targetDate = toValidDate(parsed.dateTime);
   const targetAmount = toNumber(parsed.amount);
-  const targetBank = (parsed.bank || '').toString().trim().toLowerCase();
-  const targetMerchant = (parsed.merchantName || '').toString().trim().toLowerCase();
+  const targetBank = String(parsed.bank || '').trim().toLowerCase();
+  const targetMerchant = String(parsed.merchantName || '').trim().toLowerCase();
+  const targetRef = String(parsed.refNo || '').trim().toLowerCase();
 
-  return recentData.some(row => {
-    const rowDate = toDateKey(row[0]);
-    const rowAmount = toNumber(row[1]);
-    const rowBank = (row[2] || '').toString().trim().toLowerCase();
-    const rowMerchant = (row[4] || '').toString().trim().toLowerCase();
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    const rowRef = String(row[TX_COL.REF_NO - 1] || '').trim().toLowerCase();
+    const rowAmount = toNumber(row[TX_COL.AMOUNT - 1]);
+    const rowBank = String(row[TX_COL.BANK - 1] || '').trim().toLowerCase();
+    const rowMerchant = String(row[TX_COL.MERCHANT_NORMALIZED - 1] || row[TX_COL.MERCHANT - 1] || '').trim().toLowerCase();
+    const rowDate = toValidDate(row[TX_COL.DATETIME - 1]);
 
-    return (
-      rowDate === targetDate &&
-      Math.abs(rowAmount - targetAmount) < 0.01 &&
-      rowBank === targetBank &&
-      rowMerchant === targetMerchant
-    );
-  });
+    if (targetRef && rowRef && targetRef === rowRef && targetBank === rowBank) {
+      return {exact: true, probable: true, row: startRow + i};
+    }
+
+    const withinMs = Math.abs(rowDate.getTime() - targetDate.getTime());
+    const maxWindow = 15 * 60 * 1000;
+    const sameDay = rowDate.toDateString() === targetDate.toDateString();
+    const probable = sameDay && withinMs <= maxWindow && Math.abs(rowAmount - targetAmount) < 0.01 && rowBank === targetBank && rowMerchant === targetMerchant;
+    if (probable) return {exact: false, probable: true, row: startRow + i};
+  }
+  return {exact: false, probable: false, row: null};
 }
 
 /**
  * Insert SMS-based transaction into Transaction Log.
  * Detects duplicates and generates a monthly sequence Transaction ID.
  */
-function handleRawTransaction(txnString, originalText) {
+function handleRawTransaction(txnString, originalText, sourceType) {
+  sourceType = (sourceType || 'SMS').toUpperCase();
   let parsed = parseTransactionString(txnString, originalText);
   if (parsed.error) {
     return sendJsonResponse(false, {
@@ -398,6 +383,7 @@ function handleRawTransaction(txnString, originalText) {
   }
 
   const sheet = financeSheet.getSheetByName(TRANSACTION_SHEET_NAME);
+  ensureV3Headers(sheet);
   if (!sheet) {
     return sendJsonResponse(false, {
       errorCode: 'SHEET_MISSING',
@@ -405,7 +391,10 @@ function handleRawTransaction(txnString, originalText) {
     });
   }
 
-  const dateValue = parseCanonicalDateTime(parsed.dateTime);
+  let dateValue = new Date(parsed.dateTime);
+  if (isNaN(dateValue.getTime())) {
+    dateValue = new Date(parsed.dateTime);
+  }
   const idDateForSeq = toValidDate(dateValue);
 
   const suggestion = getKnownTransactionSuggestion(parsed.amount, parsed.merchantName, idDateForSeq);
@@ -421,70 +410,61 @@ function handleRawTransaction(txnString, originalText) {
 
   parsed = applyConfigToTransaction(parsed);
 
-  if (!getCategoryList().includes(parsed.category)) {
-    parsed.category = 'Miscellaneous';
-  }
-
-  const finalType = isSemanticType(parsed.suggestionTypeOverride)
-    ? parsed.suggestionTypeOverride
-    : parsed.type || '';
+  const finalType = parsed.suggestionTypeOverride || parsed.type || '';
   const finalAccount = parsed.suggestionAccountOverride || parsed.account || '';
   const finalCardName = parsed.suggestionCardNameOverride || parsed.cardName || '';
   const finalCounterparty = parsed.counterparty || '';
   const finalRefNo = parsed.refNo || '';
   const finalBalanceAfter = parsed.balanceAfter || '';
   const isRecurring = !!parsed.suggestionIsRecurring;
-  const needsReview = parsed.category === 'Miscellaneous' || !isSemanticType(finalType);
   const finalNotes = parsed.suggestedNotes || '';
-  const finalOriginalText = parsed.originalText || 'SMSAUTO';
+  const finalOriginalText = parsed.originalText || '';
+  const sourceTypeFinal = sourceType || 'SMS';
+  const sourceHash = sha256Hex(finalOriginalText.trim().replace(/\s+/g,' '));
+  const duplicateBySource = findBySourceHash(sourceHash);
+  if (duplicateBySource) {
+    return sendJsonResponse(true, {success:true, duplicate:true, transactionId: sheet.getRange(duplicateBySource, TX_COL.ID).getValue()});
+  }
+  const duplicateCandidate = isLikelyDuplicateTransaction(sheet, parsed);
+  const needsReview = !finalType || parsed.category === 'Miscellaneous' || duplicateCandidate.probable;
+  const reviewReason = !finalType ? 'ambiguous_type' : (parsed.category === 'Miscellaneous' ? 'unknown_category' : (duplicateCandidate.probable ? 'duplicate_candidate' : ''));
+  const parserConfidence = finalType ? 0.95 : 0.50;
+  const matchKey = buildMatchKey(parsed);
+  const now = new Date();
+  const sourceId = generateSourceId();
+  const merchantNormalized = getMerchantName(parsed.merchantName || '');
+
+  // Probable duplicate is retained; it is never silently rejected.
+  if (duplicateCandidate.probable) parsed._probableDuplicateRow = duplicateCandidate.row;
 
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
 
   let sheetRow;
   try {
-    if (isLikelyDuplicateTransaction(sheet, parsed)) {
-      return sendJsonResponse(false, {
-        errorCode: 'DUPLICATE_TRANSACTION',
-        message: 'This transaction looks like a duplicate and was not added.',
-        duplicate: {
-          dateTime: parsed.dateTime,
-          amount: parsed.amount,
-          bank: parsed.bank,
-          merchant: parsed.merchantName
-        }
-      });
-    }
-
     const transactionId = generateTransactionId(idDateForSeq);
 
     sheet.appendRow([
-      transactionId,
-      dateValue,
-      parsed.amount,
-      parsed.bank,
-      parsed.accountType,
-      parsed.merchantName,
-      parsed.category,
-      finalNotes,
-      finalOriginalText,
-      finalType,
-      parsed.instrument || '',
-      finalAccount,
-      finalCardName,
-      isRecurring,
-      needsReview,
-      finalCounterparty,
-      finalRefNo,
-      finalBalanceAfter
+      transactionId, dateValue, parsed.amount, parsed.bank, parsed.accountType, parsed.merchantName, parsed.category,
+      finalNotes, finalOriginalText, finalType, parsed.instrument || '', finalAccount, finalCardName, isRecurring, needsReview,
+      finalCounterparty, finalRefNo, finalBalanceAfter, now, now, sourceHash, sourceId, reviewReason,
+      finalType ? (parsed.suggestionTypeOverride ? 'rule' : 'model') : 'heuristic', parserConfidence,
+      parsed.suggestionTypeOverride || parsed.suggestionIsRecurring ? 'rule' : (parsed.category === 'Miscellaneous' ? 'heuristic' : 'model'),
+      Array.from(new Set((parsed._rulesApplied || []).concat(suggestion ? [suggestion.ruleId || 'SUGGESTION'] : []))).join(','),
+      SCHEMA_VERSION, matchKey, merchantNormalized, '', parserConfidence, 'SMS Only', 'SMS', '', 1, now
     ]);
 
     sheetRow = sheet.getLastRow();
+    const linkedTxnId = transactionId;
+    appendSourceLog({
+      sourceId: sourceId, txnId: linkedTxnId, sourceType: sourceTypeFinal, rawBody: finalOriginalText,
+      sourceHash: sourceHash, refNo: finalRefNo, matchStatus: 'CREATED', matchConfidence: 1
+    });
   } finally {
     lock.releaseLock();
   }
 
-  const typeLabel = getTypeLabel(finalType);
+  const typeLabel = parsed.amount < 0 ? 'Expense' : 'Income';
   const emoji = parsed.amount < 0 ? '💸' : '💰';
   const absAmount = Math.abs(parsed.amount);
   const categories = getCategoryList();
@@ -495,7 +475,9 @@ function handleRawTransaction(txnString, originalText) {
   return sendJsonResponse(true, {
     message: `${emoji} ${typeLabel} of ${absAmount.toLocaleString('en-IN')} logged!`,
     sheetRow: sheetRow,
-    question: question,
+    transactionId: transactionId,
+    requiresUserInput: needsReview,
+    question: needsReview ? question : '',
     defaultCategory: parsed.category,
     categories: categories,
     suggestedNotes: finalNotes,
@@ -527,14 +509,8 @@ function handleManualTransaction(params) {
     });
   }
 
-  const typeNormalized = normalizeType(rawType);
-  if (!typeNormalized) {
-    return sendJsonResponse(false, {
-      errorCode: 'VALIDATION_TYPE',
-      message: 'type must be income or expense for manual entries.'
-    });
-  }
-  const semanticType = typeNormalized;
+  const typeNormalized = normalizeType(rawType); // existing helper: income/expense
+  let semanticType = typeNormalized === 'income' ? 'income' : 'expense';
 
   let mainCategory;
   let subCategory;
@@ -545,13 +521,6 @@ function handleManualTransaction(params) {
   } else {
     mainCategory = params.mainCategory || 'Miscellaneous';
     subCategory = params.subCategory || (params.merchant || 'Other');
-  }
-
-  if (!getCategoryList().includes(mainCategory)) {
-    return sendJsonResponse(false, {
-      errorCode: 'VALIDATION_CATEGORY',
-      message: `Category must be one of: ${getCategoryList().join(', ')}.`
-    });
   }
 
   const amountRaw = parseFloat(params.amount || '0');
@@ -577,12 +546,9 @@ function handleManualTransaction(params) {
     });
   }
 
-  const dateValue = parseCanonicalDateTime(dateTime);
-  if (!dateValue) {
-    return sendJsonResponse(false, {
-      errorCode: 'VALIDATION_DATETIME',
-      message: 'dateTime must use yyyy-MM-dd HH:mm:ss.'
-    });
+  let dateValue = new Date(dateTime);
+  if (isNaN(dateValue.getTime())) {
+    dateValue = new Date(dateTime);
   }
   const idDateForSeq = toValidDate(dateValue);
 
@@ -613,11 +579,7 @@ function handleManualTransaction(params) {
     parsed = applyConfigToTransaction(parsed);
 
     const isRecurring = false;
-    const finalCategory = getCategoryList().includes(parsed.category)
-      ? parsed.category
-      : category;
-    const finalMerchant = parsed.merchantName || merchant;
-    const needsReview = (finalCategory === 'Miscellaneous');
+    const needsReview = (category === 'Miscellaneous');
 
     sheet.appendRow([
       transactionId,         // A
@@ -625,11 +587,11 @@ function handleManualTransaction(params) {
       amount,                // C
       bank,                  // D
       accountType,           // E
-      finalMerchant,         // F
-      finalCategory,         // G
+      merchant,              // F
+      category,              // G
       notes,                 // H
       'MANUAL',              // I
-      parsed.type || semanticType, // J
+      semanticType,          // J
       parsed.instrument || '',      // K
       parsed.account || '',         // L
       parsed.cardName || '',        // M
@@ -653,60 +615,6 @@ function handleManualTransaction(params) {
 // 3. TRANSACTION RETRIEVAL
 // =============================
 
-function transactionRowToResponse(row, sheetRow) {
-  const amount = toNumber(row[TX_COL.AMOUNT - 1]);
-  const type = (row[TX_COL.TYPE - 1] || '').toString().toLowerCase();
-  const needsReviewCell = row[TX_COL.NEEDS_REVIEW - 1];
-  const needsReview = needsReviewCell === true || String(needsReviewCell).toUpperCase() === 'TRUE';
-
-  return {
-    transactionId: row[TX_COL.ID - 1],
-    sheetRow,
-    dateTime: row[TX_COL.DATETIME - 1],
-    amount,
-    bank: row[TX_COL.BANK - 1],
-    accountType: row[TX_COL.ACCOUNT_TYPE - 1],
-    merchantName: row[TX_COL.MERCHANT - 1],
-    category: row[TX_COL.CATEGORY - 1],
-    userNotes: row[TX_COL.USER_NOTES - 1],
-    type,
-    typeLabel: getTypeLabel(type),
-    instrument: row[TX_COL.INSTRUMENT - 1],
-    account: row[TX_COL.ACCOUNT - 1],
-    cardName: row[TX_COL.CARD_NAME - 1],
-    isRecurring: row[TX_COL.IS_RECURRING - 1] === true || String(row[TX_COL.IS_RECURRING - 1]).toUpperCase() === 'TRUE',
-    needsReview,
-    counterparty: row[TX_COL.COUNTERPARTY - 1],
-    refNo: row[TX_COL.REF_NO - 1],
-    balanceAfter: row[TX_COL.BALANCE_AFTER - 1],
-    emoji: amount < 0 ? '💸' : '💰',
-    formattedAmount: `₹${Math.abs(amount).toLocaleString('en-IN')}`,
-    isComplete: !!row[TX_COL.CATEGORY - 1] &&
-      row[TX_COL.CATEGORY - 1] !== 'Miscellaneous' &&
-      isSemanticType(type) &&
-      !needsReview
-  };
-}
-
-function findTransactionRowById(sheet, transactionId) {
-  const lastRow = sheet.getLastRow();
-  if (lastRow <= 1) return 0;
-
-  const ids = sheet.getRange(2, TX_COL.ID, lastRow - 1, 1).getValues();
-  const target = transactionId.toString().trim();
-  for (let i = 0; i < ids.length; i++) {
-    if ((ids[i][0] || '').toString().trim() === target) return i + 2;
-  }
-  return 0;
-}
-
-function getTransactionIdAtLegacyRow(value) {
-  const sheetRow = parseInt(value, 10);
-  const sheet = financeSheet.getSheetByName(TRANSACTION_SHEET_NAME);
-  if (!sheet || isNaN(sheetRow) || sheetRow < 2 || sheetRow > sheet.getLastRow()) return '';
-  return (sheet.getRange(sheetRow, TX_COL.ID).getValue() || '').toString().trim();
-}
-
 /**
  * Return the last inserted transaction and category list.
  */
@@ -727,8 +635,25 @@ function getLastInsertedTransaction() {
     });
   }
 
-  const data = sheet.getRange(lastRow, 1, 1, TX_COL.BALANCE_AFTER).getValues()[0];
-  const transaction = transactionRowToResponse(data, lastRow);
+  const data = sheet.getRange(lastRow, 1, 1, 9).getValues()[0];
+  const amount = data[2];
+
+  const transaction = {
+    transactionId: data[0],
+    sheetRow: lastRow,
+    dateTime: data[1],
+    amount,
+    bank: data[3],
+    accountType: data[4],
+    merchantName: data[5],
+    category: data[6],
+    userNotes: data[7],
+    originalText: data[8],
+    type: amount < 0 ? 'Expense' : 'Income',
+    emoji: amount < 0 ? '💸' : '💰',
+    formattedAmount: `₹${Math.abs(amount).toLocaleString('en-IN')}`,
+    isComplete: !!(data[6] && data[7])
+  };
 
   return sendJsonResponse(true, {
     transaction,
@@ -763,10 +688,38 @@ function getTransactionsPendingReview(limit) {
 
   const pending = allData
     .map((row, index) => {
-      const transaction = transactionRowToResponse(row, index + 2);
-      const shouldReview = transaction.needsReview || !transaction.isComplete;
+      const amount = row[TX_COL.AMOUNT - 1];
+      const category = row[TX_COL.CATEGORY - 1];
+      const userNotes = row[TX_COL.USER_NOTES - 1];
+      const needsReviewCell = row[TX_COL.NEEDS_REVIEW - 1];
+
+      const isComplete = !!category && !!userNotes;
+      const needsReview =
+        needsReviewCell === true ||
+        String(needsReviewCell).toUpperCase() === 'TRUE';
+
+      const shouldReview = needsReview || !isComplete;
       if (!shouldReview) return null;
-      return transaction;
+
+      const sheetRow = index + 2; // row index in sheet
+
+      return {
+        transactionId: row[TX_COL.ID - 1],
+        sheetRow,
+        dateTime: row[TX_COL.DATETIME - 1],
+        amount,
+        bank: row[TX_COL.BANK - 1],
+        accountType: row[TX_COL.ACCOUNT_TYPE - 1],
+        merchantName: row[TX_COL.MERCHANT - 1],
+        category,
+        userNotes,
+        originalText: row[TX_COL.ORIGINAL_TEXT - 1],
+        type: amount < 0 ? 'Expense' : 'Income',
+        emoji: amount < 0 ? '💸' : '💰',
+        formattedAmount: `₹${Math.abs(amount).toLocaleString('en-IN')}`,
+        isComplete,
+        needsReview: shouldReview
+      };
     })
     .filter(Boolean)
     .reverse()
@@ -804,73 +757,75 @@ function getLastTransactions(limit) {
 
   const numRows = Math.min(limit, lastRow - 1);
   const startRow = lastRow - numRows + 1;
-  const data = sheet.getRange(startRow, 1, numRows, TX_COL.BALANCE_AFTER).getValues();
+  const data = sheet.getRange(startRow, 1, numRows, 9).getValues();
 
   const transactions = data
     .reverse()
-    .map((row, index) => transactionRowToResponse(row, startRow + (numRows - 1 - index)));
+    .map((row, index) => {
+      const amount = row[2];
+      return {
+        transactionId: row[0],
+        sheetRow: startRow + (numRows - 1 - index),
+        dateTime: row[1],
+        amount,
+        bank: row[3],
+        accountType: row[4],
+        merchantName: row[5],
+        category: row[6],
+        userNotes: row[7],
+        originalText: row[8],
+        type: amount < 0 ? 'Expense' : 'Income',
+        emoji: amount < 0 ? '💸' : '💰',
+        formattedAmount: `₹${Math.abs(amount).toLocaleString('en-IN')}`,
+        isComplete: !!(row[6] && row[7])
+      };
+    });
 
   return sendJsonResponse(true, { transactions });
 }
 
 /**
- * Update category and/or user notes for a transaction ID.
+ * Update category and/or user notes for a specific row.
  */
-function updateTransaction(transactionId, category, userNotes) {
-  if (!transactionId) {
-    return sendJsonResponse(false, {
-      errorCode: 'VALIDATION_REQUIRED',
-      message: 'transactionId is required.'
-    });
-  }
-
+function updateTransaction(sheetRowOrId, category, userNotes, patch, reason, actor) {
   const sheet = financeSheet.getSheetByName(TRANSACTION_SHEET_NAME);
-  if (!sheet) {
-    return sendJsonResponse(false, {
-      errorCode: 'SHEET_MISSING',
-      message: "Transaction sheet not found. Create a sheet named 'Transaction Log'."
+  if (!sheet) return sendJsonResponse(false,{errorCode:'SHEET_MISSING',message:'Transaction sheet not found.'});
+
+  let rowNumber = Number(sheetRowOrId);
+  let txnId = '';
+  if (!rowNumber || rowNumber < 2) {
+    txnId = String(sheetRowOrId || (patch && patch.transactionId) || '');
+    rowNumber = findTransactionRowByTxnIdSafe(txnId);
+  } else {
+    txnId = String(sheet.getRange(rowNumber, TX_COL.ID).getValue());
+  }
+  if (rowNumber < 2) return sendJsonResponse(false,{errorCode:'NOT_FOUND',message:'Transaction not found.'});
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const p = patch || {};
+    if (category) p.category = category;
+    if (userNotes !== undefined) p.userNotes = userNotes;
+    const allowed = {category:TX_COL.CATEGORY,userNotes:TX_COL.USER_NOTES,type:TX_COL.TYPE,merchant:TX_COL.MERCHANT,merchantNormalized:TX_COL.MERCHANT_NORMALIZED,subcategory:TX_COL.SUBCATEGORY,needsReview:TX_COL.NEEDS_REVIEW,reviewReason:TX_COL.REVIEW_REASON};
+    const row = sheet.getRange(rowNumber,1,1,TX_COL.FIRST_SEEN_AT).getValues()[0];
+    const requestId = p.requestId || Utilities.getUuid();
+    Object.keys(p).forEach(function(field){
+      if (!allowed[field]) return;
+      if (p[field] === undefined) return;
+      const col = allowed[field];
+      const oldValue = row[col-1];
+      const newValue = p[field];
+      if (String(oldValue) !== String(newValue)) {
+        sheet.getRange(rowNumber,col).setValue(newValue);
+        setChangeLog(txnId, actor || 'user', field, oldValue, newValue, reason || 'user_update', requestId);
+      }
     });
+    sheet.getRange(rowNumber,TX_COL.LAST_UPDATED_AT).setValue(new Date());
+    return sendJsonResponse(true,{message:'Transaction updated successfully!',transactionId:txnId,sheetRow:rowNumber,requestId});
+  } finally {
+    lock.releaseLock();
   }
-
-  const sheetRow = findTransactionRowById(sheet, transactionId);
-  if (!sheetRow) {
-    return sendJsonResponse(false, {
-      errorCode: 'TRANSACTION_NOT_FOUND',
-      message: 'No transaction was found for this transactionId.'
-    });
-  }
-
-  const categories = getCategoryList();
-  if (category && !categories.includes(category)) {
-    return sendJsonResponse(false, {
-      errorCode: 'VALIDATION_CATEGORY',
-      message: `Category must be one of: ${categories.join(', ')}.`
-    });
-  }
-
-  if (category) {
-    sheet.getRange(sheetRow, 7).setValue(category);
-  }
-
-  if (userNotes !== undefined && userNotes !== null) {
-    sheet.getRange(sheetRow, 8).setValue(userNotes);
-  }
-
-  const updated = sheet.getRange(sheetRow, 1, 1, TX_COL.BALANCE_AFTER).getValues()[0];
-  const finalCategory = updated[TX_COL.CATEGORY - 1];
-  const finalType = updated[TX_COL.TYPE - 1];
-  const shouldReview = finalCategory === 'Miscellaneous' || !isSemanticType(finalType);
-  sheet.getRange(sheetRow, TX_COL.NEEDS_REVIEW).setValue(shouldReview);
-  updated[TX_COL.NEEDS_REVIEW - 1] = shouldReview;
-
-  return sendJsonResponse(true, {
-    message: '✅ Transaction updated successfully!',
-    transaction: transactionRowToResponse(updated, sheetRow),
-    isComplete: !!finalCategory &&
-      finalCategory !== 'Miscellaneous' &&
-      isSemanticType(finalType) &&
-      !shouldReview
-  });
 }
 
 /**
@@ -935,24 +890,11 @@ function getMonthlyOverview(menuType) {
     return isNaN(numValue) ? null : numValue;
   }
 
-  function getCell(label, row) {
-    const idx = headers.indexOf(label);
-    return idx === -1 || !row ? null : row[idx];
-  }
+  const monthFromSheet = safeGet('Month', current);
+  const month = (monthFromSheet && monthFromSheet !== '') ? monthFromSheet : getMonthLabel();
 
-  function firstNumeric(labels, row) {
-    for (const label of labels) {
-      const value = safeGet(label, row);
-      if (value !== null) return value;
-    }
-    return 0;
-  }
-
-  const monthFromSheet = getCell('Month', current);
-  const month = monthFromSheet == null || monthFromSheet === '' ? getMonthLabel() : formatMonthLabel(monthFromSheet);
-
-  const leftToSpend = firstNumeric(['Cash Surplus', 'Savings'], current);
-  const totalSpent = firstNumeric(['Consumption Expense', 'Expenses'], current);
+  const leftToSpend = safeGet('Savings', current) || 0;
+  const totalSpent = safeGet('Expenses', current) || 0;
   const creditCardDue = safeGet('CC Due (Net Outstanding)', current) || 0;
   const income = safeGet('Income', current) || 0;
 
@@ -962,21 +904,17 @@ function getMonthlyOverview(menuType) {
 
   let improved = false;
   if (previous) {
-    const prevSpent = firstNumeric(['Consumption Expense', 'Expenses'], previous);
+    const prevSpent = safeGet('Expenses', previous);
     if (totalSpent != null && prevSpent != null && prevSpent > 0) {
       improved = totalSpent < prevSpent;
     }
   }
 
-  const selectedMonth = parseSummaryMonth(monthFromSheet);
   const today = new Date();
-  const isCurrentMonth = selectedMonth &&
-    selectedMonth.getFullYear() === today.getFullYear() &&
-    selectedMonth.getMonth() === today.getMonth();
-  const lastDayOfMonth = isCurrentMonth
-    ? new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate()
-    : 0;
-  const daysLeft = isCurrentMonth ? Math.max(0, lastDayOfMonth - today.getDate()) : 0;
+  const monthNum = today.getMonth();
+  const year = today.getFullYear();
+  const lastDayOfMonth = new Date(year, monthNum + 1, 0).getDate();
+  const daysLeft = Math.max(0, lastDayOfMonth - today.getDate());
   const dailyAverage = (leftToSpend > 0 && daysLeft > 0)
     ? Math.round(leftToSpend / daysLeft)
     : 0;
@@ -1028,30 +966,6 @@ function getMonthLabel() {
   return `${months[today.getMonth()]}-${today.getFullYear().toString().slice(-2)}`;
 }
 
-function parseSummaryMonth(value) {
-  if (value instanceof Date && !isNaN(value.getTime())) {
-    return new Date(value.getFullYear(), value.getMonth(), 1);
-  }
-
-  const text = (value || '').toString().trim();
-  const iso = /^(\d{4})-(\d{2})$/.exec(text);
-  if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, 1);
-
-  const short = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(\d{2}|\d{4})$/i.exec(text);
-  if (!short) return null;
-  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-  const rawYear = Number(short[2]);
-  const year = short[2].length === 2 ? 2000 + rawYear : rawYear;
-  return new Date(year, months.indexOf(short[1].toLowerCase()), 1);
-}
-
-function formatMonthLabel(value) {
-  const month = parseSummaryMonth(value);
-  if (!month) return (value || '').toString();
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  return `${months[month.getMonth()]}-${String(month.getFullYear()).slice(-2)}`;
-}
-
 // =============================
 // 5. MERCHANT & CATEGORY HELPERS
 // =============================
@@ -1059,131 +973,59 @@ function formatMonthLabel(value) {
 function getMerchantName(rawMerchant) {
   if (!rawMerchant || typeof rawMerchant !== 'string') return 'Unknown Merchant';
   const upper = rawMerchant.toUpperCase().trim();
-
   const merchantMap = {
-    'AVENUE SUPE': 'DMart Shopping',
-    'DMART': 'DMart Shopping',
-    'METRO CASH': 'METRO Shopping mall',
-    'RELIANCE FRESH': 'Reliance Fresh',
-    'RELIANCE SMART': 'Reliance Smart',
-    'MORE MEGASTORE': 'More Megastore',
-    'BIGBASKET': 'BigBasket',
-    'BLINKIT': 'Blinkit',
-    'INSTAMART': 'Swiggy Instamart',
-    'ZEPTO': 'Zepto',
-    'SWIGGY': 'Swiggy',
-    'ZOMATO': 'Zomato',
-    'DUNZO': 'Dunzo',
-    'STARBUCKS': 'Starbucks',
-    'CCD': 'Cafe Coffee Day',
-    'MCDONALDS': "McDonald's",
-    'KFC': 'KFC',
-    'DOMINOS': "Domino's",
-    'PIZZA HUT': 'Pizza Hut',
-    'SUBWAY': 'Subway',
-    'AMAZON': 'Amazon Shopping',
-    'FLIPKART': 'Flipkart',
-    'MYNTRA': 'Myntra',
-    'AJIO': 'Ajio',
-    'MEESHO': 'Meesho',
-    'UBER': 'Uber',
-    'OLA': 'Ola',
-    'RAPIDO': 'Rapido',
-    'IRCTC': 'IRCTC',
-    'INDIGO': 'IndiGo',
-    'SPICEJET': 'SpiceJet',
-    'AIRTEL': 'Airtel',
-    'JIO': 'Jio',
-    'VI': 'Vijetha Supermarkets',
-    'BSNL': 'BSNL',
-    'NETFLIX': 'Netflix',
-    'AMAZON PRIME': 'Amazon Prime',
-    'HOTSTAR': 'Disney+ Hotstar',
-    'SPOTIFY': 'Spotify',
-    'YOUTUBE': 'YouTube Premium',
-    'BOOKMYSHOW': 'BookMyShow',
-    'PVR': 'PVR Cinemas',
-    'INOX': 'INOX',
-    'APOLLO': 'Apollo Pharmacy',
-    'PRACTO': 'Practo',
-    'ZERODHA': 'Zerodha',
-    'GROWW': 'Groww',
-    'UPSTOX': 'Upstox',
-    'SI FUND TRANSFER': 'SIP Investment',
-    'NEFT': 'Bank Transfer',
-    'IMPS': 'Instant Transfer',
-    'UPI': 'UPI Payment',
-    'SARADA.': 'Mom',
-    'SUSIL': 'Baba',
-    'SUCHITRA': 'Babu♥',
-    'ASISHKUM': 'SELF',
-    'SARALA': 'Rgda Mom',
-    'SURESH LOHITH': 'H610 Rent',
-    'MEDPLUS': 'Medplus Health Services',
-    'PENUMATSA S': 'Bhavyas Tiffin Center',
-    'VIJAY': 'H610 Garbage Collection',
+    'AVENUE SUPE': 'DMart Shopping','DMART': 'DMart Shopping','METRO CASH': 'METRO Shopping mall',
+    'RELIANCE FRESH': 'Reliance Fresh','RELIANCE SMART': 'Reliance Smart','MORE MEGASTORE': 'More Megastore',
+    'BIGBASKET': 'BigBasket','BLINKIT': 'Blinkit','INSTAMART': 'Swiggy Instamart','ZEPTO': 'Zepto',
+    'SWIGGY': 'Swiggy','ZOMATO': 'Zomato','DUNZO': 'Dunzo','STARBUCKS': 'Starbucks','CCD': 'Cafe Coffee Day',
+    'MCDONALDS': "McDonald's",'KFC': 'KFC','DOMINOS': "Domino's",'PIZZA HUT': 'Pizza Hut','SUBWAY': 'Subway',
+    'AMAZON PRIME': 'Amazon Prime','AMAZON': 'Amazon','FLIPKART': 'Flipkart','MYNTRA': 'Myntra','AJIO': 'Ajio','MEESHO': 'Meesho',
+    'UBER': 'Uber','OLA': 'Ola','RAPIDO': 'Rapido','IRCTC': 'IRCTC','INDIGO': 'IndiGo','SPICEJET': 'SpiceJet',
+    'AIRTEL': 'Airtel','JIO': 'Jio','VIJETHA': 'Vijetha Supermarkets','BSNL': 'BSNL','NETFLIX': 'Netflix',
+    'HOTSTAR': 'Disney+ Hotstar','SPOTIFY': 'Spotify','YOUTUBE': 'YouTube Premium','BOOKMYSHOW': 'BookMyShow',
+    'PVR': 'PVR Cinemas','INOX': 'INOX','APOLLO': 'Apollo Pharmacy','PRACTO': 'Practo','ZERODHA': 'Zerodha',
+    'GROWW': 'Groww','UPSTOX': 'Upstox','SI FUND TRANSFER': 'SIP Investment','NEFT': 'Bank Transfer','IMPS': 'Instant Transfer',
+    'UPI': 'UPI Payment','SARADA.': 'Mom','SUSIL': 'Baba','SUCHITRA': 'Babu♥','ASISHKUM': 'SELF',
+    'SARALA': 'Rgda Mom','SURESH LOHITH': 'H610 Rent','MEDPLUS': 'Medplus Health Services','PENUMATSA S': 'Bhavyas Tiffin Center',
     'HCL': 'HCLTech'
   };
-
-  if (merchantMap[upper]) return merchantMap[upper];
-
-  for (const [key, value] of Object.entries(merchantMap)) {
-    if (upper.includes(key)) return value;
+  const keys = Object.keys(merchantMap).sort((a,b)=>b.length-a.length);
+  for (const key of keys) {
+    const pattern = new RegExp('\\b' + key.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '\\b','i');
+    if (pattern.test(upper)) return merchantMap[key];
   }
-
-  return rawMerchant
-    .split(' ')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(' ');
+  return rawMerchant.split(/\s+/).map(word => word ? word.charAt(0).toUpperCase()+word.slice(1).toLowerCase() : '').join(' ').trim();
 }
 
 function suggestCategory(merchant) {
   if (!merchant || typeof merchant !== 'string') return 'Miscellaneous';
   const lower = merchant.toLowerCase();
-
-  const categories = {
-    'Shopping': /(avenue supe|dmart|reliance fresh|reliance smart|more|bigbasket|blinkit|instamart|zepto|grocer|amazon|flipkart|myntra|shop|mall|store|lifestyle|ajio|meesho)/i,
-    'Food & dining': /(swiggy|zomato|dunzo|restaurant|cafe|food|pizza|burger|starbucks|ccd|mcdonald|kfc|domino|subway|pizza hut)/i,
-    'Transportation': /(uber|ola|rapido|petrol|fuel|metro|irctc|flight|indigo|spicejet|cab|taxi)/i,
-    'Bills & subscription': /(netflix|prime|spotify|hotstar|youtube|electricity|water|gas|internet|airtel|jio|vi\b|bsnl|broadband|recharge)/i,
-    'Healthcare': /(pharma|apollo|medplus|hospital|doctor|medicine|clinic|health|practo)/i,
-    'Investment & savings': /(mutual fund|sip|stock|zerodha|groww|upstox|invest|si fund)/i,
-    'Housing & utilities': /(rent|sarada kumari|house|apartment)/i,
-    'Cash': /(cash|atm|withdrawal)/i,
-    'Credit card payments': /(credit card bill|card bill payment|card bill|card payment|cc payment)/i,
-    'Income': /(salary|income|hcl|payment received|credited)/i
-  };
-
-  for (const [category, pattern] of Object.entries(categories)) {
-    if (pattern.test(lower)) return category;
-  }
-
+  const categories = [
+    ['Bills & subscription', /\b(netflix|amazon prime|spotify|hotstar|youtube|electricity|water|gas|internet|airtel|jio|vi|bsnl|broadband|recharge)\b/i],
+    ['Healthcare', /\b(pharma|apollo|medplus|hospital|doctor|medicine|clinic|health|practo)\b/i],
+    ['Investment & savings', /\b(zerodha|groww|upstox|sip|mutual fund|stock|investment)\b/i],
+    ['Transportation', /\b(uber|ola|rapido|petrol|fuel|metro|irctc|flight|indigo|spicejet|cab|taxi)\b/i],
+    ['Food & dining', /\b(swiggy|zomato|dunzo|restaurant|cafe|food|pizza|burger|starbucks|ccd|mcdonald|kfc|domino|subway|pizza hut)\b/i],
+    ['Shopping', /\b(dmart|reliance fresh|reliance smart|more|bigbasket|blinkit|instamart|zepto|amazon|flipkart|myntra|shop|mall|store|lifestyle|ajio|meesho)\b/i],
+    ['Housing & utilities', /\b(rent|house|apartment|maintenance|utility)\b/i],
+    ['Cash', /\b(cash|atm|withdrawal)\b/i],
+    ['Credit card payments', /\b(credit card bill|card bill payment|card bill|cc payment)\b/i],
+    ['Income', /\b(salary|income)\b/i]
+  ];
+  for (const [category, pattern] of categories) if (pattern.test(lower)) return category;
   return 'Miscellaneous';
 }
 
 function isCreditCardPayment(originalText, accountType, bank, merchant) {
   const text = (originalText || '').toLowerCase();
   const acct = (accountType || '').toLowerCase();
-  const merch = (merchant || '').toLowerCase();
-  const b = (bank || '').toLowerCase();
+  if (/(spent|purchase|txn\s+of|debited\s+for)\b/i.test(text) && /credit\s*card/i.test(acct + ' ' + text)) return false;
 
-  const directPatterns = /(credit card bill|card bill payment|card bill|card payment|cc payment|payment towards your .*credit card|thanks for paying your credit card bill)/i;
-  if (directPatterns.test(text)) return true;
+  const explicitSettlement = /(credit\s*card\s*(bill|payment|outstanding)|card\s*bill\s*(payment|paid)|payment\s+(towards|toward|against)\s+.*credit\s*card|paid\s+.*credit\s*card\s+bill)/i;
+  if (!explicitSettlement.test(text)) return false;
 
-  const issuerPatterns = /(sbi cards?|axis ?bank ?card|hdfc(card)?|icici ?card|kotak ?card|credit ?card)/i;
-  if (issuerPatterns.test(text) && /(upi|imps|neft|internet banking|saving|savings)/i.test(text + ' ' + acct)) {
-    return true;
-  }
-
-  if (/(sbi cards?|axis ?bank|hdfc|icici|kotak)/i.test(merch) && /(card)/i.test(text + ' ' + merch)) {
-    return true;
-  }
-
-  if (issuerPatterns.test(text) && /(paid|payment|bill)/i.test(text)) {
-    return true;
-  }
-
-  return false;
+  const fundingSource = /(upi|imps|neft|rtgs|internet\s*banking|savings?\s*(account|a\/c)|a\/c)/i.test(text + ' ' + acct);
+  return fundingSource || /card_payment/i.test(text);
 }
 
 // =============================
@@ -1198,67 +1040,6 @@ function generateProgressBar(percentSpent) {
   const emptyBlocks = 6 - filledBlocks;
 
   return '█'.repeat(filledBlocks) + '░'.repeat(emptyBlocks) + ` ${clampedPercent}%`;
-}
-
-function isSemanticType(value) {
-  return SEMANTIC_TYPES.includes((value || '').toString().trim().toLowerCase());
-}
-
-function getTypeLabel(type) {
-  const labels = {
-    income: 'Income',
-    expense: 'Expense',
-    transfer: 'Transfer',
-    card_payment: 'Card payment',
-    investment: 'Investment',
-    refund: 'Refund'
-  };
-  return labels[(type || '').toString().toLowerCase()] || 'Unclassified';
-}
-
-function normalizeUnknownValue(value) {
-  const text = (value || '').toString().trim();
-  return /^(na|n\/a|unknown|null|-)?$/i.test(text) ? '' : text;
-}
-
-function getBoundedLimit(value, defaultValue) {
-  const parsed = parseInt(value, 10);
-  if (isNaN(parsed) || parsed < 1) return defaultValue;
-  return Math.min(parsed, 100);
-}
-
-/**
- * Parse the one date format accepted from the parser and manual capture.
- * Constructing the date numerically avoids host-dependent string parsing.
- */
-function parseCanonicalDateTime(value) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/.exec((value || '').toString().trim());
-  if (!match) return null;
-
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const hour = Number(match[4]);
-  const minute = Number(match[5]);
-  const second = Number(match[6]);
-  const date = new Date(year, month - 1, day, hour, minute, second);
-
-  if (
-    date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day ||
-    date.getHours() !== hour || date.getMinutes() !== minute || date.getSeconds() !== second
-  ) return null;
-
-  return date;
-}
-
-function toDateKey(value) {
-  if (value instanceof Date && !isNaN(value.getTime())) {
-    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
-  }
-
-  const parsed = parseCanonicalDateTime(value);
-  if (!parsed) return '';
-  return Utilities.formatDate(parsed, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
 }
 
 function formatCurrency(value) {
@@ -1365,8 +1146,6 @@ function toValidDate(value) {
   if (value instanceof Date && !isNaN(value.getTime())) {
     return value;
   }
-  const canonical = parseCanonicalDateTime(value);
-  if (canonical) return canonical;
   const d = new Date(value);
   if (!isNaN(d.getTime())) {
     return d;
@@ -1381,11 +1160,14 @@ function toValidDate(value) {
 function toNumber(value) {
   if (typeof value === 'number') return value;
   if (value == null) return NaN;
-  const cleaned = value
-    .toString()
-    .replace(/[^0-9.\-]/g, '');
+  let s = value.toString().trim();
+  let negative = false;
+  if (/^\(.*\)$/.test(s)) { negative = true; s = s.slice(1, -1); }
+  if (/-$/.test(s)) { negative = true; s = s.slice(0, -1); }
+  const cleaned = s.replace(/[^0-9.]/g, '');
   const num = parseFloat(cleaned);
-  return isNaN(num) ? NaN : num;
+  if (isNaN(num)) return NaN;
+  return negative ? -num : num;
 }
 
 /**
@@ -1412,7 +1194,7 @@ function generateTransactionId(dateValue) {
   current += 1;
   props.setProperty(propKey, String(current));
 
-  const seqStr = String(current).padStart(3, '0');
+  const seqStr = ('000' + current).slice(-3);
   return `${periodKey}-${seqStr}`;
 }
 
@@ -1422,17 +1204,15 @@ function generateTransactionId(dateValue) {
 function normalizeType(rawType) {
   const t = (rawType || '').toString().trim().toLowerCase();
   if (!t) return '';
-
   if (t.includes('💰')) return 'income';
   if (t.includes('💵') || t.includes('💸')) return 'expense';
-
+  if (t === 'income' || t === 'expense' || t === 'transfer' || t === 'card_payment' || t === 'investment' || t === 'refund') return t;
   if (t.includes('income')) return 'income';
-  if (t.includes('expense') || t.includes('expenses') || t.includes('spend') || t.includes('debit')) {
-    return 'expense';
-  }
-
-  if (t === 'income' || t === 'expense') return t;
-
+  if (t.includes('expense') || t.includes('expenses') || t.includes('spend') || t.includes('debit')) return 'expense';
+  if (t.includes('transfer')) return 'transfer';
+  if (t.includes('investment')) return 'investment';
+  if (t.includes('refund')) return 'refund';
+  if (t.includes('card_payment') || t.includes('card payment')) return 'card_payment';
   return '';
 }
 
@@ -1451,7 +1231,7 @@ function sendJsonResponse(success, obj) {
  * Load configurable suggestion rules from "Suggestion Rules" sheet.
  */
 function getSuggestionRules() {
-  const sheet = financeSheet.getSheetByName(SUGGESTION_RULES_SHEET_NAME);
+  const sheet = financeSheet.getSheetByName(SUGGESTION_RULES_SHEETNAME);
   if (!sheet) return [];
 
   const values = sheet.getDataRange().getValues();
@@ -1461,10 +1241,10 @@ function getSuggestionRules() {
 
   for (let i = 1; i < values.length; i++) {
     const row = values[i];
-    const enabled = row[0].toString().trim().toUpperCase() === 'Y';
+    const enabled = (row[0] || '').toString().trim().toUpperCase() === 'Y';
     if (!enabled) continue;
 
-    const matchType = row[1].toString().trim().toUpperCase(); // AMOUNT / MERCHANT / AMOUNTMERCHANT
+    const matchType = (row[1] || '').toString().trim().toUpperCase().replace(/[^A-Z]/g, '');
     const amount = toNumber(row[2]);
     const merchantContains = row[3].toString().trim();
     const category = row[4].toString().trim() || 'Miscellaneous';
@@ -1533,27 +1313,32 @@ function getConfigRecords() {
 }
 
 function applyConfigToTransaction(parsed) {
-  const bankLower = (parsed.bank || '').toLowerCase();
-  const acctLower = (parsed.accountType || '').toLowerCase();
-  const merchLower = (parsed.merchantName || '').toLowerCase();
-  const textLower = (parsed.originalText || '').toLowerCase();
-
+  const bankLower = String(parsed.bank || '').toLowerCase();
+  const acctLower = String(parsed.accountType || '').toLowerCase();
+  const merchLower = String(parsed.merchantName || '').toLowerCase();
+  const textLower = String(parsed.originalText || '').toLowerCase();
   const configs = getConfigRecords();
 
-  for (const cfg of configs) {
+  parsed._rulesApplied = Array.isArray(parsed._rulesApplied) ? parsed._rulesApplied : [];
+  let matched = false;
+
+  for (let i = 0; i < configs.length; i++) {
+    const cfg = configs[i];
     if (cfg.bank && !bankLower.includes(cfg.bank)) continue;
     if (cfg.accountTypePattern && !acctLower.includes(cfg.accountTypePattern)) continue;
     if (cfg.merchantPattern && !merchLower.includes(cfg.merchantPattern)) continue;
     if (cfg.textPattern && !textLower.includes(cfg.textPattern)) continue;
 
+    matched = true;
+    parsed._rulesApplied.push('CONFIG_' + (i + 1));
     if (cfg.account) parsed.account = cfg.account;
     if (cfg.cardName) parsed.cardName = cfg.cardName;
-    if (cfg.instrument && !parsed.instrument) parsed.instrument = cfg.instrument;
-    parsed.isInternalAccount = cfg.isInternalAccount;
-
-    return parsed;
+    if (cfg.instrument) parsed.instrument = cfg.instrument;
+    if (cfg.isInternalAccount && !parsed.type) parsed.type = 'transfer';
+    if (cfg.isInternalAccount) parsed.isInternalAccount = true;
   }
 
+  parsed._configMatched = matched;
   return parsed;
 }
 
@@ -1589,7 +1374,7 @@ function getKnownTransactionSuggestion(amount, merchantName, dateValue) {
   const rules = getSuggestionRules();
 
   for (const rule of rules) {
-    const mt = rule.matchType.toUpperCase();
+    const mt = String(rule.matchType || '').toUpperCase().replace(/[^A-Z]/g, '');
 
     if (mt === 'AMOUNT') {
       if (Math.abs(rule.amount - absAmt) > 0.0001) continue;
@@ -1604,6 +1389,7 @@ function getKnownTransactionSuggestion(amount, merchantName, dateValue) {
 
     const notes = applyNotesTemplate(rule.notesTemplate, d, rule.monthOffset);
     return {
+      ruleId: 'SUGGESTION_' + (rules.indexOf(rule) + 1),
       category: rule.category || 'Miscellaneous',
       merchantOverride: rule.merchantOverride || '',
       notes: notes || '',
@@ -1615,4 +1401,179 @@ function getKnownTransactionSuggestion(amount, merchantName, dateValue) {
   }
 
   return null;
+}
+
+
+// ============================================================
+// v3.0 MIGRATION HELPERS
+// ============================================================
+
+function getSchemaHeaders() {
+  return [
+    'Transaction ID','DateTime','Amount','Bank','Account Type','Merchant','Category','User Notes','Original Text',
+    'Type','Instrument','Account','Card Name','Is Recurring','Needs Review','Counterparty','Ref No','Balance After',
+    'Created At','Last Updated At','Source Hash','Source ID','Review Reason','Type Source','Type Confidence','Category Source',
+    'Rules Applied','Schema Version','Match Key','Merchant Normalized','Subcategory','Parser Confidence','Verification Status',
+    'Verification Source','Verified At','Source Count','First Seen At'
+  ];
+}
+
+function ensureV3Headers(sheet) {
+  const headers = getSchemaHeaders();
+  if (sheet.getLastColumn() < headers.length) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  } else {
+    const current = sheet.getRange(1, 1, 1, headers.length).getValues()[0];
+    const mismatch = headers.some((h, i) => current[i] !== h && !(i < 18 && current[i]));
+    if (mismatch) throw new Error('Transaction Log schema mismatch. Run the spreadsheet migration before deploying v3.0.');
+  }
+}
+
+function ensureSourceLog() {
+  let sheet = financeSheet.getSheetByName(SOURCE_LOG_SHEET_NAME);
+  if (!sheet) sheet = financeSheet.insertSheet(SOURCE_LOG_SHEET_NAME);
+  const headers = ['Source ID','Linked Txn ID','Source Type','Received At','Sender','Subject','Raw Body','Parser Version','Parse Status','Parse Result','Source Hash','Ref No','Candidate Txn IDs','Match Status','Match Confidence','Request ID','Idempotency Key','Created At'];
+  if (sheet.getLastRow() === 0) sheet.getRange(1,1,1,headers.length).setValues([headers]);
+  return sheet;
+}
+
+function ensureChangeLog() {
+  let sheet = financeSheet.getSheetByName(CHANGE_LOG_SHEET_NAME);
+  if (!sheet) sheet = financeSheet.insertSheet(CHANGE_LOG_SHEET_NAME);
+  const headers = ['Change ID','Transaction ID','Changed At','Actor','Field','Old Value','New Value','Reason','Request ID'];
+  if (sheet.getLastRow() === 0) sheet.getRange(1,1,1,headers.length).setValues([headers]);
+  return sheet;
+}
+
+function sha256Hex(text) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text || '', Utilities.Charset.UTF_8);
+  return bytes.map(function(b){ const v=(b<0?b+256:b).toString(16); return v.length===1?'0'+v:v; }).join('');
+}
+
+function generateSourceId() {
+  return 'SRC-' + Utilities.getUuid();
+}
+
+function buildMatchKey(parsed) {
+  const ref = String(parsed.refNo || '').trim().toLowerCase();
+  if (ref) return 'REF|' + String(parsed.bank || '').trim().toLowerCase() + '|' + ref;
+  const dt = toValidDate(parsed.dateTime);
+  const day = Utilities.formatDate(dt, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return ['FP', String(parsed.bank||'').trim().toLowerCase(), String(parsed.accountType||'').trim().toLowerCase(),
+    Number(parsed.amount).toFixed(2), getMerchantName(parsed.merchantName||'').toLowerCase(), day, String(parsed.type||'').toLowerCase()].join('|');
+}
+
+function setChangeLog(txnId, actor, field, oldValue, newValue, reason, requestId) {
+  const sheet = ensureChangeLog();
+  sheet.appendRow([Utilities.getUuid(), txnId, new Date(), actor || 'system', field, oldValue == null ? '' : oldValue, newValue == null ? '' : newValue, reason || '', requestId || '']);
+}
+
+function findTransactionRowByTxnIdSafe(txnId) {
+  const sheet = financeSheet.getSheetByName(TRANSACTION_SHEET_NAME);
+  if (!sheet || !txnId) return -1;
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return -1;
+  const values = sheet.getRange(2, TX_COL.ID, lastRow - 1, 1).getValues();
+  for (let i=0;i<values.length;i++) if (String(values[i][0]) === String(txnId)) return i+2;
+  return -1;
+}
+
+function findBySourceHash(hash) {
+  const sheet = financeSheet.getSheetByName(TRANSACTION_SHEET_NAME);
+  if (!sheet || !hash || sheet.getLastRow() <= 1 || sheet.getLastColumn() < TX_COL.SOURCE_HASH) return null;
+  const values = sheet.getRange(2, TX_COL.SOURCE_HASH, sheet.getLastRow()-1, 1).getValues();
+  for (let i=0;i<values.length;i++) if (String(values[i][0]) === hash) return i+2;
+  return null;
+}
+
+function appendSourceLog(source) {
+  const sheet = ensureSourceLog();
+  sheet.appendRow([
+    source.sourceId || generateSourceId(), source.txnId || '', source.sourceType || 'SMS', source.receivedAt || new Date(),
+    source.sender || '', source.subject || '', source.rawBody || '', source.parserVersion || PARSER_FORMAT_VERSION,
+    source.parseStatus || 'PARSED', source.parseResult || '', source.sourceHash || '', source.refNo || '',
+    source.candidateTxnIds || '', source.matchStatus || 'UNMATCHED', source.matchConfidence == null ? '' : source.matchConfidence,
+    source.requestId || '', source.idempotencyKey || '', new Date()
+  ]);
+}
+
+function markVerification(sheetRow, status, source, reason) {
+  const now = new Date();
+  sheet.getRange(sheetRow, TX_COL.VERIFICATION_STATUS).setValue(status);
+  sheet.getRange(sheetRow, TX_COL.VERIFICATION_SOURCE).setValue(source || '');
+  sheet.getRange(sheetRow, TX_COL.VERIFIED_AT).setValue(status === 'Verified' ? now : '');
+  if (reason) sheet.getRange(sheetRow, TX_COL.REVIEW_REASON).setValue(reason);
+  sheet.getRange(sheetRow, TX_COL.LAST_UPDATED_AT).setValue(now);
+}
+
+function updateVerificationFromSourceMatch(txnRow, parsedEmail) {
+  const sheet = financeSheet.getSheetByName(TRANSACTION_SHEET_NAME);
+  const values = sheet.getRange(txnRow,1,1,TX_COL.FIRST_SEEN_AT).getValues()[0];
+  const sameAmount = Math.abs(toNumber(values[TX_COL.AMOUNT-1]) - toNumber(parsedEmail.amount)) < 0.01;
+  const sameRef = String(values[TX_COL.REF_NO-1] || '').trim() && String(parsedEmail.refNo || '').trim() && String(values[TX_COL.REF_NO-1]).trim() === String(parsedEmail.refNo).trim();
+  const sameBank = String(values[TX_COL.BANK-1]).trim().toLowerCase() === String(parsedEmail.bank).trim().toLowerCase();
+  const merchantOld = String(values[TX_COL.MERCHANT_NORMALIZED-1] || values[TX_COL.MERCHANT-1] || '').trim().toLowerCase();
+  const merchantNew = String(getMerchantName(parsedEmail.merchantName||'')).trim().toLowerCase();
+  const merchantCompatible = !merchantNew || merchantNew === 'unspecified' || merchantOld === merchantNew || merchantOld.includes(merchantNew) || merchantNew.includes(merchantOld);
+  const verified = sameAmount && sameBank && (sameRef || merchantCompatible);
+  const source = String(values[TX_COL.VERIFICATION_SOURCE-1] || '').trim();
+  markVerification(txnRow, verified ? 'Verified' : 'Conflict', source ? source + '+EMAIL' : 'SMS+EMAIL', verified ? '' : 'source_conflict');
+  return verified;
+}
+
+function ingestSecondarySource(params) {
+  const rawText = params.originalText || params.sourceBody || '';
+  const txnString = params.txnString || '';
+  const sourceType = (params.sourceType || 'EMAIL').toString().toUpperCase();
+  const requestId = params.requestId || Utilities.getUuid();
+  const idempotencyKey = params.idempotencyKey || sha256Hex(sourceType + '|' + rawText);
+  const sourceHash = sha256Hex((rawText || '').trim().replace(/\\s+/g,' '));
+  const dupRow = findBySourceHash(sourceHash);
+  if (dupRow) return sendJsonResponse(true, {duplicate:true, transactionId: financeSheet.getSheetByName(TRANSACTION_SHEET_NAME).getRange(dupRow,TX_COL.ID).getValue(), requestId});
+
+  const parsed = parseTransactionString(txnString, rawText);
+  if (parsed.error) return sendJsonResponse(false, {errorCode:'TXN_PARSE_ERROR', message:'Transaction text could not be parsed', error:parsed.error, requestId});
+
+  const sheet = financeSheet.getSheetByName(TRANSACTION_SHEET_NAME);
+  ensureV3Headers(sheet);
+  const candidates = isLikelyDuplicateTransaction(sheet, parsed);
+  if (candidates.row) {
+    const existingId = sheet.getRange(candidates.row, TX_COL.ID).getValue();
+    const verified = updateVerificationFromSourceMatch(candidates.row, parsed);
+    const sourceCount = Number(sheet.getRange(candidates.row, TX_COL.SOURCE_COUNT).getValue() || 0) + 1;
+    sheet.getRange(candidates.row, TX_COL.SOURCE_COUNT).setValue(sourceCount);
+    appendSourceLog({sourceId:generateSourceId(),txnId:existingId,sourceType,rawBody:rawText,sourceHash,refNo:parsed.refNo,matchStatus:verified?'MATCHED':'CONFLICT',matchConfidence:candidates.exact?1:0.8,requestId,idempotencyKey});
+    return sendJsonResponse(true,{transactionId:existingId,reconciled:true,verified,requestId});
+  }
+
+  return handleRawTransaction(txnString, rawText, sourceType);
+}
+function applyConfigToTransaction(parsed) {
+  const bankLower = String(parsed.bank || '').toLowerCase();
+  const acctLower = String(parsed.accountType || '').toLowerCase();
+  const merchLower = String(parsed.merchantName || '').toLowerCase();
+  const textLower = String(parsed.originalText || '').toLowerCase();
+  const configs = getConfigRecords();
+
+  parsed._rulesApplied = Array.isArray(parsed._rulesApplied) ? parsed._rulesApplied : [];
+  let matched = false;
+
+  for (let i = 0; i < configs.length; i++) {
+    const cfg = configs[i];
+    if (cfg.bank && !bankLower.includes(cfg.bank)) continue;
+    if (cfg.accountTypePattern && !acctLower.includes(cfg.accountTypePattern)) continue;
+    if (cfg.merchantPattern && !merchLower.includes(cfg.merchantPattern)) continue;
+    if (cfg.textPattern && !textLower.includes(cfg.textPattern)) continue;
+
+    matched = true;
+    parsed._rulesApplied.push('CONFIG_' + (i + 1));
+    if (cfg.account) parsed.account = cfg.account;
+    if (cfg.cardName) parsed.cardName = cfg.cardName;
+    if (cfg.instrument) parsed.instrument = cfg.instrument;
+    if (cfg.isInternalAccount && !parsed.type) parsed.type = 'transfer';
+    if (cfg.isInternalAccount) parsed.isInternalAccount = true;
+  }
+
+  parsed._configMatched = matched;
+  return parsed;
 }

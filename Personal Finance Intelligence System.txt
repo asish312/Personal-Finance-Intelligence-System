@@ -1,3 +1,7 @@
+# Archived design snapshot
+
+> Superseded by `Personal_Finance_Intelligence_System.md`. This file is retained as historical context only; it describes a legacy schema and a `doPost`-based flow that are not the current implementation contract.
+
 A free and automated system that records every income and expense transaction from an iPhone, stores it in Google Sheets, and produces monthly summaries and rich analytics that show exactly where money comes from and where it goes. The design targets Indian banking, where most spending happens through UPI, credit cards, debit cards, and auto debits, and where bank SMS alerts are the main signal for every transaction.
 Goal
 Capture each transaction with very little effort, keep one clean history of all money movement, and compute monthly and category level analytics that answer where money is actually going, which bank account and which credit card it flows through, and how spending changes from month to month.

@@ -1,483 +1,459 @@
 # Personal Finance Intelligence System
 
-A free and automated system that records every income and expense transaction from an iPhone, stores it in Google Sheets, and produces monthly summaries and rich analytics that show exactly where money comes from and where it goes. The design targets Indian banking, where most spending happens through UPI, credit cards, debit cards, and auto debits, and where bank SMS alerts are the main signal for every transaction.
+> A personal financial memory system: capture reliable events first, let the user correct them easily, and add retrieval, reasoning, and proactive help in small safe steps.
+
+**Status:** rewritten implementation plan, October 2026
+**Primary objective:** make finance logging dependable and editable now; preserve enough structure and evidence for an agentic, scalable system later.
 
 ---
 
-## Goal
+## 1. Product direction
 
-Capture each transaction with very little effort, keep one clean history of all money movement, and compute monthly and category-level analytics that answer:
+This is not primarily an expense tracker or a Gemini reporting tool. It is a personal financial history that can eventually answer:
 
-- Where money is actually going
-- Which bank account and which credit card it flows through
-- How spending changes from month to month
+> What happened? Why did it happen? Is it normal? What changed? What should I consider doing?
+
+The sequence matters:
+
+```text
+Reliable capture → editable ledger → deterministic summaries → retrieval API
+→ cited answers → saved insights/context → simulations and selective alerts
+```
+
+Do not introduce autonomous financial actions, a vector database, multi-agent frameworks, or broad “chat with the whole Sheet” behaviour before the earlier layers work.
 
 ---
 
-## Architecture Overview
+## 2. What exists today
 
-Each transaction is sent as a single pipe-delimited line from an iPhone Shortcut to a Google Apps Script web app. The Shortcut can build the line from a parsed bank SMS or from a quick manual entry. Apps Script splits the line, normalizes it, and appends it as one row in a transactions sheet. A monthly job then aggregates all transactions into a monthly summary, a per-card summary, and a per-account summary, and computes month-over-month changes. Questions about spending are answered by reading these summaries, and later by a language model that reasons over them.
+The repository already has a practical ingestion foundation.
 
----
+| Component | Current capability | Keep / change |
+| --- | --- | --- |
+| `Prompt.txt` | Gemini extracts one completed Indian bank/UPI/card/wallet event into nine strict fields, or returns `IGNORE`. | Keep the constrained role. Add `balance_after` only when the script is ready to accept the ten-field contract. |
+| `TrasactionParser.gs` | Apps Script accepts raw parsed transactions and manual entries; creates IDs; stores an 18-column ledger; detects likely duplicates; applies Config and Suggestion Rules; supports review, edits, recent transactions, and a monthly overview. | Treat it as the first ledger service. Harden its validation and edit/audit model before adding intelligence. |
+| `Transaction Log` | Has IDs, date, signed amount, bank, merchant, category, notes, raw text, semantic type, instrument/account/card mapping, recurring/review flags, counterparty, reference and balance columns. | Keep it as the initial fact ledger. Make its schema and all readers consistent. |
+| `CONFIG` and `Suggestion Rules` | Configure account/card mapping, known transaction patterns, categories, recurring transactions, and note templates. | Keep; this is the correct human-controlled learning mechanism. |
+| `Monthly Summary` | Is exposed to Shortcuts through a simple overview endpoint. | Rebuild from the ledger using explicitly defined metrics; do not rely on ambiguous column names. |
 
-## Architecture Diagram
+### Important current gaps
 
-```mermaid
-flowchart TD
-    subgraph CAPTURE["📱 iPhone — Capture Layer"]
-        SMS["Bank SMS"]
-        MANUAL["Manual Entry"]
-        SHORTCUT["iPhone Shortcut\n(build pipe-delimited line)"]
-        SMS --> SHORTCUT
-        MANUAL --> SHORTCUT
-    end
+These are implementation tasks, not reasons to redesign everything:
 
-    subgraph INGEST["⚙️ Google Apps Script — Engine Layer"]
-        DOPOST["doPost Web App\n(receive POST body)"]
-        SPLIT["Split on pipe · Trim · Map to columns"]
-        DEDUP["Build txn_id · Deduplicate"]
-        NORMALIZE["Normalize via CONFIG\n(bank, card, merchant rules)"]
-        APPEND["Append row → TRANSACTIONS"]
-        DOPOST --> SPLIT --> DEDUP --> NORMALIZE --> APPEND
-    end
-
-    subgraph SHEETS["📊 Google Sheets — Storage Layer"]
-        TXN[("TRANSACTIONS\nSource of truth\nAppend-only · 1 row per txn")]
-        MONTHLY[("MONTHLY\n1 row per month\nIncome · Expense · Savings\nInvestments · Category totals\nMoM change")]
-        CARDS[("CARDS\n1 row per card per month\nSpend by card · MoM change")]
-        ACCOUNTS[("ACCOUNTS\n1 row per account per month\nInflow · Outflow")]
-        CONFIG[("CONFIG\nBanks · Cards · Accounts\nCategories · Merchant rules\nMonthly budgets")]
-    end
-
-    subgraph SCHEDULER["⏰ Scheduled Jobs"]
-        MONTHLY_JOB["Monthly Aggregation Job\n(near end of month)"]
-        MANUAL_REBUILD["Manual Rebuild\n(recompute all summaries)"]
-        MONTHLY_JOB --> MONTHLY
-        MONTHLY_JOB --> CARDS
-        MONTHLY_JOB --> ACCOUNTS
-        MANUAL_REBUILD --> MONTHLY
-        MANUAL_REBUILD --> CARDS
-        MANUAL_REBUILD --> ACCOUNTS
-    end
-
-    subgraph AI["🤖 AI & Alerts Layer"]
-        LLM["Hosted LLM API\n(categorization + Q&A)"]
-        ALERTS["Push Notification Service\n(unusual or large spend)"]
-    end
-
-    SHORTCUT -->|POST pipe-delimited line| DOPOST
-    APPEND --> TXN
-    TXN --> MONTHLY_JOB
-    CONFIG --> NORMALIZE
-    TXN --> LLM
-    MONTHLY --> LLM
-    APPEND --> ALERTS
-    LLM -->|Answer| SHORTCUT
-```
+1. Some read endpoints retrieve only the original nine columns, although the ledger now contains eighteen. They must return the stored semantic `Type`, not infer type from the amount sign.
+2. `Needs Review` currently becomes true when notes are blank. Notes are optional; review should mean uncertainty, conflict, or missing information that affects correctness.
+3. Row numbers are used for edits. They are fragile after sorting or inserting rows. The public update contract should use `transactionId` and resolve the row server-side.
+4. Duplicate detection should first use a deterministic source/reference key, then use a conservative probable-match rule. Exact recent date/amount/bank/merchant matching alone is not enough for SMS/email reconciliation.
+5. The raw message is valuable evidence, but it will eventually make the analytical ledger heavy. Add a `Source Log` before the history gets large; retain a temporary compatibility copy during migration.
+6. The prompt returns nine fields while the design previously proposed ten. Do not change the contract halfway: ship the ten-field parser and script validation together, or leave both at nine fields for now.
+7. The monthly overview currently mixes summary terminology and calendar assumptions. It must calculate a selected period from defined ledger rows, then present it.
+8. A deployed web app must require a request secret or signed request, rate-limit public calls where possible, and never return raw evidence by default.
 
 ---
 
-## Components
+## 3. Non-negotiable design rules
 
-| Component | Role |
-|---|---|
-| iPhone Shortcut | Captures or pastes a transaction and sends it to the web app |
-| Google Apps Script Web App | Engine that ingests, normalizes, and aggregates data |
-| Google Sheets | Structured storage with tabs for raw data, summaries, and config |
-| Hosted LLM API | Categorization assistance and natural language Q&A |
-| Push Notification Service | Alerts on large or unusual spends (optional) |
-
----
-
-## Storage Layout
-
-The Google Sheet separates raw records from computed summaries.
-
-### TRANSACTIONS
-- Source of truth
-- Append-only, one row per transaction
-- Never edited by hand
-
-### MONTHLY
-- One row per month
-- Totals for income, expense, savings, investments, and every spending category
-- Month-over-month changes
-
-### CARDS
-- One row per credit card per month
-- Spending on each card can be compared across months
-
-### ACCOUNTS
-- One row per bank account per month
-- Inflow and outflow per account is clear
-
-### CONFIG
-- Known banks, accounts, cards, categories, merchant rules, and monthly budgets
-- Keeping these in a tab lets behavior change without editing code
+1. **The ledger records facts; the evidence supports facts; insights interpret facts.** These are separate data types.
+2. **LLMs propose; deterministic code validates and commits.** Gemini may extract, classify, plan a permitted query, or draft an explanation. Apps Script validates types, categories, IDs, ownership, and writes.
+3. **Every change is editable and attributable.** A correction is normal behaviour, not a failure. Preserve the original and record the correction.
+4. **Never count movement as consumption.** `transfer`, `card_payment`, `investment`, and `refund` have distinct meanings and must not silently become expenses or income.
+5. **Retrieve narrowly.** Answer a question from an aggregation or a bounded set of relevant transactions, not from the entire spreadsheet.
+6. **Evidence is private by default.** Raw SMS/email is only retrieved when an answer needs an explanation or verification.
+7. **Automation should be reversible.** Alerts recommend or request confirmation; they do not alter transactions, budgets, goals, or money movement by themselves.
+8. **Optimise for useful friction.** Ask the user only for context that a notification cannot know, such as the purpose of an ambiguous transfer.
 
 ---
 
-## The Most Important Rule
+## 4. Architecture: now and later
 
-Accurate analytics depend on not double-counting money that only moves between your own places. Three flows must be tagged and kept out of the spending totals.
+```text
+Capture surfaces
+iPhone Shortcut / manual form / SMS or email alert
+                  │
+                  ▼
+Ingestion service (Apps Script)
+validate → normalize → deduplicate → append/change-audit → review signal
+                  │
+       ┌──────────┴──────────┐
+       ▼                     ▼
+Fact ledger              Evidence store
+Transaction Log          Source Log
+       │                     │
+       └──────────┬──────────┘
+                  ▼
+Deterministic derived data
+monthly/merchant/recurring summaries, review queue, metrics
+                  │
+                  ▼
+Retrieval API (bounded data + citations)
+                  │
+                  ▼
+Gemini reasoning and response generation
+                  │
+       ┌──────────┴──────────┐
+       ▼                     ▼
+Answer only          Proposed action for user approval
+```
 
-1. **Transfer** — A transfer between your own accounts is not income and not expense.
-2. **Card Payment** — A credit card bill payment from a bank account is not a new expense, because the real spends were already recorded when each purchase happened on the card.
-3. **Refund** — A refund or reversal reduces the original expense rather than adding income.
-
-Every transaction therefore carries a `type` that marks whether it is `income`, `expense`, `transfer`, `card_payment`, `investment`, or `refund`, and **only true income and true expense feed the spending and savings analytics.**
+Apps Script is the control plane and policy boundary. Google Sheets is durable structured memory. Gemini is a constrained extraction and reasoning service, not the system of record. Apple Shortcuts is a capture/conversation surface, not a database.
 
 ---
 
-## Transaction Data Model
+## 5. Memory model
 
-Each transaction is one flat row in TRANSACTIONS.
+Use the right storage for each job. This is the first form of RAG; it does not need embeddings.
 
-| Field | Description |
-|---|---|
-| `txn_id` | Unique ID used to avoid storing the same transaction twice |
-| `datetime` | Date and time of the transaction |
-| `amount` | Value as a positive number |
-| `direction` | `debit` or `credit` — money out or money in |
-| `type` | One of `income`, `expense`, `transfer`, `card_payment`, `investment`, or `refund` |
-| `instrument` | How money moved: UPI, Credit Card, Debit Card, Net Banking, NEFT/IMPS, Auto Debit/Mandate, Wallet, or Cash |
-| `bank` | Bank involved: HDFC, ICICI, SBI, Axis, Kotak, etc. |
-| `account` | Nickname or last four digits of the account used |
-| `account_type` | Savings, Current, Credit Card, Wallet, or Cash |
-| `card_name` | Specific credit card used (e.g., HDFC Millennia, Axis Flipkart); empty when no card is involved |
-| `merchant` | Payee or merchant name |
-| `category` | Main spending or income category |
-| `subcategory` | Optional finer label |
-| `counterparty` | UPI ID or account on the other side, when available |
-| `ref_no` | UPI reference or bank reference number; useful for deduplication |
-| `balance_after` | Account balance after the transaction when the SMS provides it |
-| `is_recurring` | Flag for known recurring payments such as rent, EMI, or subscriptions |
-| `needs_review` | Flag set when the category is uncertain and should be confirmed later |
-| `user_notes` | Short free-text note |
-| `original_message` | Raw bank SMS or source text, kept for reference and later reparsing |
+| Memory | Purpose | Initial storage | Write authority |
+| --- | --- | --- | --- |
+| Fact memory | Events that actually happened: transactions and verified fields. | `Transaction Log` | Apps Script after validation; user corrections |
+| Evidence memory | Original SMS/email/manual input and parse provenance. | `Source Log` | Ingestion service |
+| Derived memory | Summaries, merchant patterns, recurring candidates, deterministic metrics. | Summary sheets | Scheduled/rebuild code only |
+| Personal memory | Goals, preferences, explanations, and decision commitments supplied by the user. | Dedicated tables | User-confirmed updates only |
+| Insight memory | A dated, reproducible observation over defined facts. | `Insights` | Apps Script stores only validated analyst output |
+
+An insight must contain its period, query/metric definition, source IDs or summary version, generation time, confidence, and invalidation status. It is a useful cached interpretation, never replacement evidence.
 
 ---
 
-## Indian Context
+## 6. Data contracts
 
-### Instruments Commonly Seen
+### 6.1 Ingestion contract: retain the current narrow parser
 
-UPI (Google Pay, PhonePe, Paytm), credit cards, debit cards, net banking, NEFT / IMPS / RTGS transfers, auto-debit mandates for SIPs and bills, prepaid wallets, FASTag for tolls, and cash.
+The current, supported parser contract is:
 
-### Income Categories
+```text
+datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no
+```
 
-- Salary
-- Freelance or business income
-- Interest from savings and fixed deposits
-- Dividends
-- Rental income
-- Cashback and rewards
-- Refunds and reversals
-- Reimbursements from employer
-- Capital gains from stocks or mutual funds
-- Maturity proceeds from deposits or insurance
-- Gifts received
-- Other income
+It represents one completed event or `IGNORE`. `signed_amount` remains signed in the ledger. Valid `type` values are:
 
-### Expense Categories
+```text
+income | expense | transfer | card_payment | investment | refund
+```
 
-| Category | Subcategories / Examples |
-|---|---|
-| **Housing and Utilities** | Rent, home loan EMI, society maintenance, electricity, water, piped/cylinder gas, property tax |
-| **Food and Dining** | Groceries, restaurants, food delivery (Swiggy, Zomato), tea/coffee |
-| **Shopping** | Clothing, electronics, online orders (Amazon, Flipkart, Myntra) |
-| **Bills and Subscriptions** | Mobile postpaid/recharge, broadband, DTH, streaming (Netflix, Prime, Hotstar, Spotify) |
-| **Transportation** | Fuel, Ola/Uber, autos, metro, bus, train (IRCTC), flights, parking, FASTag, vehicle service |
-| **Healthcare** | Pharmacy, doctor consultations, diagnostics, hospital bills, fitness/gym |
-| **Investments** | Mutual fund SIPs, stocks, PPF, NPS, FDs/RDs, gold/SGBs |
-| **Insurance** | Term/life premiums, health, vehicle insurance |
-| **EMI and Loans** | Personal, home, car, education loans; BNPL dues |
-| **Education** | Tuition, courses, books, coaching |
-| **Personal Care** | Salon, grooming, cosmetics |
-| **Entertainment** | Movies, events, games, hobbies |
-| **Travel** | Hotels, holiday trips |
-| **Family and Dependents** | Money sent to parents or family |
-| **Gifts and Donations** | Gifts, charity, religious giving |
-| **Taxes and Fees** | Income tax, GST, TDS, bank charges, late fees, ATM fees |
-| **Cash Withdrawal** | ATM withdrawals where actual spend is unknown until later categorized |
-| **Miscellaneous** | Anything not yet classified |
+The next compatible version adds only an explicit `balance_after` field:
+
+```text
+datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after
+```
+
+Roll out both parser and Apps Script validation in the same release. Until then, do not emit a tenth field. The ingestion service may infer instrument, map an account/card, normalize merchant names, and apply approved rules, but it must retain the source value and reason for an override.
+
+### 6.2 Canonical transaction record
+
+Keep the existing columns during the first phase. Add fields through a versioned migration rather than replacing the sheet.
+
+| Group | Fields | Notes |
+| --- | --- | --- |
+| Identity | `Transaction ID`, `Match Key`, `Created At`, `Last Updated At` | ID is server generated. Match Key supports matching; it is not necessarily unique. |
+| Financial fact | `DateTime`, `Amount`, `Type`, `Instrument`, `Bank`, `Account Type`, `Account`, `Card Name` | Signed amount plus semantic type is the canonical representation. |
+| Party/classification | `Merchant`, `Merchant Normalized`, `Counterparty`, `Category`, `Subcategory`, `Is Recurring` | Rules and user corrections may enrich these. |
+| Traceability | `Ref No`, `Balance After`, `Source Count`, `Verification Status`, `Verification Source`, `Verified At` | Do not demand unavailable values. |
+| User context | `User Notes`, `Needs Review`, `Review Reason` | Notes are optional; review is explicit. |
+
+### 6.3 Source Log
+
+Add this in Phase 2, not during the first logging release.
+
+```text
+Source ID | Received At | Source Type | Raw Body | Parser Version |
+Parse Result | Parse Confidence | Ref No | Source Hash | Linked Transaction ID |
+Match Status | Match Reason | Processing Error
+```
+
+One source can link to one transaction. A transaction can have many sources. Hash the raw body for source deduplication. Restrict raw-body responses to an explicit evidence endpoint.
+
+### 6.4 Change Log
+
+Editable does not mean silently mutable. When updates begin, add:
+
+```text
+Change ID | Transaction ID | Changed At | Actor | Field | Old Value | New Value | Reason | Request ID
+```
+
+For an early single-user Sheet this is sufficient. It allows fixes without needing a database or event-sourcing framework.
 
 ---
 
-## Pipe-Delimited Input Format
+## 7. The first deliverable: reliable, editable logging
 
-A transaction is sent as one line with fields in a fixed order separated by a vertical bar (`|`). Empty fields are allowed and are left blank between bars.
+This is the priority. Complete it before creating an “Ask My Money” agent.
 
-**Field order:**
-```
-datetime | amount | direction | type | instrument | bank | account | account_type | card_name | merchant | category | user_notes | original_message
-```
+### User experience
 
-### Examples
+1. The user pastes an alert or opens a quick manual entry Shortcut.
+2. Gemini extracts a structured candidate for one message, or returns `IGNORE`.
+3. Apps Script validates it, applies deterministic rules, and commits a transaction or returns a precise error/review request.
+4. The response shows the saved transaction and offers only relevant edits: category, merchant, account/card, type, and optional note.
+5. An edit calls `updateTransaction(transactionId, patch, reason)`; Apps Script validates, records Change Log, recalculates affected summaries, and responds with the final canonical record.
 
-**Credit card expense (Swiggy)**
-```
-2026-06-25 13:40|850|debit|expense|Credit Card|HDFC|Millennia|Credit Card|HDFC Millennia|Swiggy|Food and Dining|team lunch|Spent Rs 850 on HDFC Millennia card at SWIGGY
-```
+### Acceptance criteria
 
-**UPI expense from savings account (DMart)**
-```
-2026-06-25 19:10|1200|debit|expense|UPI|ICICI|xx4321|Savings||DMart|Shopping|monthly groceries|Rs 1200 debited via UPI to DMART
-```
+- Replaying the same source never creates a second transaction.
+- A valid manual, SMS, or email event returns its canonical `transactionId`.
+- An edit survives row sorting and is traceable.
+- Credit-card purchases are expenses; card bill payments are `card_payment`; internal transfers are not expenses; refunds are not income.
+- Missing notes do not create a review item.
+- A review queue identifies a concrete reason, for example `unknown_merchant`, `ambiguous_type`, `source_conflict`, or `duplicate_candidate`.
+- All endpoint responses use stored fields from one schema, including semantic `type`.
 
-**Salary credit**
-```
-2026-06-01 10:00|90000|credit|income|Net Banking|HDFC|xx9988|Savings||Employer|Salary|june salary|Salary credited Rs 90000
-```
+### Minimal API for this stage
 
-**Credit card bill payment (must NOT count as a new expense)**
-```
-2026-06-05 11:00|24500|debit|card_payment|Net Banking|HDFC|xx9988|Savings|HDFC Millennia|HDFC Card|Credit Card Payment|june card bill|Payment of Rs 24500 to HDFC card
-```
+| Intent | Endpoint/action | Result |
+| --- | --- | --- |
+| Ingest parsed source | `ingestTransaction` | Canonical record, duplicate/review state, allowed next step |
+| Manual entry | `manual` | Same canonical record/result |
+| Read one transaction | `getTransaction(transactionId)` | Safe ledger fields; raw evidence excluded |
+| Modify transaction | `updateTransaction(transactionId, patch, reason)` | Validated record + change ID |
+| List reviews | `pendingReview(limit)` | Reason and suggested resolution |
+| Recent transactions | `lastTransactions(limit)` | Canonical records |
 
----
-
-## Implementation Logic
-
-### 1. Capture on the Phone
-
-- Build a Shortcut that takes either a pasted bank SMS or a few quick manual inputs.
-- When given an SMS, extract amount, direction, bank, instrument, and merchant from the text.
-- Ask for or infer the type, category, and the card or account used.
-- Assemble the fields into one pipe-delimited line in the fixed order.
-- Send the line as the body of a POST request to the Apps Script web app.
-
-### 2. Ingest into TRANSACTIONS
-
-- In `doPost`, read the body and split it on the vertical bar into fields.
-- Trim each field and map it to its column name.
-- Build a `txn_id` from datetime, amount, and ref_no so repeated sends are detected.
-- Skip the row if the `txn_id` already exists; otherwise append it.
-- Set `needs_review` when the category is missing so it can be fixed later.
-
-### 3. Normalize and Categorize
-
-- Look up the merchant in CONFIG rules to assign a category automatically when possible.
-- Standardize bank, account, and card names against the CONFIG lists.
-- Mark known recurring payees such as rent, EMI, and subscriptions as recurring.
-- Leave `needs_review` set for anything the rules cannot classify.
-
-### 4. Build the Monthly Summary
-
-- Read all transactions for the target month.
-- Sum income from rows of type `income`, and expense from rows of type `expense` only.
-- Exclude `transfer`, `card_payment`, and `investment` rows from income and expense totals.
-- Compute savings as income minus expense, and the savings rate as savings divided by income.
-- Sum investment rows separately into an investments total.
-- Sum expense by category into one column per category.
-- Write one row for the month into MONTHLY and compute the change from the previous month.
-
-### 5. Build the Card and Account Summaries
-
-- Group expense rows by `card_name` and by month, and write totals into CARDS.
-- For each card, compute the change versus the previous month so rising card spend is visible.
-- Group inflow and outflow by account and by month, and write totals into ACCOUNTS.
-
-### 6. Alert on Unusual Spends
-
-- When a single expense is far above the usual range, send a push notification.
-- When a category in the current month is well above its recent average, flag it.
-
-### 7. Schedule Everything
-
-- Run ingestion on each incoming request through `doPost`.
-- Run a monthly job near the end of each month.
-- Allow a manual rebuild that recomputes all summaries from TRANSACTIONS.
+Do not accept arbitrary column names or raw row numbers from a Shortcut.
 
 ---
 
-## Implementation Examples
+## 8. Derived summaries: deterministic before intelligent
 
-### Apps Script — Receive Pipe-Delimited Line and Append Row
+Reports are deterministic views over facts, not Gemini-generated truth. Build them from `Transaction Log` and make the definitions visible.
 
-```javascript
-const COLS = ["datetime","amount","direction","type","instrument","bank",
-  "account","account_type","card_name","merchant","category","user_notes",
-  "original_message"];
+Initial tables:
 
-function doPost(e) {
-  const parts = e.postData.contents.split("|").map(s => s.trim());
-  const row = {};
-  COLS.forEach((c, i) => row[c] = parts[i] ?? "");
-  row.txn_id = makeId(row);
-  const sheet = SpreadsheetApp.getActive().getSheetByName("TRANSACTIONS");
-  if (existsId(sheet, row.txn_id)) return reply({ ok: true, duplicate: true });
-  sheet.appendRow(COLS.map(c => row[c]).concat([row.txn_id]));
-  return reply({ ok: true });
-}
+| Table | Purpose |
+| --- | --- |
+| `Monthly Summary` | Income, consumption expense, investment, transfers/card payments, cash surplus, ratios, category totals. |
+| `Merchant Summary` | Merchant spend/count/trend over selected windows. |
+| `Recurring Summary` | Confirmed and candidate recurring payments; never silently label a candidate as confirmed. |
+| `Review Queue` | Actionable data-quality exceptions. |
 
-function makeId(r) {
-  return [r.datetime, r.amount, r.merchant].join("_");
-}
+Definitions:
 
-function reply(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
+- **Consumption expense:** absolute amounts where `Type = expense`, net of an explicitly linked refund where that relationship exists.
+- **Income:** amounts where `Type = income`; refunds are reported separately.
+- **Investment:** absolute amounts where `Type = investment`, reported separately from consumption.
+- **Cash surplus:** income − consumption expense − investment, with transfers and card payments excluded from both sides.
+- **Savings rate:** document whether this means `(income - consumption expense) / income` or a cash-surplus measure; provide the chosen definition in every summary response.
+
+All summaries must be rebuildable for any period. The displayed period determines days remaining and comparisons; never use today’s month to interpret historical rows.
+
+---
+
+## 9. Structured retrieval: the first real RAG capability
+
+The initial retrieval layer is a set of safe Apps Script functions, not a general Sheet dump.
+
+Example question:
+
+> How has my Amazon spending changed this year?
+
+```text
+Question
+  → query plan: merchant=Amazon, type=expense, Jan 1–today, monthly trend
+  → deterministic retrieval and aggregation
+  → compact evidence packet
+  → Gemini explains the result
+  → response cites data range, transaction count, and source IDs/summary version
+```
+
+Example evidence packet:
+
+```json
+{
+  "query": {"merchant": "Amazon", "type": "expense", "from": "2026-01-01", "to": "2026-10-07"},
+  "totalsByMonth": [{"month": "2026-01", "amount": 4200}],
+  "transactionCount": 42,
+  "averageTransaction": 1240,
+  "topCategories": [{"name": "Household", "amount": 18000}],
+  "sources": {"ledgerVersion": "summary-2026-10-07T10:00:00Z", "transactionIds": ["...bounded..."]}
 }
 ```
 
-### Monthly Aggregation Logic
+Gemini receives this compact packet, not every row and never unrestricted raw SMS text. The final response must distinguish calculation from interpretation and list the period, transaction count, and source scope.
 
-```javascript
-function buildMonthly(month) {
-  const rows = getMonthRows(month);                 // all txns in the month
-  let income = 0, expense = 0, invest = 0;
-  const byCategory = {};
-  rows.forEach(r => {
-    const amt = Number(r.amount);
-    if (r.type === "income") income += amt;
-    else if (r.type === "expense") {
-      expense += amt;
-      byCategory[r.category] = (byCategory[r.category] || 0) + amt;
-    } else if (r.type === "investment") invest += amt;
-    // transfer and card_payment are ignored on purpose
-  });
-  const savings = income - expense;
-  writeMonthlyRow(month, income, expense, savings, invest, byCategory);
-}
+### Initial retrieval tools
+
+- `getPeriodOverview(from, to)`
+- `getCategoryTrend(category, from, to, grain)`
+- `getMerchantTrend(merchant, from, to, grain)`
+- `getTransactions(filters, limit, cursor)`
+- `getRecurringCommitments(asOf)`
+- `getReviewQueue(limit)`
+- `getGoalProgress(goalId, asOf)` later
+- `getEvidence(transactionId)` only after explicit user request and authorization
+
+Each tool has typed inputs, bounds on date range/result size, an explicit definition of included types, and response provenance. Tools return data; Gemini does not construct spreadsheet formulas or perform direct writes.
+
+---
+
+## 10. Agent behaviour: constrained and approval-based
+
+The system becomes agentic through a disciplined loop, not because it uses an LLM.
+
+```text
+Observe a new fact or user question
+→ choose a permitted retrieval/check
+→ calculate deterministic result
+→ generate an explanation or proposed action
+→ user confirms when a durable change is needed
+→ validate and commit through Apps Script
+→ retain correction/decision for future retrieval
 ```
 
----
+### Authority levels
 
-## Analytics That Matter
+| Level | Allowed behaviour | Example |
+| --- | --- | --- |
+| Read | Retrieve bounded facts and explain them. | “Food spending rose 18% month over month.” |
+| Propose | Draft a category, note, insight, anomaly, or simulation. | “This appears to be a recurring subscription; confirm?” |
+| Commit after confirmation | Write a correction, preference, goal, decision, or approved insight. | User confirms `Apollo Pharmacy → Healthcare`. |
+| Never autonomous | Move money, delete financial records/evidence, alter confirmed history, or issue financial instructions as fact. | No exception. |
 
-Focus on the few numbers that change financial decisions and avoid totals that only restate the obvious.
-
-| Metric | What it reveals |
-|---|---|
-| **Savings rate** | How much of income is kept after real expenses |
-| **Category share** | Which categories take the largest part of spending |
-| **Month-over-month change per category** | What is quietly rising |
-| **Per-card spend and its trend** | Which credit card is being used the most and whether it is growing |
-| **Recurring vs one-time spend** | Separates fixed commitments from discretionary choices |
-| **Top merchants** | Often reveals a small number of places taking a large share |
+Every proposed write carries: proposed change, evidence/source IDs, reason, confidence, and a confirmation token. The server rejects writes without a valid confirmation context.
 
 ---
 
-## Supported Queries
+## 11. Personal memory and insight memory
 
-### Status Questions
+Add these only after structured retrieval returns trustworthy cited answers.
 
-- How much did I spend this month and how much did I earn?
-- What is my savings rate this month?
-- How much have I spent so far today and this week?
-- How much is sitting across my accounts right now?
-- How much of my credit card limit have I used this cycle?
+### Preferences
 
-### Category Questions
-
-- Where did most of my money go this month?
-- How much did I spend on food and dining this month?
-- What share of my spending is fixed bills versus discretionary?
-- How much did I spend on groceries compared to eating out?
-- How much went to investments this month?
-
-### Card and Account Questions
-
-- Which credit card did I spend the most on this month?
-- Which card has higher spending than last month?
-- How much did each bank account spend and receive this month?
-- Which account is my highest outflow account?
-- How much did I pay in total credit card bills this month?
-
-### Trend and Comparison Questions
-
-- How does this month compare with last month overall?
-- Which category increased the most compared to last month?
-- Is my food spending trending up over the last three months?
-- How has my savings rate changed over the last six months?
-- Are my subscription bills slowly increasing?
-
-### Merchant and Behavior Questions
-
-- Which merchants did I spend the most at this month?
-- How much did I spend on Swiggy and Zomato together?
-- How often do I withdraw cash and how much?
-- What are my recurring payments and how much do they total?
-- Which one-time large purchases happened this month?
-
-### Planning and Saving Questions
-
-- Which category should I cut to improve my savings rate?
-- Am I on track against my monthly budget for each category?
-- How much could I save by reducing food delivery?
-- Based on recent months, what is a realistic savings target for next month?
-- Which subscriptions look unused and worth reviewing?
-
-### Tax and Review Questions
-
-- How much did I pay in bank charges and fees this year?
-- How much did I invest this year across all instruments?
-- How much reimbursable spending is still pending?
-- Which transactions are still unreviewed and need a category?
-
----
-
-## Future AI and Scalability
-
-These additions make the system smarter while keeping the same free and automated base.
-
-### Automatic SMS Parsing
-- Send the raw bank SMS to a language model to extract amount, direction, bank, merchant, and instrument.
-- Let the model propose the type and category, and only ask the user when confidence is low.
-
-### Smart Categorization That Learns
-- Store merchant-to-category mappings in CONFIG and grow them from past confirmations.
-- When a new merchant appears, let the model suggest a category and remember the choice.
-
-### Anomaly and Fraud Alerts
-- Learn the normal range per category and per merchant.
-- Flag a charge that is unusually large, a duplicate charge, or a new merchant on a card for quick review.
-
-### Forecasting and Cash Flow
-- Use recurring payments and recent trends to project end-of-month spending early.
-- Warn when projected expense will push the savings rate below a target.
-
-### Agent with Tools
-- Expose actions such as get a month, get a category trend, get card spend, and set a budget.
-- Let the model plan and call these actions to answer free-form money questions.
-
-### Tiered Summaries for Years of Data
-- Keep monthly summaries as the base, and roll them up into quarterly and yearly views.
-- Answer long-range questions from the rolled-up views so reports stay fast.
-
----
-
-## Build Order
-
-```mermaid
-flowchart LR
-    S1["1️⃣ Create TRANSACTIONS tab\n+ doPost web app\n(confirm one line stores)"]
-    S2["2️⃣ Build iPhone Shortcut\n(manual first,\nthen from SMS)"]
-    S3["3️⃣ Add type rule\n(exclude transfers,\ncard payments, refunds)"]
-    S4["4️⃣ Monthly job → MONTHLY\n(income, expense, savings,\ninvestments, categories)"]
-    S5["5️⃣ CARDS + ACCOUNTS\nsummaries with MoM changes"]
-    S6["6️⃣ Unusual spend\nnotifications"]
-    S7["7️⃣ Question branch + AI\ncategorization + forecasting"]
-
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
-
-    style S1 fill:#2d6a4f,color:#fff
-    style S2 fill:#2d6a4f,color:#fff
-    style S3 fill:#2d6a4f,color:#fff
-    style S4 fill:#2d6a4f,color:#fff
-    style S5 fill:#74c69d,color:#000
-    style S6 fill:#74c69d,color:#000
-    style S7 fill:#b7e4c7,color:#000
+```text
+Preference ID | Scope | Key | Value | Created At | Updated At | Source/Confirmation
 ```
 
-> **Make steps 1–4 solid before adding AI.** Clean and correctly typed transactions are most of the value.
+Examples: preferred category for a merchant, whether a repeated transfer is family support, notification thresholds. Preferences should be narrow and overrideable.
+
+### Goals
+
+```text
+Goal ID | Name | Target Amount | Current Baseline | Deadline | Monthly Contribution |
+Priority | Status | Assumption Notes | Updated At
+```
+
+Goal progress is calculated from facts and clearly states assumptions. It must never claim that an account balance is known when balance evidence is incomplete.
+
+### Decisions
+
+```text
+Decision ID | Statement | Reason | Made At | Review On | Status | Related Categories/Merchants | User Confirmed
+```
+
+Decision memory supports respectful checks such as: “This large phone purchase conflicts with a decision you asked me to remember. Is it intentional?” It is a reminder, not a judgement.
+
+### Insights
+
+```text
+Insight ID | Topic | Observation | Period | Metric Definition | Source Scope |
+Confidence | Generated At | Confirmed At | Superseded By | Status
+```
+
+Insights may be retrieved as a shortcut, but stale or superseded insights must not be presented as current analysis.
 
 ---
 
-## Constraints
+## 12. Later capabilities
 
-- The pipeline runs automatically and needs no manual step beyond sending each transaction.
-- The system uses free-tier services so the running cost stays near zero.
-- The iPhone is the main capture device, with bank SMS as the primary source.
-- All amounts are tracked in Indian Rupees (₹).
+### What-if analysis
+
+Simulations are read-only scenarios:
+
+```text
+Scenario input → deterministic model → assumptions + range → Gemini explanation
+```
+
+For example, reducing food delivery by 30% changes a projected spend/savings line; it never changes the ledger. Make the period, baseline, and handling of irregular costs explicit.
+
+### Anomaly assistant
+
+Start with transparent, deterministic candidates:
+
+- transaction amount far outside a merchant/category baseline,
+- same/similar reference or amount appearing twice,
+- unexpected recurring-payment increase,
+- category trajectory materially above comparable prior periods,
+- a new high-value merchant on a card.
+
+An anomaly notification always includes the baseline, comparison window, affected transaction(s), confidence, and a dismiss/confirm action. Lack of a notification means only that no configured rule triggered—not that all activity is safe.
+
+### Semantic retrieval
+
+Only add embeddings when narrative records are large enough that structured filters cannot find relevant notes, decisions, emails, or insights. Keep structured retrieval as the first stage, then search semantic text within a small allowed corpus. A vector database is an optional implementation detail, not an architectural milestone.
+
+---
+
+## 13. Delivery roadmap
+
+### Phase 0 — stabilize the current prototype
+
+- Freeze the nine-field parser contract and document a test corpus of real, redacted message patterns.
+- Fix schema-inconsistent readers, stored-type usage, review logic, summary definitions, and request authentication.
+- Replace public row-number updates with `transactionId` lookup.
+- Add request IDs and structured error codes.
+
+**Exit:** a transaction can be logged, displayed, corrected, and replayed without data loss or accidental duplication.
+
+### Phase 1 — establish the editable ledger
+
+- Implement canonical read/update endpoints and Change Log.
+- Validate categories/types against `CONFIG`; maintain rule provenance.
+- Improve deduplication using source hash/reference first and conservative probable matches second.
+- Turn review into a reasoned queue with a one-tap correction path.
+
+**Exit:** the ledger is trustworthy enough to be the sole input to summaries.
+
+### Phase 2 — separate evidence and build repeatable reports
+
+- Introduce Source Log and migrate raw text incrementally.
+- Add source-to-transaction links and SMS/email reconciliation.
+- Build rebuildable monthly, merchant, recurring, and review summaries.
+
+**Exit:** a report can be reproduced from facts and source provenance.
+
+### Phase 3 — expose structured retrieval
+
+- Implement bounded retrieval functions and evidence-packet responses.
+- Support a small set of high-value questions in Shortcuts.
+- Require every answer to name its period, included event count, and source scope.
+
+**Exit:** “Ask My Money” answers routine questions accurately without sending the whole sheet to Gemini.
+
+### Phase 4 — add reasoning with citations
+
+- Let Gemini map natural language to approved retrieval tools or a typed query plan.
+- Generate explanations from the returned packet only.
+- Store user-confirmed merchant corrections as rules/preferences.
+
+**Exit:** conversational answers are explainable and corrections improve future results.
+
+### Phase 5 — memory and proactive intelligence
+
+- Add goals, decisions, preferences, reproducible insights, scenario models, and conservative anomaly candidates.
+- Introduce semantic retrieval only if structured retrieval no longer covers the narrative corpus.
+
+**Exit:** the system can offer relevant, consented, evidence-backed financial context without altering money or historical facts autonomously.
+
+---
+
+## 14. Explicitly out of scope for now
+
+- Sending the full sheet or raw SMS archive to Gemini.
+- Automatic transaction overwrites based solely on model confidence.
+- Autonomous categorisation that changes confirmed history.
+- A vector database, embeddings, Pinecone, or multi-agent orchestration.
+- Account-balance or credit-limit claims without an authoritative, current source.
+- Investment, tax, legal, or credit recommendations presented as personalised professional advice.
+- Deleting raw evidence or change history.
+
+---
+
+## 15. Definition of success
+
+The next milestone is successful when logging is so dependable that it becomes routine:
+
+- Most common alerts create one correct, searchable transaction with no manual form filling.
+- The user can fix any field quickly, and the system remembers an approved rule where appropriate.
+- Duplicate/reconciliation/review states are visible and explainable.
+- Monthly and merchant totals are reproducible from the ledger and use correct financial semantics.
+- A future assistant has small, safe retrieval functions and evidence citations to build on.
+
+At that point the project has the essential asset: a reliable personal financial memory. Intelligence can then grow without replacing or destabilising the foundation.

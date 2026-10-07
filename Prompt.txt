@@ -1,0 +1,248 @@
+Prompt:
+Read ONE Indian bank/UPI/wallet/credit-card alert (SMS or email) and output exactly ONE pipe-delimited line.
+
+Ignore ads, offers, greetings, promotional content, footers, links, helpline numbers, "Not you?/BLOCK" instructions, balance-only messages, and unrelated text. Body beats subject.
+
+NOW: {{CURRENT_DATE_TIME_HERE}}
+
+OUTPUT FORMAT
+datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no
+
+Exactly 9 fields.
+Separator: " | "
+Unknown-value policy:
+- merchant_name: Unspecified when no meaningful merchant/purpose exists.
+- counterparty and ref_no: NA when unavailable.
+- instrument: Net Banking when no more specific instrument is identifiable.
+- amount, bank, account_type, and type: do not guess. Output IGNORE if a completed transaction cannot be represented safely.
+- date/time: follow the explicit capture fallbacks below; do not invent a historical timestamp.
+No commas, quotes, currency symbols, extra text, explanations, or markdown.
+
+If the message does NOT represent one completed transaction, output ONLY:
+IGNORE
+
+IGNORE:
+- OTP
+- offers/promotions
+- bill due/reminder
+- statement
+- balance/available balance/credit limit
+- EMI due/reminder
+- payment request
+- failed/declined/reversed-pending transaction
+- pending transaction
+- authorization-only notification
+- non-transactional account alerts
+
+TRANSACTION DATE/TIME
+- Use the actual transaction date/time, NOT the email/letter date.
+- DD/MM/YY, DD-MM-YY, DD/MM/YYYY and DD-MM-YYYY are day-first.
+- YY means 20YY.
+- If date is missing, use NOW's date.
+- If time is missing, use 00:00:00.
+- Output: yyyy-MM-dd HH:mm:ss.
+- Preserve the actual transaction time when present.
+
+AMOUNT
+- Always output exactly 2 decimals.
+- Negative = money left the user's account/card.
+- Positive = money came to the user.
+- Debit/spent/paid/withdrawn/transferred to = negative.
+- Credit/received/refund/reversal/salary/interest/dividend/cashback = positive.
+- Never use balance, available balance, credit limit, total due, minimum due, reward points, or unrelated amounts.
+- If multiple monetary amounts appear, select ONLY the completed transaction amount.
+
+BANK
+Use:
+Axis | SBI | SBI Card | HDFC | ICICI | Kotak | Paytm | Amazon Pay | Other
+
+ACCOUNT TYPE
+Use:
+Savings Account | Current Account | Credit Card | Wallet | Cash
+
+Rules:
+- "A/c", "account", savings account → Savings Account unless the message clearly identifies a credit-card account.
+- "Card no.", credit-card account, or credit-card transaction → Credit Card.
+- Wallet transaction → Wallet.
+- Physical cash/ATM cash transaction → Cash.
+
+INSTRUMENT
+Use:
+UPI | Credit Card | Debit Card | Net Banking | NEFT | IMPS | RTGS | Wallet | Auto Debit | Cash
+
+Rules:
+- UPI / UPI ID / VPA / @ → UPI
+- IMPS → IMPS
+- NEFT → NEFT
+- RTGS → RTGS
+- ATM cash withdrawal/deposit → Cash
+- ECS / NACH / SI / standing instruction / mandate / autopay → Auto Debit
+- Card transaction/card number → Credit Card or Debit Card according to the message
+- If no specific payment instrument is identifiable → Net Banking
+
+TYPE
+Use exactly:
+expense | income | card_payment | investment | transfer | refund
+
+Determine TYPE from the economic meaning of the completed transaction, from the user's perspective.
+
+Classification precedence:
+
+1. REFUND
+Use refund when the transaction is explicitly a refund, reversal, chargeback, or money returned for a previous transaction.
+
+2. CARD_PAYMENT
+Use card_payment when money is paid toward a credit-card bill/card outstanding.
+Examples:
+- credit card bill payment
+- payment towards credit card
+- card outstanding paid
+- credit card payment
+- payment received towards credit card bill
+Do NOT use card_payment for purchases made using a credit card.
+
+3. INVESTMENT
+Use investment for:
+- SIP
+- mutual fund
+- MF
+- stock/share purchase
+- FD
+- RD
+- NPS
+- PPF
+- investment account funding
+- explicit investment/fund transfer
+Do NOT classify an ordinary bank transfer as investment unless the message clearly indicates an investment purpose.
+
+4. TRANSFER
+Use transfer for:
+- person-to-person payments
+- transfers to another person
+- transfers between the user's own accounts
+- UPI transfers without a merchant purchase purpose
+- money sent to another bank/account
+A transfer is NOT an expense unless the message clearly represents a purchase/payment for goods or services.
+
+5. INCOME
+Use income for:
+- salary
+- interest
+- dividend
+- cashback
+- other clearly received earnings/credits
+Do not classify a refund as income; use refund.
+
+6. EXPENSE
+Use expense for:
+- merchant purchases
+- shopping
+- food
+- bills
+- subscriptions
+- utilities
+- services
+- travel
+- fuel
+- healthcare
+- any normal purchase/payment for goods or services
+
+IMPORTANT CREDIT-CARD RULE
+A credit-card PURCHASE is:
+type = expense
+
+A payment of the credit-card BILL is:
+type = card_payment
+
+Never classify a credit-card purchase as card_payment merely because the transaction mentions a card.
+
+PERSPECTIVE RULE
+Always classify from the user's financial perspective.
+
+Example:
+"Payment of INR 23,528.75 has been received towards your Axis credit card bill"
+means the user paid the credit-card bill:
+signed_amount = -23528.75
+type = card_payment
+
+MERCHANT_NAME
+- Use the clearest readable merchant/purpose.
+- For a person-to-person transfer, use the person's name.
+- For a credit-card bill payment, use "[Bank/Card] Credit Card Bill".
+- If no meaningful merchant/purpose exists, use Unspecified.
+- Do not use bank names as merchant names unless the bank itself is the recipient/purpose.
+
+COUNTERPARTY
+- Use the other party's readable name or UPI ID.
+- For merchant transactions, use merchant name if explicitly available.
+- For card bill payments, use the card/bank identifier if available.
+- Otherwise NA.
+
+REF_NO
+Use the transaction's actual reference:
+UTR / RRN / UPI reference / transaction ID / authorization code.
+Never use:
+- phone number
+- customer-care number
+- account number
+- card number
+- balance
+- credit limit
+
+If multiple reference numbers appear, prefer the transaction reference directly associated with the completed transaction.
+
+IMPORTANT
+- Output only one transaction.
+- If the message contains multiple completed transactions, output IGNORE rather than combining them.
+- Do not invent missing values, apart from the explicit date/time capture fallbacks above.
+- Do not infer a merchant from a phone number.
+- Do not treat a bank's customer-care number as a reference number.
+- Do not treat a credit-card bill amount as an expense when it is a card_payment.
+- Do not treat transfers/investments/card payments as expenses unless the message explicitly represents a purchase or service expense.
+
+EXAMPLES
+
+IN:
+Spent INR 120 Axis Bank Card no. XX1234 01-07-26 08:35:22 IST PENUMATSA S Avl Limit: INR 45000
+
+OUT:
+2026-07-01 08:35:22 | -120.00 | Axis | Credit Card | Credit Card | expense | PENUMATSA S | PENUMATSA S | NA
+
+IN:
+INR 150.00 debited A/c no. XX8899 01-07-26, 09:28:23 UPI/P2A/637851552438/GUDIVENUKALA VIJAYA Axis Bank
+
+OUT:
+2026-07-01 09:28:23 | -150.00 | Axis | Savings Account | UPI | transfer | GUDIVENUKALA VIJAYA | GUDIVENUKALA VIJAYA | 637851552438
+
+IN:
+Debit INR 7528.38 Axis Bank A/c XX8899 02-07-26 21:09:46 CreditCard Payment XX 5178
+
+OUT:
+2026-07-02 21:09:46 | -7528.38 | Axis | Savings Account | Net Banking | card_payment | Axis Credit Card Bill | XX5178 | NA
+
+IN:
+Your A/C XX Debited INR 23,300.00 on 05/07/26 -Transferred to Mr. ASHISH KUMARPAN. Avl Balance INR 41,120.00-SBI
+
+OUT:
+2026-07-05 00:00:00 | -23300.00 | SBI | Savings Account | Net Banking | transfer | ASHISH KUMARPAN | ASHISH KUMARPAN | NA
+
+IN:
+Open a world of rewards. Check for your pre-qualified credit card offer. Apply now. T&C apply. Axis Bank Ltd.
+
+OUT:
+IGNORE
+
+IN:
+30-09-2026 Dear Customer, your A/c no. XX has been debited with INR 2638.00 on 30-09-26 00:35:26 IST by IMPS/P2A/627300614841/ASISHKUM. Call 18001035577.
+
+OUT:
+2026-09-30 00:35:26 | -2638.00 | Axis | Savings Account | IMPS | transfer | ASISHKUM | ASISHKUM | 627300614841
+
+IN:
+Rs.2,499 debited from Paytm Wallet on 12-08-26 towards SWIGGY order. Txn ID T2208ABC
+
+OUT:
+2026-08-12 00:00:00 | -2499.00 | Paytm | Wallet | Wallet | expense | Swiggy | Swiggy | T2208ABC
+
+NOW OUTPUT ONLY THE LINE FOR:
+{{SMS_OR_EMAIL_TEXT_HERE}}

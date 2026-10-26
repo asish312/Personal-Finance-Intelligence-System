@@ -1,0 +1,68 @@
+PFIS — FINAL SHORTCUT PROMPTS v1.0.0
+
+PROMPT 1 — TRANSACTION EXTRACTION
+
+Extract ONE completed transaction from the supplied Indian bank/UPI/wallet/card SMS or email.
+
+Use the full email as context; when subject and body differ, trust the body for transaction facts. Ignore ads, offers, rewards, greetings, footers, links, helpline numbers, fraud/security warnings, “Not you?” text, and unrelated balances, limits, dues, statements or reward points.
+
+Return IGNORE alone if there is no completed transaction, more than one completed transaction, or the message is an OTP, payment request/reminder, failed/declined/pending/reversed-pending/authorization-only transaction, statement, balance-only alert or other non-transaction alert.
+
+For one completed transaction, output exactly one line with exactly 10 pipe-separated fields:
+datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after
+Use NA for unknown/unavailable fields. No labels, explanation, quotes, markdown or extra lines.
+
+DATE: Use actual transaction date/time, not email receipt time. DD/MM/YY, DD-MM-YY, DD/MM/YYYY and DD-MM-YYYY are day-first; YY means 20YY. With explicit transaction time output yyyy-MM-dd HH:mm:ss. If only the date is known output yyyy-MM-dd (never add 00:00:00). If date is absent, use NOW's local date but do not invent a time. NOW={{CURRENT_DATE_TIME_HERE}}.
+
+AMOUNT: Output 2 decimals without currency symbols. Money leaving the user's account/card is negative; money received is positive. Debit/spent/paid/withdrawn/outgoing transfer = negative; credit/received/refund/reversal/salary/interest/dividend/cashback = positive. Select only the completed transaction amount. Never use a balance, limit, due, points or unrelated amount, and never calculate from a balance difference. Determine type from meaning, not sign alone.
+
+BANK: Use exactly Axis | SBI | SBI Card | HDFC | ICICI | Kotak | Paytm | Amazon Pay | Other. Use the institution associated with the transaction, not sender/helpline identity unless clearly the institution; otherwise Other.
+
+ACCOUNT TYPE: Use exactly Savings Account | Current Account | Credit Card | Wallet | Cash. Prefer explicit evidence. Unspecified A/c/account defaults to Savings Account unless contradicted. Use Credit Card only when the source identifies a credit-card account; Wallet for wallet transactions; Cash for physical cash/ATM transactions.
+
+INSTRUMENT: Use exactly UPI | Credit Card | Debit Card | Net Banking | NEFT | IMPS | RTGS | Wallet | Auto Debit | Cash. UPI/VPA/UPI ID = UPI; NEFT/IMPS/RTGS stay exact; ECS/NACH/SI/mandate/autopay = Auto Debit; ATM cash = Cash; card = Credit Card or Debit Card only when identified; wallet = Wallet. A clearly online savings/current-account payment with no named rail = Net Banking. Never guess a rail.
+
+TYPE: Use exactly expense | income | card_payment | investment | transfer | refund | NA.
+- refund: explicit refund/reversal/chargeback/returned money; never income.
+- card_payment: explicit payment toward a credit-card bill/outstanding; a card purchase is expense.
+- investment: explicit SIP, mutual fund, stock/share purchase, FD, RD, NPS, PPF or investment funding. Never match word fragments/substrings.
+- transfer: person-to-person, own-account/bank transfer, or UPI transfer without evidence of goods/services.
+- income: explicit salary, interest, dividend, cashback, bonus, pension or other identified earnings; positive amount alone is not income.
+- expense: completed purchase/payment for goods or services.
+Use NA if the transaction is real but its meaning is unclear.
+
+MERCHANT NAME: Use the readable merchant or recipient named in the alert; use a purpose only if explicitly stated. For person transfers use the person's name. For card-bill settlement use [Bank/Card] Credit Card Bill. If no meaningful merchant exists use Unspecified. Never use a phone/customer-care number or generic “payment/transaction/debit” unless that is all the source provides. Do not infer a specific purpose from merchant name alone.
+
+COUNTERPARTY: Use the explicitly identified other party's readable name/UPI ID. For merchant payments use the merchant when known; for card-bill settlement use the bank/card identifier when available. Otherwise NA.
+
+REFERENCE: Use only an explicit transaction ID/reference, UTR, RRN, UPI reference or authorization code. Never use phone/helpline/account/card numbers, balance or limit. Prefer the reference tied directly to this transaction; otherwise NA.
+
+BALANCE AFTER: Use only an actual account/card balance clearly identified as post-transaction. Available balance/limit, credit limit, total/minimum due and statement balance are not balance_after. Otherwise NA.
+
+Never invent facts, combine transactions, or let a heuristic override explicit source evidence. Output exactly the 10 fields or IGNORE.
+
+
+PROMPT 2 — FALLBACK CATEGORY CLASSIFICATION
+
+Classify the transaction using exactly one category from the supplied ACTIVE category list, or return ASK_PURPOSE if purpose is blank and the merchant/raw alert cannot support a reliable category.
+
+User purpose: [Variable_purpose]
+Merchant: [Variable_merchant]
+Amount: [Variable_amount]
+Transaction type: [Variable_type]
+Allowed active categories: [Variable_categoryListText]
+Raw alert: [Variable_rawmessage]
+
+Rules:
+- Use explicit purpose, merchant and transaction facts. Ignore unrelated warnings, ads and disclaimers.
+- When purpose is blank, classify from strong merchant/raw-alert evidence first. Example: RAINBOWCHILDRENSMEDIC => Healthcare only if that exact category is active. Do not infer the specific medical service.
+- If purpose is blank and evidence is insufficient, return exactly ASK_PURPOSE. Never guess or use Miscellaneous merely to avoid asking.
+- If purpose is supplied, use it as the primary signal, with merchant/raw alert as supporting evidence.
+- Use Miscellaneous only when purpose is supplied, no narrower category is supported, and Miscellaneous is active.
+- Output the exact category name from the active list or ASK_PURPOSE only. No explanation, quotes, punctuation or extra lines.
+
+PROMPT 2 IS A FALLBACK ONLY. Apps Script should assign categories from Rules during insertion, including category-only merchant fallback when existing merchant-anchored rules agree. Do not run this prompt for an already assigned category. Never send ASK_PURPOSE to Apps Script as a category.
+
+PURPOSE HANDLING
+
+Do not run a separate AI purpose-guessing prompt in the normal path. Use the backend's purposeSuggestion as an editable default in Shortcuts Ask for Input when available. The user must confirm or edit it. If no suggestion exists, present a blank input. Only a matched rule with Auto Purpose=TRUE may save its configured purpose without asking.

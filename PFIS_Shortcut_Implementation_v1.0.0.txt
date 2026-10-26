@@ -1,0 +1,126 @@
+PFIS — MANUAL SHORTCUT IMPLEMENTATION
+Target engine: v1.0.0 category fallback + Auto Purpose
+
+PURPOSE
+Make the current “Process transactions” Shortcut follow the Apps Script decision. Do not rebuild the ingest/update API calls unless noted. Keep the existing deployed URL and any existing token field.
+
+BEFORE EDITING
+1. Replace the text in the existing transaction-extraction Apple Intelligence action with PROMPT 1 from PFIS_Prompts_Final_v1.0.0_Prompts.txt.
+2. Replace the existing category-classification prompt with PROMPT 2 from that file.
+3. Remove the separate AI purpose-inference step and any Find Note / Templates lookup used only to guess a purpose. The backend already returns purposeSuggestion from approved history. We will show that as an editable default, not save it automatically.
+4. Do not change the ingest request: action=ingest, txnString, sourceType, originalText, and any existing sender/subject/token fields. txnString must remain exactly 10 pipe-delimited fields; transactionId is separate.
+
+PART A — READ THE INGEST RESPONSE
+Keep the existing Get Contents of URL (POST ingest) and response dictionary actions.
+
+Extract these values from insertedResponse:
+- transaction -> insertedTransaction
+- transactionId -> transactionId (or insertedTransaction.transactionId if that is your established field path)
+- nextAction -> nextAction
+- displayText -> displayText
+- requiresPurpose -> requiresPurpose
+- requiresCategoryClassification -> requiresCategoryClassification
+- purposeSuggestion -> purposeSuggestion
+- allowedCategories -> allowedCategories (used only if nextAction=CLASSIFY_CATEGORY)
+- transaction.category -> category
+- transaction.userNotes -> currentPurpose
+- transaction.merchant -> merchantName
+- transaction.amount -> amount
+- transaction.type -> transactionType
+- needsReview and reviewReason -> for the final receipt/review display
+
+IMPORTANT: nextAction is a TEXT value. In each If action, select the actual nextAction variable and compare it with exact text. Do not compare a “Name” property of the variable and do not use “contains” for these fixed action values.
+
+PART B — ROUTE ON nextAction IN THIS ORDER
+Create/modify one If / Otherwise If chain:
+
+1. If nextAction is exactly SHOW_RECEIPT:
+   - Show displayText (or your existing receipt display).
+   - Stop this Shortcut. No enrichment prompt.
+
+2. Otherwise If nextAction is exactly REVIEW:
+   - Show the receipt plus reviewReason/needsReview.
+   - Stop. Do not clear a review flag or automatically approve the transaction.
+
+3. Otherwise If nextAction is exactly SHOW_ERROR:
+   - Show the API error/message and requestId if available.
+   - Stop.
+
+4. Otherwise If nextAction is exactly ASK_PURPOSE:
+   - The backend has already assigned a valid category; category classification must not run.
+   - Continue to PART D (purpose input followed by one update).
+
+5. Otherwise If nextAction is exactly CLASSIFY_CATEGORY:
+   - Continue to PART C.
+
+6. Otherwise:
+   - Show “Unsupported PFIS nextAction: [nextAction]” and stop. Never send an unknown value to the API.
+
+Remove the current branch order that checks needsEnrichment/requiresPurpose first. Route using nextAction.
+
+PART C — CATEGORY FALLBACK (ONLY WHEN nextAction=CLASSIFY_CATEGORY)
+
+1. Get allowedCategories from insertedResponse.allowedCategories.
+2. Combine allowedCategories using New Lines; set result to categoryListText.
+3. Set purpose to currentPurpose if non-empty; otherwise use an empty Text value.
+4. Run the category prompt with these variables:
+   - Variable_purpose = purpose
+   - Variable_merchant = merchantName
+   - Variable_amount = amount
+   - Variable_type = transactionType
+   - Variable_categoryListText = categoryListText
+   - Variable_rawmessage = the original SMS/email body
+5. Trim surrounding whitespace from the AI output and save it as categoryCandidate.
+6. If categoryCandidate is neither exactly ASK_PURPOSE nor an exact member of allowedCategories, show an error and stop without updating.
+7. If categoryCandidate=ASK_PURPOSE, or if insertedResponse.requiresPurpose is true:
+   - Go to PART D1 to ask the user for purpose.
+   - After the user answers, run the category prompt again with purpose populated. The second output must be an exact active category. If it is ASK_PURPOSE or any other invalid value, show an error and stop without updating.
+8. If categoryCandidate is a valid active category and requiresPurpose=false, use the existing currentPurpose and continue to PART E.
+
+Do not make an update call after the first/provisional category when a purpose question is required. Wait until both final values are available and send one update request.
+
+PART D — ASK FOR PURPOSE
+
+This branch is used by nextAction=ASK_PURPOSE and by the fallback path above.
+
+D1. Use Shortcuts “Ask for Input” (Text).
+Prompt text:
+“What was this payment for?
+[merchantName] · ₹[amount]”
+
+D2. Set Default Answer to purposeSuggestion when it is non-empty; otherwise leave Default Answer blank. The user can accept the suggested text or edit it before pressing Done. A suggestion is not saved until the user submits it.
+
+D3. Set variable purpose to Provided Input. If the action is cancelled or purpose is blank after trimming, stop without calling update.
+
+D4. If this branch started from ASK_PURPOSE, keep category = insertedTransaction.category. Do not run the category prompt again because the backend already determined the category.
+
+D5. If this branch started from CLASSIFY_CATEGORY, rerun PROMPT 2 with the user-confirmed purpose and the same merchant, amount, type, active category list, and raw alert. Validate the result exactly against allowedCategories. If invalid or ASK_PURPOSE, show an error and stop. Store the valid final value in category.
+
+PART E — ONE UPDATE REQUEST
+
+Only after both the final category and confirmed purpose are valid, call the existing Google Apps Script URL using Get Contents of URL with Method POST and Request Body JSON.
+
+Fields:
+- action = update
+- transactionId = existing transactionId variable
+- category = final category (exact active name; never ASK_PURPOSE)
+- purpose = purpose (non-empty user-confirmed value)
+- actor = user
+- reason = shortcut_enrichment
+- token = keep the existing token field only if your deployed script requires it
+
+Do not send txnString in an update. Do not prepend transactionId to txnString. Do not send empty category or purpose values.
+
+Parse the update response into updatedResponse. If updatedResponse.success is false, display its error/message and requestId; do not display a success receipt. If success is true, show updatedResponse.displayText. If the response still says REVIEW or needsReview=true, clearly show the unresolved review status; enrichment is not full approval.
+
+EXPECTED BEHAVIOUR
+1. GUDIVENUKALA ₹150 matching PR-002: exact rule assigns category and configured purpose because Auto Purpose=TRUE. nextAction should be SHOW_RECEIPT; no purpose or category prompt.
+2. GUDIVENUKALA different amount: the engine can reuse the category from the existing merchant-anchored rule, but must not inherit the ₹150 purpose template. nextAction should be ASK_PURPOSE; the input can default to purposeSuggestion for user confirmation/edit.
+3. RAINBOWCHILDRENSMEDIC with a valid MERCHANT rule: Healthcare assigned at insertion. Auto Purpose=FALSE means ask for purpose; do not call the category prompt.
+4. Unknown merchant with category unresolved: nextAction=CLASSIFY_CATEGORY. Run PROMPT 2; use ASK_PURPOSE when evidence is insufficient, ask the user, rerun classification, then save one update.
+5. Invalid AI category: stop without update.
+6. User cancels/enters blank purpose: stop without update.
+7. nextAction=REVIEW: show the unresolved issue; never auto-approve.
+8. RECONCILED or IDEMPOTENT_REPLAY with SHOW_RECEIPT: receipt only; no competing enrichment prompt.
+
+Do not use a standalone AI-generated purpose as a saved fact. The backend's historical purposeSuggestion may be an editable default, and saving occurs only after the user confirms the input.

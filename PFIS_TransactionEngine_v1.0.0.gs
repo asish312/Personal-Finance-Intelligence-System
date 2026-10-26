@@ -1,6 +1,9 @@
 /**
  * Personal Finance Intelligence System (PFIS) — Transaction Engine v1.0.0
- * Initial repository check-in / first-month stability baseline.
+ * First documented project release. Includes timezone-safe period bounds, parsed-date sorting/reconciliation,
+ * reference-led cross-channel matching, exact same-channel duplicate suppression, card-payment
+ * internal-transfer support, configurable amount-rule evidence, logically blank-safe row allocation,
+ * and batched AD:AM writes.
  *
  * RESPONSIBILITIES
  * - Deterministic ingestion, source replay protection, reconciliation, duplicate
@@ -9,11 +12,22 @@
  *   positions. It does not create, rename, reorder, clear, or format spreadsheet tabs.
  * - SMS and EMAIL use one ingestion pipeline. The first valid alert creates the
  *   canonical transaction; an opposite-channel match links evidence to that row.
- * - A distinct same-channel alert that resembles an existing transaction is kept
- *   as a separate row and marked for review. An exact same-channel source replay
- *   returns the existing record without inserting a second copy.
- * - No AI/model call occurs in Apps Script. Shortcuts proposes purpose/category;
- *   the backend validates the category and saves only the confirmed purpose.
+ * - Exact same-channel duplicate transactions (same precise transaction time,
+ *   amount, bank, merchant and compatible account identity) are retained as source
+ *   evidence linked to the existing transaction; no second ledger row is inserted.
+ *   Near-time lookalikes with a different timestamp remain review candidates so
+ *   legitimate repeated purchases are not silently discarded. Exact source replays
+ *   are also idempotent.
+ * - Only a matched rule with Auto Purpose=TRUE and a meaningful configured purpose may
+ *   prefill User Notes. Recurrence alone does not authorize purpose autofill.
+ * - When an amount-specific rule misses but merchant-anchored rules agree on one active
+ *   category, insertion assigns category only; amount-specific purpose/overrides do not leak.
+ * - The backend returns purposeSuggestion/purposeExamples from approved history for the
+ *   exact normalized merchant and type; suggestions are never saved without confirmation.
+ * - Missing categories are routed before purpose questions; Shortcuts may return ASK_PURPOSE
+ *   when evidence is insufficient, and the backend validates saved categories/purposes.
+ * - No AI/model call occurs in Apps Script. Shortcuts runs category fallback only when the
+ *   backend cannot assign a category and collects user-confirmed purpose.
  *
  * API CONTRACT
  * - GET: health/schema/read actions only. Never use GET for a write.
@@ -22,6 +36,9 @@
  * - For updates use action "update", transactionId, and non-empty category and/or
  *   purpose (userNotes is accepted for backwards compatibility). Do not send empty
  *   values or try to update backend-owned flags from Shortcuts.
+ * - For a potential duplicate/source conflict, use action "resolveexception" with
+ *   resolution "CONFIRM_DISTINCT" and a human reason. This confirms that the row
+ *   is a separate real transaction; it never deletes or merges ledger rows.
  * - Response status describes this request. verificationStatus describes evidence.
  *   needsEnrichment/requiresPurpose/requiresCategoryClassification describe missing
  *   information; needsReview/reviewStatus describe unresolved review conditions.
@@ -40,7 +57,7 @@ const PFIS_TIME_ZONE = 'Asia/Kolkata';
 const PFIS_MAX_READ_LIMIT = 100;
 const PFIS_MATCH_WINDOW_MS = 5 * 60 * 1000;
 const PFIS_FINAL_SOURCE_STATUSES = Object.freeze([
-  'ACCEPTED', 'RECONCILED', 'DUPLICATE_CANDIDATE', 'CONFLICT', 'PARSE_FAILED', 'SUPERSEDED'
+  'ACCEPTED', 'RECONCILED', 'DUPLICATE_CANDIDATE', 'DUPLICATE_SUPPRESSED', 'CONFLICT', 'PARSE_FAILED', 'NON_FINANCIAL_IGNORED', 'SUPERSEDED'
 ]);
 const PFIS_PROCESSING_SOURCE_STATUSES = Object.freeze([
   'PROCESSING_INSERT', 'PROCESSING_DUPLICATE', 'PROCESSING_RECONCILE', 'PROCESSING_CONFLICT'
@@ -105,15 +122,17 @@ const PFIS_RULE_HEADERS = Object.freeze([
   'Notes Template', 'Month Offset', 'Is Recurring', 'Type Override', 'Account Override',
   'Card Name Override', 'Priority'
 ]);
-// Optional existing columns N:S in the current workbook. The core rules engine
-// still works if these columns are absent; values are used only when their headers
-// match exactly, so a moved/renamed column can never be misinterpreted.
+// Optional Rules extensions N:S retain backward compatibility with older workbooks.
+// Auto Purpose is a separate optional T column so its absence never disables N:S.
+// Optional values are used only when their physical headers match exactly.
 const PFIS_RULE_OPTIONAL_FIELDS = Object.freeze([
   'ruleId', 'ruleEngine', 'instrumentOverride', 'autoReview', 'confidence', 'notes'
 ]);
 const PFIS_RULE_OPTIONAL_HEADERS = Object.freeze([
   'Rule ID', 'Rule Engine', 'Instrument Override', 'Auto Review', 'Confidence', 'Notes'
 ]);
+const PFIS_RULE_AUTO_PURPOSE_COLUMN = 20; // T
+const PFIS_RULE_AUTO_PURPOSE_HEADER = 'Auto Purpose';
 const PFIS_AUX_TX_COLUMNS = Object.freeze({ flowDirection: 38, auditTrail: 39 });
 const PFIS_AUDIT_TRAIL_MAX_CHARS = 1800;
 
@@ -124,6 +143,15 @@ const PFIS_CONFIG_FIELDS = Object.freeze([
 const PFIS_CONFIG_HEADERS = Object.freeze([
   'Bank', 'Account Type', 'Account/Card Suffix', 'Merchant Contains', 'Account', 'Card Name',
   'Instrument', 'Is Internal', 'Priority'
+]);
+// Optional Config!J extension in the user's workbook. It is read only when the
+// exact header exists, keeping older nine-column workbooks compatible.
+const PFIS_CONFIG_TEXT_PATTERN_COLUMN = 10;
+const PFIS_CONFIG_TEXT_PATTERN_HEADER = 'Text Pattern';
+const PFIS_LEGACY_TX_COLUMNS = Object.freeze({ first: 30, count: 8, flowDirection: 38, auditTrail: 39 });
+const PFIS_LEGACY_TX_HEADERS = Object.freeze([
+  'Original Text', 'Source ID', 'Batch ID', 'Message Hash', 'Canonical Key',
+  'Merchant Cleaned', 'Is Investment', 'Is Card Payment'
 ]);
 const PFIS_CATEGORY_FIELDS = Object.freeze(['category', 'active']);
 const PFIS_CATEGORY_HEADERS = Object.freeze(['Category', 'Active']);
@@ -145,6 +173,8 @@ var PFIS_RUNTIME_SPREADSHEET_CACHE = null;
 var PFIS_RUNTIME_SOURCE_CACHE = null;
 var PFIS_RUNTIME_TRANSACTION_CACHE = null;
 var PFIS_RUNTIME_CATEGORY_CACHE = null;
+var PFIS_RUNTIME_RULE_CACHE = null;
+var PFIS_RUNTIME_CONFIG_CACHE = null;
 var PFIS_PERF_CONTEXT = null;
 
 // -----------------------------------------------------------------------------
@@ -153,6 +183,9 @@ var PFIS_PERF_CONTEXT = null;
 
 function doGet(e) {
   const params = e && e.parameter ? e.parameter : {};
+  if (pfisString(params.view).toLowerCase() === 'dashboard' && typeof pfisServeDashboardHtml === 'function') {
+    return pfisServeDashboardHtml(e);
+  }
   return pfisJsonOutput(pfisRouteRequest(params, 'GET'));
 }
 
@@ -212,6 +245,8 @@ function pfisRouteRequest(input, method) {
   PFIS_RUNTIME_SOURCE_CACHE = null;
   PFIS_RUNTIME_TRANSACTION_CACHE = null;
   PFIS_RUNTIME_CATEGORY_CACHE = null;
+  PFIS_RUNTIME_RULE_CACHE = null;
+  PFIS_RUNTIME_CONFIG_CACHE = null;
 
   try {
     pfisPerfMeasure('authorization', function () { return pfisAuthorize(params); });
@@ -259,7 +294,7 @@ function pfisRouteRequest(input, method) {
     if (action === 'getanomalies') return pfisGetAnomalies(params, requestId);
     if (action === 'getdataquality') return pfisGetDataQuality(params, requestId);
 
-    const writeActions = ['', 'ingest', 'ingesttransaction', 'update', 'updatetransaction', 'reprocesssource'];
+    const writeActions = ['', 'ingest', 'ingesttransaction', 'update', 'updatetransaction', 'reprocesssource', 'resolveexception'];
     if (writeActions.indexOf(action) < 0) {
       return { success: false, error: 'UNKNOWN_ACTION', message: 'Unsupported action: ' + action, requestId: requestId };
     }
@@ -277,6 +312,7 @@ function pfisRouteRequest(input, method) {
     try {
       pfisAssertSchema();
       if (action === 'update' || action === 'updatetransaction') return pfisPerfMeasure('update_pipeline', function () { return pfisUpdateTransaction(params, requestId); });
+      if (action === 'resolveexception') return pfisPerfMeasure('resolve_exception_pipeline', function () { return pfisResolveTransactionException(params, requestId); });
       if (action === 'reprocesssource') return pfisPerfMeasure('reprocess_pipeline', function () { return pfisReprocessSource(params, requestId); });
       return pfisPerfMeasure('ingest_pipeline', function () { return pfisIngestSource(params, requestId); });
     } finally {
@@ -284,16 +320,128 @@ function pfisRouteRequest(input, method) {
     }
   } catch (error) {
     console.error('PFIS request error', requestId, error && error.stack ? error.stack : error);
+    let errorLog = { sourceLogLogged: false, changeLogLogged: false };
+    try {
+      errorLog = pfisLogUnhandledRequestError(params, action, requestId, error) || errorLog;
+    } catch (loggingError) {
+      // Diagnostics must never mask the original request error.
+      console.error('PFIS error logging failed', requestId, loggingError && loggingError.stack ? loggingError.stack : loggingError);
+    }
     return {
       success: false,
       error: error && error.code ? error.code : 'SERVER_ERROR',
       message: error && error.message ? error.message : String(error),
-      requestId: requestId
+      requestId: requestId,
+      errorLoggedToSheet: !!(errorLog.sourceLogLogged || errorLog.changeLogLogged),
+      sourceLogLogged: !!errorLog.sourceLogLogged,
+      changeLogLogged: !!errorLog.changeLogLogged
     };
   } finally {
     pfisPerfFinish(perfContext);
     PFIS_PERF_CONTEXT = previousPerfContext;
   }
+}
+
+/**
+ * Best-effort audit for unexpected runtime exceptions. Ingestion evidence is
+ * recorded in Source Log only when no matching canonical/source record exists,
+ * or an unfinished source already exists. Every caught runtime exception also
+ * attempts an idempotent Change Log entry. Logging failures are swallowed so
+ * the original API error remains visible.
+ */
+function pfisLogUnhandledRequestError(params, action, requestId, error) {
+  const result = { sourceLogLogged: false, changeLogLogged: false };
+  const p = params && typeof params === 'object' ? params : {};
+  const actionKey = pfisNormalizeAction(action || p.action);
+  const message = pfisString(error && error.message ? error.message : error).slice(0, 1500);
+  const errorCode = pfisString(error && error.code) || 'SERVER_ERROR';
+  const diagnostic = errorCode + ': ' + message;
+  const safeSheets = {};
+  try {
+    // Do not write diagnostics into a sheet whose positional schema is unsafe.
+    // Check per-sheet status rather than requiring every unrelated tab to pass.
+    const schema = pfisCheckWorkbookStructure();
+    schema.checks.forEach(function (check) { safeSheets[check.sheet] = check.status === 'OK'; });
+  } catch (schemaError) {
+    console.error('PFIS diagnostic schema check failed', requestId, schemaError);
+  }
+
+  // Source Log is for source-related failures. Don't manufacture source rows for
+  // reads/updates or for malformed requests that contain no source evidence.
+  if (['', 'ingest', 'ingesttransaction'].indexOf(actionKey) >= 0) {
+    const sourceType = pfisNormalizeSourceType(p.sourceType);
+    const evidenceText = p.originalText === undefined || p.originalText === null ? '' : String(p.originalText);
+    if (sourceType && evidenceText.trim() && safeSheets[PFIS_SHEETS.sources] === true) {
+      try {
+        const sourceHash = pfisComputeSourceHash(sourceType, evidenceText);
+        const sheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
+        const rows = pfisReadFixedRows(sheet, PFIS_SOURCE_FIELDS.length);
+        let latest = null;
+        for (let i = rows.length - 1; i >= 0; i--) {
+          const source = pfisObjectFromRow(rows[i], PFIS_SOURCE_FIELDS);
+          if (pfisString(source.sourceHash) !== sourceHash) continue;
+          if (pfisNormalizeSourceType(source.sourceType) !== sourceType) continue;
+          latest = { source: source, rowNumber: i + 2 };
+          break;
+        }
+
+        if (latest) {
+          const status = pfisString(latest.source.parseStatus).toUpperCase();
+          if (status === 'SERVER_ERROR') {
+            // Update an existing diagnostic rather than growing duplicates on
+            // repeated failures. This status is ignored by replay lookup so retry works.
+            sheet.getRange(latest.rowNumber, 18).setValue(diagnostic);
+            sheet.getRange(latest.rowNumber, 20).setValue('Unexpected runtime exception. This diagnostic source does not block retries.');
+            sheet.getRange(latest.rowNumber, 21).setValue(requestId);
+            result.sourceLogLogged = true;
+            pfisInvalidateSourceCache();
+          } else if (status.indexOf('PROCESSING_') === 0) {
+            // Keep the processing status and the Notes JSON intact so interrupted-
+            // write recovery still works. Only add the exception to Processing Error.
+            sheet.getRange(latest.rowNumber, 18).setValue(diagnostic);
+            sheet.getRange(latest.rowNumber, 21).setValue(requestId);
+            result.sourceLogLogged = true;
+            pfisInvalidateSourceCache();
+          }
+          // If a final source already exists, do not duplicate the source evidence.
+          // The Change Log event below records the request-level exception.
+        } else {
+          const record = {
+            sourceId: pfisMakeId('SRC-'), receivedAt: new Date(), sourceType: sourceType,
+            sender: pfisString(p.sender), subject: pfisString(p.subject), rawBody: evidenceText,
+            sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'SERVER_ERROR',
+            extractedAmount: '', extractedDate: '', datePrecision: '',
+            accountIdentifier: '', extractedMerchant: '', extractedReferenceNo: '', linkedTxnId: '',
+            ingestedAt: new Date(), processingError: diagnostic, archivedFlag: false,
+            notes: 'Unexpected runtime exception before the source was finalized. This diagnostic row is excluded from replay matching; retry is allowed.',
+            requestId: requestId, batchId: pfisString(p.batchId)
+          };
+          pfisAppendSourceRow(record);
+          pfisInvalidateSourceCache();
+          result.sourceLogLogged = true;
+        }
+      } catch (sourceLogError) {
+        console.error('PFIS Source Log diagnostic write failed', requestId,
+          sourceLogError && sourceLogError.stack ? sourceLogError.stack : sourceLogError);
+      }
+    }
+  }
+
+  // Change Log captures exceptions even for requests that were not ingestion.
+  try {
+    if (safeSheets[PFIS_SHEETS.changes] !== true) return result;
+    pfisAppendChangeOnce('request-server-error:' + requestId, {
+      transactionId: pfisString(p.transactionId || p.txnId),
+      targetTable: ['ingest', 'ingesttransaction', ''].indexOf(actionKey) >= 0 ? PFIS_SHEETS.sources : (actionKey || 'Request'),
+      actor: 'system_error', field: 'SERVER_ERROR', oldValue: '', newValue: errorCode,
+      reason: diagnostic, requestId: requestId
+    });
+    result.changeLogLogged = true;
+  } catch (changeLogError) {
+    console.error('PFIS Change Log diagnostic write failed', requestId,
+      changeLogError && changeLogError.stack ? changeLogError.stack : changeLogError);
+  }
+  return result;
 }
 
 // -----------------------------------------------------------------------------
@@ -372,6 +520,15 @@ function pfisIngestSource(params, requestId, options) {
   }
 
   const duplicate = pfisPerfMeasure('same_channel_duplicate_matching', function () { return pfisFindSameChannelDuplicate(parsed, sourceType, canonicalMerchant); });
+  // A high-confidence same-channel duplicate must not create a second canonical
+  // Transaction Log row. Keep the incoming message in Source Log, link it to the
+  // original transaction, and audit the suppression. Exact time alone is not
+  // sufficient: the matcher also requires matching amount/bank/merchant and a
+  // compatible account identity; conflicting reference numbers disqualify it.
+  if (duplicate && duplicate.exactDateTime === true) {
+    return pfisRecordSuppressedSameChannelDuplicate(
+      duplicate, parsed, evidenceText, params, requestId, sourceType, sourceHash);
+  }
   let reviewReason = '';
   if (!pfisNormalizeType(ruleResult.typeOverride || parsed.type)) reviewReason = 'unknown_transaction_type';
   else if (!canonicalMerchant || !pfisIsMatchableMerchant(canonicalMerchant)) reviewReason = 'merchant_missing_or_unusable';
@@ -433,23 +590,35 @@ function pfisIngestSource(params, requestId, options) {
   return pfisBuildIngestResponse(transaction, requestId, sourceType, finalStatus, sourceId);
 }
 
+/**
+ * A rule-generated purpose is trusted only when its explicit Auto Purpose flag is
+ * TRUE and the matched rule supplies a meaningful purpose. Recurrence alone is
+ * not permission to infer the purpose of an individual payment.
+ */
+function pfisGetTrustedPurposeFromRule(ruleResult, merchant) {
+  if (!ruleResult || !pfisTruthy(ruleResult.autoPurpose)) return '';
+  const purpose = pfisCleanText(ruleResult.notes);
+  return pfisIsMeaningfulPurpose(purpose, merchant) ? purpose : '';
+}
+
 function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceId, sourceHash,
   ruleResult, configResult, reviewReason, duplicate) {
   const now = new Date();
   const type = pfisNormalizeType(ruleResult.typeOverride || parsed.type);
   const category = pfisGetCategoryList().indexOf(ruleResult.category) >= 0 ? ruleResult.category : '';
-  // Ingestion must not accept a free-form frontend 'purpose' field: a mislabeled
-  // Shortcut variable could silently copy the merchant into User Notes. Only a
-  // validated, contextual deterministic rule may prefill purpose. User/model
-  // enrichment is written through the explicit update action after confirmation.
-  const userNotes = pfisCleanText(ruleResult.notes);
+  // Only a matched rule with Auto Purpose=TRUE may prefill User Notes.
+  // Recurrence alone does not establish a purpose; otherwise keep it blank.
+  // Frontend/model enrichment is saved only through the explicit update action.
+  const userNotes = pfisGetTrustedPurposeFromRule(ruleResult, ruleResult.merchantOverride || parsed.merchant);
   // Keep review state consistent with enrichment: a new row missing category or
   // purpose is retained immediately, but is not treated as complete/approved.
   // A duplicate/conflict/type/merchant problem takes precedence over enrichment.
   const enrichmentMissing = !category || !pfisIsMeaningfulPurpose(userNotes, ruleResult.merchantOverride || parsed.merchant);
+  const accountOverrideResolvesConfig = !!pfisCleanText(ruleResult.accountOverride);
+  const configReviewReason = configResult && configResult.ambiguous ? 'config_mapping_ambiguous' :
+    (configResult && configResult.unresolved && !accountOverrideResolvesConfig ? 'config_mapping_unresolved' : '');
   const actualReviewReason = duplicate ? 'duplicate_candidate' :
-    (reviewReason || (configResult && configResult.ambiguous ? 'config_mapping_ambiguous' :
-      (enrichmentMissing ? 'enrichment_required' : '')));
+    (reviewReason || configReviewReason || (enrichmentMissing ? 'enrichment_required' : ''));
   const needsReview = !!actualReviewReason;
   const confidence = pfisParseConfidence(ruleResult.confidence);
   return {
@@ -467,7 +636,7 @@ function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceI
     account: pfisCleanText(ruleResult.accountOverride || configResult.account),
     cardName: pfisCleanText(ruleResult.cardNameOverride || configResult.cardName),
     isRecurring: !!ruleResult.isRecurring,
-    isInternalTransfer: !!configResult.isInternal && type === 'transfer',
+    isInternalTransfer: !!configResult.isInternal && (type === 'transfer' || type === 'card_payment'),
     needsReview: needsReview,
     counterparty: parsed.counterparty,
     refNo: parsed.refNo,
@@ -483,7 +652,14 @@ function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceI
     categoryConfidence: !category || confidence === null ? '' : confidence,
     validationFlag: duplicate ? 'DUPLICATE_CANDIDATE' : (actualReviewReason === 'source_conflict' ? 'SOURCE_CONFLICT' : (needsReview ? 'NEEDS_REVIEW' : 'VALID')),
     createdAt: now,
-    lastUpdatedAt: now
+    lastUpdatedAt: now,
+    // Optional existing workbook columns AD:AK. These properties are not part of
+    // the canonical A:AC schema and are written only when matching headers exist.
+    originalText: params && params.originalText !== undefined ? String(params.originalText) : '',
+    sourceId: sourceId || '', batchId: pfisString(params && params.batchId), sourceHash: sourceHash || '',
+    canonicalKey: transactionId ? 'CANON-' + transactionId : '',
+    merchantCleaned: pfisNormalizeMerchant(ruleResult.merchantOverride || parsed.merchant),
+    isInvestment: type === 'investment', isCardPayment: type === 'card_payment'
   };
 }
 
@@ -694,6 +870,7 @@ function pfisRecoverLegacyConflictSource(source, params, requestId) {
 
 function pfisStoreParseFailure(sourceType, evidenceText, params, requestId, message, options) {
   const opts = options || {};
+  const ignoredNonFinancial = pfisIsClearlyNonFinancialAlert(evidenceText);
   const sourceHash = pfisComputeSourceHash(sourceType, evidenceText);
   const prior = pfisFindSourceByHash(sourceHash, sourceType, opts.ignoreSourceId || '');
   if (prior && PFIS_FINAL_SOURCE_STATUSES.indexOf(prior.parseStatus) >= 0) return pfisReplayResponse(prior, requestId);
@@ -707,16 +884,34 @@ function pfisStoreParseFailure(sourceType, evidenceText, params, requestId, mess
   const rowNumber = pfisAppendSourceRow({
     sourceId: pfisMakeId('SRC-'), receivedAt: new Date(), sourceType: sourceType,
     sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
-    sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PARSE_FAILED',
+    sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: ignoredNonFinancial ? 'NON_FINANCIAL_IGNORED' : 'PARSE_FAILED',
     extractedAmount: '', extractedDate: '', datePrecision: '', accountIdentifier: pfisExtractAccountIdentifier(evidenceText),
     extractedMerchant: '', extractedReferenceNo: '', linkedTxnId: '', ingestedAt: new Date(),
-    processingError: message, archivedFlag: false, notes: 'Parser output could not be validated.',
+    processingError: ignoredNonFinancial ? '' : message, archivedFlag: false,
+    notes: ignoredNonFinancial ? 'Non-financial OTP/verification alert; no ledger transaction was created.' : 'Parser output could not be validated.',
     requestId: requestId, batchId: pfisString(params.batchId)
   });
+  if (ignoredNonFinancial) {
+    return { success: true, status: 'NON_FINANCIAL_IGNORED', recorded: false, transactionId: null,
+      message: 'A clear OTP/verification-only alert was logged as non-financial; no ledger row was created.',
+      sourceId: pfisGetSourceIdAtRow(rowNumber), requestId: requestId };
+  }
   return {
     success: false, status: 'PARSE_FAILED', error: 'PARSE_FAILED', message: message,
     sourceId: pfisGetSourceIdAtRow(rowNumber), requestId: requestId
   };
+}
+
+function pfisIsClearlyNonFinancialAlert(evidenceText) {
+  const text = pfisSanitizeRawText(evidenceText, false);
+  if (!text.trim()) return false;
+  const hasOtpSignal = /\bOTP\b|one[- ]time password|verification code|login code|authentication code/i.test(text);
+  if (!hasOtpSignal) return false;
+  // Financial verbs or a signed money amount override the OTP signal. This keeps
+  // a payment alert that contains security boilerplate from being ignored.
+  const hasFinancialSignal = /\b(?:debited|credited|spent|purchase|paid|payment|transferred|withdrawn|cash withdrawal|received|refund)\b/i.test(text) ||
+    /(?:₹|INR|Rs\.?\s*)\s*\d[\d,]*(?:\.\d{1,2})?/i.test(text);
+  return !hasFinancialSignal;
 }
 
 function pfisRecoverProcessingSource(source, txnString, params, requestId) {
@@ -730,6 +925,14 @@ function pfisRecoverProcessingSource(source, txnString, params, requestId) {
   }
   parsed.rawEvidence = String(source.rawBody || params.originalText || '');
   parsed.accountIdentifier = pfisExtractAccountIdentifier(parsed.rawEvidence);
+  const recoveryMeta = pfisParseProcessingMeta(source.notes);
+  if (recoveryMeta.phase === 'DUPLICATE_SUPPRESSED') {
+    const originalTransactionId = pfisString(recoveryMeta.duplicateCandidateId || source.linkedTxnId);
+    return pfisCompleteSuppressedSameChannelDuplicate({
+      sourceId: source.sourceId, rowNumber: source.rowNumber, sourceType: source.sourceType,
+      transactionId: originalTransactionId
+    }, requestId, 'Recovered interrupted same-channel duplicate suppression.');
+  }
   if (source.parseStatus === 'PROCESSING_RECONCILE') {
     if (pfisFindTransactionRow(source.linkedTxnId) < 2) {
       return { success: false, error: 'RECOVERY_INTEGRITY_ERROR', message: 'A processing reconciliation points to a missing transaction.', sourceId: source.sourceId, requestId: requestId };
@@ -880,11 +1083,15 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   const merchantUsable = pfisIsMatchableMerchant(existingMerchant) && pfisIsMatchableMerchant(incomingMerchantKey);
   const sameMerchant = merchantUsable && existingMerchant === incomingMerchantKey;
   const sameAmount = pfisSameMoney(existing.amount, incoming.amount);
-  const sameRef = !!pfisNormalizeReference(existing.refNo) &&
-    pfisNormalizeReference(existing.refNo) === pfisNormalizeReference(incoming.refNo);
+  const existingRef = pfisNormalizeReference(existing.refNo);
+  const incomingRef = pfisNormalizeReference(incoming.refNo);
+  const sameRef = !!existingRef && existingRef === incomingRef;
   const sameDay = pfisSameCalendarDay(existingSource.extractedDate, incoming.datetime);
-  const hasTime = existingSource.datePrecision === 'DATETIME' && incoming.datePrecision === 'DATETIME';
-  const withinFive = hasTime && Math.abs(new Date(existingSource.extractedDate).getTime() - incoming.datetime.getTime()) <= PFIS_MATCH_WINDOW_MS;
+  const hasTime = pfisIsPrecision(existingSource.datePrecision) && pfisIsPrecision(incoming.datePrecision);
+  const existingDate = pfisParseDateValue(existingSource.extractedDate);
+  const incomingDate = pfisParseDateValue(incoming.datetime);
+  const withinFive = hasTime && !!existingDate && !!incomingDate &&
+    Math.abs(existingDate.getTime() - incomingDate.getTime()) <= PFIS_MATCH_WINDOW_MS;
   const otherwiseSameCore = sameAmount && sameMerchant;
   const existingId = pfisNormalizeAccountIdentifier(existingSource.accountIdentifier);
   const incomingId = pfisNormalizeAccountIdentifier(incoming.accountIdentifier);
@@ -893,9 +1100,18 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   const incomingType = pfisNormalizeAccountType(incoming.accountType);
   const accountTypeConflict = !!existingType && !!incomingType && existingType !== incomingType;
 
-  if (sameRef && (withinFive || (!hasTime && sameDay)) && (!sameAmount || !sameMerchant || accountConflict || accountTypeConflict)) {
-    return { kind: 'CONFLICT', reason: 'same_reference_conflicting_transaction_facts' };
+  // A same-bank, same-day, same-reference, same-amount pair is a strong
+  // cross-channel identity even when the email gateway is delayed by more than
+  // five minutes or the merchant string differs between SMS and email. Explicit
+  // account/account-type contradictions still block auto-linking.
+  if (sameRef && sameDay) {
+    if (!sameAmount || accountConflict || accountTypeConflict) {
+      return { kind: 'CONFLICT', reason: !sameAmount ? 'same_reference_amount_conflict' :
+        (accountConflict ? 'account_identifier_conflict' : 'account_type_conflict') };
+    }
+    return { kind: 'MATCH', reason: 'exact_reference_amount_bank_day' };
   }
+
   if (otherwiseSameCore && withinFive && (accountConflict || accountTypeConflict)) {
     return { kind: 'CONFLICT', reason: accountConflict ? 'account_identifier_conflict' : 'account_type_conflict' };
   }
@@ -906,20 +1122,30 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   if (!otherwiseSameCore || !withinFive) return { kind: 'NO_MATCH' };
   if (accountConflict) return { kind: 'CONFLICT', reason: 'account_identifier_conflict' };
   if (accountTypeConflict) return { kind: 'CONFLICT', reason: 'account_type_conflict' };
-  return { kind: 'MATCH', reason: sameRef ? 'exact_core_match_and_reference' : 'exact_core_match_within_5m' };
+  return { kind: 'MATCH', reason: 'exact_core_match_within_5m' };
 }
 
 function pfisFindSameChannelDuplicate(incoming, sourceType, merchant) {
   const sourceIndex = pfisBuildSourceIndex();
   const candidates = [];
+  const incomingReference = pfisNormalizeReference(incoming.refNo);
+  const incomingDatetime = incoming.datetime instanceof Date ? incoming.datetime : pfisParseDateValue(incoming.datetime);
+
   pfisReadTransactions().forEach(function (existing) {
+    // A previously flagged duplicate is not a canonical anchor. Comparing new
+    // messages against it would create a chain of duplicate rows on every replay.
+    if (pfisString(existing.validationFlag).toUpperCase() === 'DUPLICATE_CANDIDATE') return;
+
     const sources = sourceIndex[existing.transactionId] || [];
-    if (!sources.some(function (s) { return s.sourceType === sourceType; })) return;
+    const relevantSources = sources.filter(function (source) { return source.sourceType === sourceType; });
+    if (!relevantSources.length) return;
+
     const sameAmount = pfisSameMoney(existing.amount, incoming.amount);
     const sameBank = pfisNormalizeBank(existing.bank) === pfisNormalizeBank(incoming.bank);
     const existingMerchant = pfisNormalizeMerchant(existing.merchant);
     const incomingMerchantKey = pfisNormalizeMerchant(merchant);
-    const sameMerchant = pfisIsMatchableMerchant(existingMerchant) && pfisIsMatchableMerchant(incomingMerchantKey) && existingMerchant === incomingMerchantKey;
+    const sameMerchant = pfisIsMatchableMerchant(existingMerchant) &&
+      pfisIsMatchableMerchant(incomingMerchantKey) && existingMerchant === incomingMerchantKey;
     if (!sameAmount || !sameBank || !sameMerchant) return;
 
     const accountTypeA = pfisNormalizeAccountType(existing.accountType);
@@ -927,25 +1153,134 @@ function pfisFindSameChannelDuplicate(incoming, sourceType, merchant) {
     if (accountTypeA && accountTypeB && accountTypeA !== accountTypeB) return;
 
     const incomingId = pfisNormalizeAccountIdentifier(incoming.accountIdentifier);
-    const relevantSources = sources.filter(function (s) { return s.sourceType === sourceType; });
-    const accountCompatible = relevantSources.some(function (s) {
-      const existingId = pfisNormalizeAccountIdentifier(s.accountIdentifier);
+    const accountCompatible = relevantSources.some(function (source) {
+      const existingId = pfisNormalizeAccountIdentifier(source.accountIdentifier);
       return !(existingId && incomingId && existingId !== incomingId);
     });
     if (!accountCompatible) return;
 
-    const timeMatch = relevantSources.some(function (s) {
-      if (!pfisIsPrecision(s.datePrecision) || incoming.datePrecision !== 'DATETIME') return false;
-      const existingDate = pfisParseDateValue(s.extractedDate);
-      return !!existingDate && Math.abs(existingDate.getTime() - incoming.datetime.getTime()) <= PFIS_MATCH_WINDOW_MS;
+    // If both transaction references are present, they must agree. A different
+    // UTR/reference is evidence of a distinct event even when other fields match.
+    const existingReference = pfisNormalizeReference(existing.refNo) ||
+      pfisNormalizeReference(relevantSources[0].extractedReferenceNo);
+    const referenceConflict = !!incomingReference && !!existingReference && incomingReference !== existingReference;
+
+    let timeMatch = false;
+    let exactDateTime = false;
+    relevantSources.forEach(function (source) {
+      if (!pfisIsPrecision(source.datePrecision) || !pfisIsPrecision(incoming.datePrecision) || !incomingDatetime) return;
+      const existingDate = pfisParseDateValue(source.extractedDate);
+      if (!existingDate) return;
+      const difference = Math.abs(existingDate.getTime() - incomingDatetime.getTime());
+      if (difference <= PFIS_MATCH_WINDOW_MS) timeMatch = true;
+      // A conflicting reference prevents automatic suppression, but the near-time
+      // similarity is still returned as a review candidate rather than ignored.
+      if (difference === 0 && !referenceConflict) exactDateTime = true;
     });
-    if (timeMatch) {
-      const first = relevantSources[0];
-      candidates.push({ transactionId: existing.transactionId, sourceId: first.sourceId, reason: 'same_amount_bank_account_merchant_within_5m' });
-    }
+    if (!timeMatch) return;
+
+    candidates.push({
+      transactionId: existing.transactionId,
+      sourceId: relevantSources[0].sourceId,
+      reason: exactDateTime ? 'exact_same_channel_transaction_fingerprint' :
+        (referenceConflict ? 'same_channel_reference_conflict_needs_review' : 'same_amount_bank_account_merchant_within_5m'),
+      exactDateTime: exactDateTime,
+      referenceConflict: referenceConflict,
+      referenceMatch: !!incomingReference && !!existingReference && incomingReference === existingReference
+    });
   });
-  candidates.sort(function (a, b) { return a.transactionId.localeCompare(b.transactionId); });
-  return candidates.length ? candidates[0] : null;
+
+  if (!candidates.length) return null;
+  candidates.sort(function (a, b) {
+    if (a.exactDateTime !== b.exactDateTime) return a.exactDateTime ? -1 : 1;
+    if (a.referenceMatch !== b.referenceMatch) return a.referenceMatch ? -1 : 1;
+    return a.transactionId.localeCompare(b.transactionId);
+  });
+
+  const exactCandidates = candidates.filter(function (candidate) { return candidate.exactDateTime; });
+  if (exactCandidates.length === 1) return exactCandidates[0];
+  if (exactCandidates.length > 1) {
+    // Never silently suppress against an ambiguous set of otherwise identical
+    // canonical transactions. Return a review candidate, not an auto-suppression.
+    const withReference = exactCandidates.filter(function (candidate) { return candidate.referenceMatch; });
+    if (withReference.length === 1) return withReference[0];
+    return Object.assign({}, exactCandidates[0], {
+      exactDateTime: false,
+      ambiguousExactMatch: true,
+      reason: 'ambiguous_exact_same_channel_duplicate'
+    });
+  }
+  return candidates[0];
+}
+
+/**
+ * Stores the incoming evidence without appending a second canonical transaction.
+ * Only called when the same-channel matcher proves exact transaction-time equality
+ * along with amount, bank, merchant, and account/reference compatibility.
+ */
+function pfisRecordSuppressedSameChannelDuplicate(duplicate, parsed, evidenceText, params,
+  requestId, sourceType, sourceHash) {
+  const sourceId = pfisMakeId('SRC-');
+  const transactionId = pfisString(duplicate && duplicate.transactionId);
+  if (!transactionId || pfisFindTransactionRow(transactionId) < 2) {
+    return {
+      success: false, status: 'DUPLICATE_TARGET_MISSING', error: 'DUPLICATE_TARGET_MISSING',
+      message: 'A duplicate candidate was found, but its original transaction no longer exists. No source or transaction row was written.',
+      requestId: requestId
+    };
+  }
+
+  const reason = 'exact_same_channel_transaction_fingerprint';
+  const meta = {
+    phase: 'DUPLICATE_SUPPRESSED', duplicateCandidateId: transactionId,
+    reason: reason, datePrecision: parsed.datePrecision
+  };
+  const sourceRowNumber = pfisAppendSourceRow({
+    sourceId: sourceId, receivedAt: new Date(), sourceType: sourceType,
+    sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
+    sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PROCESSING_DUPLICATE',
+    extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
+    accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
+    extractedReferenceNo: parsed.refNo, linkedTxnId: transactionId, ingestedAt: new Date(),
+    processingError: '', archivedFlag: false, notes: JSON.stringify(meta),
+    requestId: requestId, batchId: pfisString(params.batchId)
+  });
+
+  return pfisCompleteSuppressedSameChannelDuplicate({
+    sourceId: sourceId, rowNumber: sourceRowNumber, sourceType: sourceType,
+    transactionId: transactionId
+  }, requestId, 'Exact same-channel duplicate detected; no new Transaction Log row inserted.');
+}
+
+function pfisCompleteSuppressedSameChannelDuplicate(sourceInfo, requestId, notes) {
+  const sourceId = pfisString(sourceInfo && sourceInfo.sourceId);
+  const transactionId = pfisString(sourceInfo && sourceInfo.transactionId);
+  const sourceType = pfisNormalizeSourceType(sourceInfo && sourceInfo.sourceType);
+  const sourceRowNumber = Number(sourceInfo && sourceInfo.rowNumber) || 0;
+  if (!sourceId || !transactionId || !sourceType || sourceRowNumber < 2 || pfisFindTransactionRow(transactionId) < 2) {
+    return {
+      success: false, status: 'DUPLICATE_RECOVERY_REQUIRED', error: 'DUPLICATE_RECOVERY_REQUIRED',
+      message: 'Duplicate source could not be finalized because its original transaction or Source Log row is missing. No new transaction was created.',
+      sourceId: sourceId || null, transactionId: transactionId || null, requestId: requestId
+    };
+  }
+
+  pfisAppendChangeOnce('same-channel-duplicate-suppressed:' + sourceId, {
+    transactionId: transactionId, targetTable: PFIS_SHEETS.sources, actor: 'system_matching',
+    field: 'Duplicate Source Suppressed', oldValue: '', newValue: transactionId,
+    reason: 'Same-channel source matched exact transaction datetime, amount, bank and merchant with compatible account/reference; source linked to existing transaction without a second ledger row.',
+    requestId: requestId
+  });
+  pfisFinalizeSource(sourceRowNumber, 'DUPLICATE_SUPPRESSED', notes || 'Exact same-channel duplicate suppressed; linked to existing transaction ' + transactionId + '.', '');
+
+  const transaction = pfisGetTransaction(transactionId, false);
+  const response = pfisBuildIngestResponse(transaction, requestId, sourceType, 'DUPLICATE_SUPPRESSED', sourceId);
+  response.transactionInserted = false;
+  response.sourceRecorded = true;
+  response.duplicateOf = transactionId;
+  response.nextAction = 'SHOW_RECEIPT';
+  response.message = 'This alert matches an existing same-channel transaction at the exact transaction time with the same amount, bank and merchant. The source was retained for audit; no new Transaction Log row was inserted.';
+  return response;
 }
 
 function pfisGetSourceCache() {
@@ -995,7 +1330,7 @@ function pfisInvalidateSourceCache() {
 function pfisAppendTransaction(transaction, auditSummary) {
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
   const row = pfisRowFromObject(transaction, PFIS_TX_FIELDS);
-  const targetRow = sheet.getLastRow() + 1;
+  const targetRow = pfisGetNextAvailableRow(sheet, 1);
   sheet.getRange(targetRow, 1, 1, PFIS_TX_FIELDS.length).setValues([row]);
   pfisInvalidateTransactionCache();
   pfisWriteLegacyTransactionAux(targetRow, transaction,
@@ -1006,7 +1341,7 @@ function pfisAppendTransaction(transaction, auditSummary) {
 function pfisAppendSourceRow(source) {
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
   const row = pfisRowFromObject(source, PFIS_SOURCE_FIELDS);
-  const target = sheet.getLastRow() + 1;
+  const target = pfisGetNextAvailableRow(sheet, 1);
   sheet.getRange(target, 1, 1, PFIS_SOURCE_FIELDS.length).setValues([row]);
   pfisInvalidateSourceCache();
   return target;
@@ -1038,9 +1373,46 @@ function pfisAppendChangeOnceInternal(eventKey, change) {
     actor: 'system', field: '', oldValue: '', newValue: '', reason: '', requestId: ''
   }, change || {});
   record.changeId = changeId;
-  const target = sheet.getLastRow() + 1;
+  const target = pfisGetNextAvailableRow(sheet, 1);
   sheet.getRange(target, 1, 1, PFIS_CHANGE_FIELDS.length).setValues([pfisRowFromObject(record, PFIS_CHANGE_FIELDS)]);
   return target;
+}
+
+
+/**
+ * Batched idempotent Change Log writer. Pass [{eventKey, change}, ...]. Existing
+ * deterministic Change IDs are skipped. Missing records are written with one
+ * setValues call into a verified contiguous blank block.
+ */
+function pfisAppendChangeOnceBatch(events) {
+  if (!Array.isArray(events) || !events.length) return [];
+  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.changes);
+  const existingKeys = Object.create(null);
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, 1).getValues().forEach(function (row) {
+      const value = pfisString(row[0]);
+      if (value) existingKeys[value] = true;
+    });
+  }
+  const pending = [];
+  const seen = Object.create(null);
+  events.forEach(function (event) {
+    if (!event || !pfisString(event.eventKey)) throw pfisError('BAD_AUDIT_EVENT', 'Each batched Change Log item requires eventKey.');
+    const changeId = 'CHG-' + pfisComputeHash(event.eventKey).substring(0, 16);
+    if (existingKeys[changeId] || seen[changeId]) return;
+    seen[changeId] = true;
+    const record = Object.assign({
+      changeId: changeId, changedAt: new Date(), targetTable: PFIS_SHEETS.transactions,
+      actor: 'system', field: '', oldValue: '', newValue: '', reason: '', requestId: ''
+    }, event.change || {});
+    record.changeId = changeId;
+    pending.push(pfisRowFromObject(record, PFIS_CHANGE_FIELDS));
+  });
+  if (!pending.length) return [];
+  const startRow = pfisGetNextAvailableBlock(sheet, 1, pending.length, PFIS_CHANGE_FIELDS.length);
+  sheet.getRange(startRow, 1, pending.length, PFIS_CHANGE_FIELDS.length).setValues(pending);
+  return pending.map(function (_, index) { return startRow + index; });
 }
 
 function pfisFindSourceByHash(hash, sourceType, ignoreSourceId, ignoreParseFailed, ignoreOrphaned) {
@@ -1053,7 +1425,7 @@ function pfisFindSourceByHash(hash, sourceType, ignoreSourceId, ignoreParseFaile
     if (pfisString(source.sourceHash) !== hash) continue;
     if (pfisNormalizeSourceType(source.sourceType) !== sourceType) continue;
     const status = pfisString(source.parseStatus).toUpperCase();
-    if (status === 'SUPERSEDED') continue;
+    if (status === 'SUPERSEDED' || status === 'SERVER_ERROR') continue;
     if (ignoreParseFailed && status === 'PARSE_FAILED') continue;
     if (ignoreOrphaned && (!pfisString(source.linkedTxnId) || pfisFindTransactionRow(source.linkedTxnId) < 2)) continue;
     return Object.assign({}, source);
@@ -1061,12 +1433,18 @@ function pfisFindSourceByHash(hash, sourceType, ignoreSourceId, ignoreParseFaile
   return null;
 }
 
+
 function pfisGetSourceIdAtRow(rowNumber) {
   return pfisGetRequiredSheet(PFIS_SHEETS.sources).getRange(rowNumber, 1).getValue();
 }
 
 function pfisReplayResponse(source, requestId) {
   const status = pfisString(source.parseStatus).toUpperCase();
+  if (status === 'NON_FINANCIAL_IGNORED') {
+    return { success: true, status: 'NON_FINANCIAL_IGNORED', recorded: false, transactionId: null,
+      sourceId: source.sourceId, requestId: requestId,
+      message: 'Exact replay of a non-financial OTP/verification alert; no ledger transaction was created.' };
+  }
   if (status === 'PARSE_FAILED') {
     return {
       success: false, status: 'PARSE_FAILED', error: 'PARSE_FAILED',
@@ -1240,17 +1618,104 @@ function pfisGetPendingReview(limitInput) {
 
 function pfisGetNeedsEnrichment(limitInput) {
   const limit = pfisClampLimit(limitInput, 50);
-  return pfisReadTransactions().map(function (txn) {
+  const pending = pfisReadTransactions().map(function (txn) {
     const enrichment = pfisGetEnrichmentState(txn.category, txn.userNotes, undefined, txn.merchant);
     if (!enrichment.requiresPurpose && !enrichment.requiresCategoryClassification) return null;
-    return {
+    const item = {
       transactionId: txn.transactionId, dateTime: txn.dateTime, amount: txn.amount,
-      merchant: txn.merchant, category: txn.category, userNotes: txn.userNotes,
+      merchant: txn.merchant, category: txn.category, userNotes: txn.userNotes, type: txn.type,
       requiresPurpose: enrichment.requiresPurpose,
       requiresCategoryClassification: enrichment.requiresCategoryClassification,
-      verificationStatus: pfisGetVerificationState(txn.transactionId, txn.validationFlag).status
+      verificationStatus: pfisGetVerificationState(txn.transactionId, txn.validationFlag).status,
+      // Stable keys preserve compatibility with the existing iOS Shortcut.
+      // Empty means no trustworthy history exists; it is not an invented default.
+      purposeSuggestion: '',
+      purposeExamples: []
     };
-  }).filter(Boolean).slice(0, limit);
+    if (enrichment.requiresPurpose) {
+      const examples = pfisFindPurposeExamples(txn.transactionId, txn.merchant, txn.type, 3);
+      item.purposeExamples = examples;
+      item.purposeSuggestion = examples.length ? examples[0].purpose : '';
+    }
+    return item;
+  }).filter(Boolean);
+  return pending.slice(0, limit);
+}
+
+/**
+ * Explicit human resolution for a potential duplicate/source conflict.
+ * This action only confirms that the selected row is a distinct real transaction;
+ * it never deletes/merges ledger rows or silently chooses a duplicate to discard.
+ * Required POST JSON: {action:"resolveexception", transactionId:"...",
+ * resolution:"CONFIRM_DISTINCT", reason:"...", actor:"user"}.
+ */
+function pfisResolveTransactionException(params, requestId) {
+  const transactionId = pfisString(params.transactionId || params.txnId);
+  const resolution = pfisString(params.resolution).toUpperCase().replace(/[ -]+/g, '_');
+  const reason = pfisCleanText(params.reason);
+  if (!transactionId) return { success: false, status: 'UPDATE_REJECTED', error: 'BAD_REQUEST', message: 'transactionId is required.', requestId: requestId };
+  if (resolution !== 'CONFIRM_DISTINCT') {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'UNSUPPORTED_RESOLUTION',
+      message: 'Only CONFIRM_DISTINCT is supported. Duplicate deletion/merging is intentionally not automated because it can change reported cash flow.',
+      transactionId: transactionId, allowedResolutions: ['CONFIRM_DISTINCT'], requestId: requestId };
+  }
+  if (!reason || reason.length < 8) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'RESOLUTION_REASON_REQUIRED',
+      message: 'Provide a specific human review reason of at least 8 characters; no fields were changed.', transactionId: transactionId, requestId: requestId };
+  }
+  const rowNumber = pfisFindTransactionRow(transactionId);
+  if (rowNumber < 2) return { success: false, status: 'NOT_FOUND', error: 'NOT_FOUND',
+    message: 'Transaction not found: ' + transactionId, transactionId: transactionId, requestId: requestId };
+  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const current = pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  const currentFlag = pfisString(current.validationFlag).toUpperCase();
+  if (['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT'].indexOf(currentFlag) < 0) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'NO_RESOLVABLE_CONFLICT',
+      message: 'This transaction does not have a DUPLICATE_CANDIDATE or SOURCE_CONFLICT flag. No fields were changed.',
+      transactionId: transactionId, currentValidationFlag: currentFlag, requestId: requestId };
+  }
+
+  const categories = pfisGetCategoryList();
+  let remainingReason = '';
+  if (!pfisNormalizeType(current.type)) remainingReason = 'unknown_transaction_type';
+  else if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(current.merchant))) remainingReason = 'merchant_missing_or_unusable';
+  else if (pfisString(current.reviewReason) === 'time_precision_unavailable') remainingReason = 'time_precision_unavailable';
+  else {
+    const enrichment = pfisGetEnrichmentState(current.category, current.userNotes, categories, current.merchant);
+    if (enrichment.requiresPurpose || enrichment.requiresCategoryClassification) remainingReason = 'enrichment_required';
+  }
+  const needsReview = !!remainingReason;
+  const newFlag = needsReview ? 'NEEDS_REVIEW' : 'VALID';
+  const reviewStatus = needsReview ? 'Pending' : 'Approved';
+  const actor = pfisString(params.actor) || 'user';
+  const now = new Date();
+
+  // Set only system-owned review columns. Financial facts and source evidence are
+  // immutable in this action. A user must resolve each conflicting row explicitly.
+  const updates = [
+    [15, needsReview], [20, reviewStatus], [21, remainingReason],
+    [22, needsReview ? '' : actor], [23, needsReview ? '' : now], [27, newFlag], [29, now]
+  ];
+  updates.forEach(function (item) { sheet.getRange(rowNumber, item[0]).setValue(item[1]); });
+  const auditReason = 'Human confirmed distinct transaction: ' + reason + (remainingReason ? '. Remaining review: ' + remainingReason : '');
+  pfisAppendChangeOnceBatch([
+    { field: 'Validation Flag', oldValue: currentFlag, newValue: newFlag },
+    { field: 'Needs Review', oldValue: String(!!current.needsReview), newValue: String(needsReview) },
+    { field: 'Review Status', oldValue: pfisString(current.reviewStatus), newValue: reviewStatus },
+    { field: 'Review Reason', oldValue: pfisString(current.reviewReason), newValue: remainingReason },
+    { field: 'Reviewed By', oldValue: pfisString(current.reviewedBy), newValue: needsReview ? '' : actor },
+    { field: 'Reviewed At', oldValue: pfisString(current.reviewedAt), newValue: needsReview ? '' : now.toISOString() }
+  ].map(function (event) {
+    return { eventKey: 'exception-resolve:' + transactionId + ':' + requestId + ':' + event.field,
+      change: { transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: actor,
+        field: event.field, oldValue: event.oldValue, newValue: event.newValue,
+        reason: auditReason, requestId: requestId } };
+  }));
+  pfisInvalidateTransactionCache();
+  pfisWriteLegacyTransactionAux(rowNumber, pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS),
+    'Human confirmed distinct transaction: ' + reason);
+  return pfisBuildUpdateResponse(pfisGetTransaction(transactionId, false), requestId,
+    needsReview ? 'EXCEPTION_RESOLVED_REVIEW_REMAINS' : 'EXCEPTION_RESOLVED', ['needsReview', 'reviewStatus', 'reviewReason', 'validationFlag']);
 }
 
 function pfisUpdateTransaction(params, requestId) {
@@ -1365,20 +1830,23 @@ function pfisUpdateTransaction(params, requestId) {
     return pfisBuildUpdateResponse(pfisGetTransaction(transactionId, false), requestId, 'NO_CHANGE', []);
   }
 
+  const updateAuditEvents = [];
   changed.forEach(function (field) {
     const oldValue = current[field] === null || current[field] === undefined ? '' : current[field];
     const newValue = patch[field];
     sheet.getRange(rowNumber, PFIS_TX_FIELDS.indexOf(field) + 1).setValue(newValue);
-    pfisAppendChangeOnce('update:' + transactionId + ':' + requestId + ':' + field, {
-      transactionId: transactionId, targetTable: PFIS_SHEETS.transactions,
-      actor: pfisString(params.actor) || 'user', field: field,
-      oldValue: String(oldValue), newValue: String(newValue),
-      reason: pfisString(params.reason) || 'user_update', requestId: requestId
+    updateAuditEvents.push({
+      eventKey: 'update:' + transactionId + ':' + requestId + ':' + field,
+      change: { transactionId: transactionId, targetTable: PFIS_SHEETS.transactions,
+        actor: pfisString(params.actor) || 'user', field: field,
+        oldValue: String(oldValue), newValue: String(newValue),
+        reason: pfisString(params.reason) || 'user_update', requestId: requestId }
     });
   });
+  pfisAppendChangeOnceBatch(updateAuditEvents);
 
-  // Enrichment can clear only the enrichment-specific review reason. A duplicate,
-  // source conflict, ambiguous time, invalid type, or unusable merchant stays flagged.
+  // Enrichment can clear only the enrichment-specific review reason. Independent
+  // data-integrity/configuration findings must survive partial or complete enrichment.
   const latest = pfisObjectFromRow(
     sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
   const flag = pfisString(latest.validationFlag).toUpperCase();
@@ -1387,14 +1855,16 @@ function pfisUpdateTransaction(params, requestId) {
     let stillNeedsReview = false;
     let reviewReason = pfisString(latest.reviewReason);
 
-    if (!pfisNormalizeType(latest.type)) {
+    if (pfisIsPersistentReviewReason(reviewReason)) {
+      // Do not replace account/configuration, cross-channel, or precision issues
+      // with enrichment_required when only category/purpose was updated.
+      stillNeedsReview = true;
+    } else if (!pfisNormalizeType(latest.type)) {
       stillNeedsReview = true;
       reviewReason = 'unknown_transaction_type';
     } else if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(latest.merchant))) {
       stillNeedsReview = true;
       reviewReason = 'merchant_missing_or_unusable';
-    } else if (reviewReason === 'time_precision_unavailable') {
-      stillNeedsReview = true;
     } else {
       const enrichment = pfisGetEnrichmentState(latest.category, latest.userNotes, categories, latest.merchant);
       if (enrichment.requiresPurpose || enrichment.requiresCategoryClassification) {
@@ -1435,7 +1905,7 @@ function pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, con
     ['account', pfisCleanText(ruleResult.accountOverride || configResult.account)],
     ['cardName', pfisCleanText(ruleResult.cardNameOverride || configResult.cardName)],
     ['category', activeCategories.indexOf(pfisCleanText(ruleResult.category)) >= 0 ? pfisCleanText(ruleResult.category) : ''],
-    ['userNotes', pfisCleanText(ruleResult.notes)]
+    ['userNotes', pfisGetTrustedPurposeFromRule(ruleResult, ruleResult.merchantOverride || parsed.merchant)]
   ];
   fieldsToFill.forEach(function (item) {
     const col = PFIS_TX_FIELDS.indexOf(item[0]) + 1;
@@ -1454,9 +1924,25 @@ function pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, con
   pfisRefreshReviewStateAfterEnrichment(rowNumber, requestId);
 }
 
+/**
+ * Reasons that cannot be cleared merely by completing category/purpose enrichment.
+ * The single Review Reason cell remains a primary reason, not a lossy replacement
+ * for independent configuration and reconciliation findings.
+ */
+function pfisIsPersistentReviewReason(reason) {
+  return [
+    'config_mapping_ambiguous', 'config_mapping_unresolved', 'time_precision_unavailable',
+    'account_identifier_conflict', 'account_type_conflict', 'same_reference_amount_conflict',
+    'same_reference_conflicting_transaction_facts', 'ambiguous_cross_channel_match',
+    'ambiguous_time_precision_match', 'ambiguous_exact_same_channel_duplicate',
+    'same_channel_reference_conflict_needs_review', 'recovered_conflict',
+    'source_conflict', 'duplicate_candidate'
+  ].indexOf(pfisString(reason).toLowerCase()) >= 0;
+}
+
 /** Keep legacy Needs Review/Review Status columns synchronized after rule-based
- * reconciliation enrichment. Never clear duplicate, conflict, or time-precision
- * review states automatically. */
+ * reconciliation enrichment. Never clear duplicate, conflict, configuration,
+ * or time-precision review states automatically. */
 function pfisRefreshReviewStateAfterEnrichment(rowNumber, requestId) {
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
   const row = pfisObjectFromRow(
@@ -1469,14 +1955,14 @@ function pfisRefreshReviewStateAfterEnrichment(rowNumber, requestId) {
   let needsReview = oldNeedsReview;
   let reason = oldReason;
 
-  if (!pfisNormalizeType(row.type)) {
+  if (pfisIsPersistentReviewReason(oldReason)) {
+    needsReview = true;
+  } else if (!pfisNormalizeType(row.type)) {
     needsReview = true;
     reason = 'unknown_transaction_type';
   } else if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(row.merchant))) {
     needsReview = true;
     reason = 'merchant_missing_or_unusable';
-  } else if (oldReason === 'time_precision_unavailable') {
-    needsReview = true;
   } else {
     const enrichment = pfisGetEnrichmentState(row.category, row.userNotes, undefined, row.merchant);
     if (enrichment.requiresPurpose || enrichment.requiresCategoryClassification) {
@@ -1540,17 +2026,83 @@ function pfisFlagTransactionsForReview(transactionIds, reason, validationFlag, r
 // Rules, Config and Categories — all fixed-position
 // -----------------------------------------------------------------------------
 
+/**
+ * Category-only fallback using existing merchant-anchored rules.
+ *
+ * If an AMOUNT+MERCHANT rule misses only because the amount differs, its
+ * merchant evidence can still support the category, but it must NOT carry over
+ * the amount-specific purpose template, recurrence flag, type/account/card
+ * overrides, Auto Purpose permission, or confidence. A unanimous merchant
+ * override may be retained as a canonical merchant label because it describes
+ * merchant identity rather than transaction purpose.
+ *
+ * Conflicting categories or invalid configured categories fail closed and leave
+ * the category unresolved for the Shortcuts/AI fallback.
+ */
+function pfisBuildMerchantCategoryFallback_(rules, merchantValue, categories) {
+  const merchantKey = pfisNormalizeMerchant(merchantValue);
+  if (!merchantKey) return pfisEmptyRuleResult();
+
+  const candidates = [];
+  let invalidCategoryCandidate = false;
+  (Array.isArray(rules) ? rules : []).forEach(function (rule) {
+    if (!pfisTruthy(rule.enabled)) return;
+    const matchType = pfisNormalizeRuleMatchType(rule.matchType);
+    if (['MERCHANT', 'AMOUNTMERCHANT'].indexOf(matchType) < 0) return;
+
+    const pattern = pfisNormalizeRuleMerchantPattern(rule.merchantContains);
+    if (!pattern || merchantKey.indexOf(pattern) < 0) return;
+
+    const category = pfisCleanText(rule.category);
+    if (!category || categories.indexOf(category) < 0) {
+      invalidCategoryCandidate = true;
+      return;
+    }
+    candidates.push({
+      rule: rule,
+      category: category,
+      rowNumber: Number(rule.rowNumber) || 999999,
+      ruleId: pfisCleanText(rule.ruleId) || ('RULE-' + (Number(rule.rowNumber) || 'UNKNOWN')),
+      merchantOverride: pfisCleanText(rule.merchantOverride)
+    });
+  });
+
+  if (!candidates.length || invalidCategoryCandidate) return pfisEmptyRuleResult();
+
+  const categorySet = pfisUnique(candidates.map(function (item) { return item.category; }));
+  if (categorySet.length !== 1) {
+    console.warn('Merchant category fallback is ambiguous for "' + merchantKey + '": ' +
+      candidates.map(function (item) { return item.ruleId + '=' + item.category; }).join(', '));
+    return pfisEmptyRuleResult();
+  }
+
+  const overrides = pfisUnique(candidates.map(function (item) { return item.merchantOverride; }));
+  const result = pfisEmptyRuleResult();
+  result.category = categorySet[0];
+  result.ruleType = 'MERCHANT_CATEGORY_FALLBACK';
+  result.ruleApplied = 'CATEGORY_FALLBACK:' + candidates.map(function (item) { return item.ruleId; }).join(',');
+  // Retain a canonical merchant label only when every matching rule agrees.
+  result.merchantOverride = overrides.length === 1 ? overrides[0] : '';
+  result.autoPurpose = false;
+  result.notes = '';
+  result.notesMetadata = '';
+  result.confidence = null;
+  result.isCategoryFallback = true;
+  return result;
+}
+
 function pfisEvaluateRules(parsed, rawEvidence) {
   const rules = pfisGetRuleRows();
   const categories = pfisGetCategoryList();
   const merchantKey = pfisNormalizeMerchant(parsed.merchant);
   const absoluteAmount = Math.abs(Number(parsed.amount));
   const matches = [];
+  let matchedRuleWithInvalidCategory = false;
 
   rules.forEach(function (rule) {
     if (!pfisTruthy(rule.enabled)) return;
     const matchType = pfisNormalizeRuleMatchType(rule.matchType);
-    const pattern = pfisNormalizeMerchant(rule.merchantContains);
+    const pattern = pfisNormalizeRuleMerchantPattern(rule.merchantContains);
     const amount = pfisParseAmount(rule.amount, true);
     let isMatch = false;
     let specificity = 0;
@@ -1559,13 +2111,14 @@ function pfisEvaluateRules(parsed, rawEvidence) {
       isMatch = !!pattern && merchantKey.indexOf(pattern) >= 0;
       specificity = 2;
     } else if (matchType === 'AMOUNT') {
-      // v1 deliberately does not auto-apply amount-only rules. Amounts repeat;
-      // without merchant evidence these rules can misclassify an unrelated event.
-      // The transaction is still inserted and Shortcuts can classify it normally.
-      if (amount !== '' && Math.abs(Number(amount) - absoluteAmount) < 0.005) {
-        console.warn('Amount-only rule skipped for safety at Rules row ' + rule.rowNumber + '. Add reliable merchant evidence before enabling automatic classification.');
+      const amountMatches = amount !== '' && Math.abs(Number(amount) - absoluteAmount) < 0.005;
+      // Amount-only rules are accepted only when raw evidence corroborates the
+      // intended merchant/transaction family. The amount by itself is never enough.
+      isMatch = amountMatches && pfisAmountRuleHasEvidence(rule, parsed, rawEvidence);
+      if (amountMatches && !isMatch) {
+        console.warn('Amount rule skipped: amount matched but corroborating merchant evidence was absent at Rules row ' + rule.rowNumber + '.');
       }
-      return;
+      specificity = 1;
     } else if (matchType === 'AMOUNTMERCHANT') {
       // Both conditions are mandatory. A malformed row must never degrade into
       // amount-only or merchant-only matching.
@@ -1580,6 +2133,7 @@ function pfisEvaluateRules(parsed, rawEvidence) {
     const category = categories.indexOf(pfisCleanText(rule.category)) >= 0
       ? pfisCleanText(rule.category) : '';
     if (!category) {
+      matchedRuleWithInvalidCategory = true;
       console.warn('Rules row ' + rule.rowNumber + ' ignored because its Category is blank or not active in Categories.');
       return;
     }
@@ -1587,11 +2141,16 @@ function pfisEvaluateRules(parsed, rawEvidence) {
     const priority = priorityRaw !== '' && isFinite(Number(priorityRaw)) ? Number(priorityRaw) : 999;
     matches.push({
       rule: rule, matchType: matchType, category: category, specificity: specificity,
+      evidenceQualified: matchType === 'AMOUNT' && isMatch,
       priority: priority, rowNumber: Number(rule.rowNumber) || 999999
     });
   });
 
-  if (!matches.length) return pfisEmptyRuleResult();
+  if (!matches.length) {
+    // Do not mask a fully matching but misconfigured rule with a weaker fallback.
+    if (matchedRuleWithInvalidCategory) return pfisEmptyRuleResult();
+    return pfisBuildMerchantCategoryFallback_(rules, parsed.merchant, categories);
+  }
 
   // More constrained rules win over broad amount-only rules. Within the same
   // specificity, lower numeric Priority wins (same convention as Config); blank
@@ -1610,7 +2169,7 @@ function pfisEvaluateRules(parsed, rawEvidence) {
       return JSON.stringify([item.category, pfisCleanText(r.merchantOverride),
       pfisCleanText(r.notesTemplate), pfisCleanText(r.notes), pfisNormalizeType(r.typeOverride),
       pfisCleanText(r.accountOverride), pfisCleanText(r.cardNameOverride), pfisCleanText(r.instrumentOverride),
-      pfisTruthy(r.isRecurring), pfisParseConfidence(r.confidence)]);
+      pfisTruthy(r.isRecurring), pfisParseConfidence(r.confidence), pfisTruthy(r.autoPurpose)]);
     }));
     if (signatures.length > 1) {
       // Ambiguous rules are not guessed. Leave enrichment blank so Shortcuts can
@@ -1626,11 +2185,10 @@ function pfisEvaluateRules(parsed, rawEvidence) {
   const notesMetadata = pfisCleanText(rule.notes);
   // Existing optional Rules!S 'Notes' contains concise purpose descriptions in
   // this workbook (for example, 'Idli / Breakfast' and 'Jio telecom/fiber bill').
-  // Use it as a fallback only when the match is merchant-grounded; never use it
-  // to turn an amount-only hit into an auto-classified transaction.
+  // Use it as a fallback only for merchant-grounded or evidence-qualified amount rules.
   const rulePurpose = pfisIsMeaningfulPurpose(renderedTemplate, merchantForPurpose)
     ? renderedTemplate
-    : (best.matchType !== 'AMOUNT' && pfisIsMeaningfulPurpose(notesMetadata, merchantForPurpose)
+    : ((best.matchType !== 'AMOUNT' || best.evidenceQualified) && pfisIsMeaningfulPurpose(notesMetadata, merchantForPurpose)
       ? notesMetadata : '');
   return {
     // Stable Rule ID is preferable to a row-number label, but it is optional.
@@ -1645,6 +2203,7 @@ function pfisEvaluateRules(parsed, rawEvidence) {
     cardNameOverride: pfisCleanText(rule.cardNameOverride),
     instrumentOverride: pfisCleanText(rule.instrumentOverride),
     confidence: pfisParseConfidence(rule.confidence),
+    autoPurpose: pfisTruthy(rule.autoPurpose),
     // Auto Review, Rule Engine and free-form Notes remain informational until
     // their business meaning is explicitly defined; they never bypass validation.
     autoReview: pfisTruthy(rule.autoReview),
@@ -1653,20 +2212,67 @@ function pfisEvaluateRules(parsed, rawEvidence) {
   };
 }
 
+function pfisNormalizeRuleMerchantPattern(value) {
+  let pattern = pfisNormalizeMerchant(value);
+  const compact = pattern.replace(/\s+/g, '');
+  // Repair a known data-entry shape: an identical merchant token pasted twice
+  // without a separator (e.g. GUDIVENUKALAGUDIVENUKALA). This is conservative: the
+  // whole pattern must consist of two identical halves before it is shortened.
+  if (!pattern.includes(' ') && compact.length >= 8 && compact.length % 2 === 0) {
+    const half = compact.slice(0, compact.length / 2);
+    if (half === compact.slice(compact.length / 2)) pattern = half;
+  }
+  return pattern;
+}
+
+function pfisAmountRuleHasEvidence(rule, parsed, rawEvidence) {
+  const evidence = pfisNormalizeMerchant(pfisSanitizeRawText([
+    rawEvidence, parsed.merchant, parsed.counterparty, parsed.instrument
+  ].filter(Boolean).join(' '), false));
+  if (!evidence) return false;
+
+  const override = pfisNormalizeMerchant(rule && rule.merchantOverride);
+  const merchantPattern = pfisNormalizeRuleMerchantPattern(rule && rule.merchantContains);
+  // Use the configured evidence fields, not names or obligations hard-coded for
+  // one household. Merchant Contains is particularly important when Override is
+  // intentionally blank in an AMOUNT rule.
+  const ignored = [
+    'card', 'credit', 'debit', 'bank', 'account', 'savings', 'payment', 'payments',
+    'transfer', 'transaction', 'purchase', 'homes', 'home', 'investment', 'and', 'the',
+    'upi', 'imps', 'neft', 'rtgs', 'axis', 'sbi', 'icici', 'hdfc', 'kotak', 'yesbank'
+  ];
+  const candidates = [override, merchantPattern].filter(Boolean);
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    const candidateTokens = candidate.split(' ').filter(function (token) {
+      return token.length >= 3 && ignored.indexOf(token) < 0;
+    });
+    // Full configured phrases are strongest. Tiny generic rails/bank words do
+    // not qualify on their own; a meaningful token from the configured pattern
+    // can corroborate a bank message whose punctuation or word order differs.
+    if (candidate.length >= 4 && candidateTokens.length > 0 && evidence.indexOf(candidate) >= 0) return true;
+    if (candidateTokens.some(function (token) { return evidence.indexOf(token) >= 0; })) return true;
+    if (candidate === 'sip' && /\b(?:sip|standing instruction|si fund transfer)\b/i.test(String(rawEvidence || ''))) return true;
+  }
+  return false;
+}
+
 function pfisEmptyRuleResult() {
   return {
     ruleApplied: '', ruleType: '', category: '', merchantOverride: '', notes: '',
     isRecurring: false, typeOverride: '', accountOverride: '', cardNameOverride: '',
-    instrumentOverride: '', confidence: null, autoReview: false, ruleEngine: '', notesMetadata: ''
+    instrumentOverride: '', confidence: null, autoReview: false, autoPurpose: false,
+    ruleEngine: '', notesMetadata: ''
   };
 }
 
 function pfisGetRuleRows() {
+  if (PFIS_RUNTIME_RULE_CACHE !== null) return PFIS_RUNTIME_RULE_CACHE.map(function (row) { return Object.assign({}, row); });
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.rules);
   const baseRows = pfisReadFixedRows(sheet, PFIS_RULE_FIELDS.length);
-  // Optional extension columns N:S already exist in this workbook. Use them only
-  // if their physical header positions match exactly; otherwise the base A:M
-  // engine remains usable and no shifted cells are misread.
+
+  // Read the established N:S extension independently. Its absence or a mismatched
+  // header must not shift data or disable the base A:M rules engine.
   let useOptional = false;
   if (sheet.getLastColumn() >= PFIS_RULE_FIELDS.length + PFIS_RULE_OPTIONAL_FIELDS.length) {
     const optionalHeaders = sheet.getRange(1, PFIS_RULE_FIELDS.length + 1, 1,
@@ -1681,77 +2287,156 @@ function pfisGetRuleRows() {
   const extraRows = useOptional && baseRows.length
     ? sheet.getRange(2, PFIS_RULE_FIELDS.length + 1, baseRows.length, PFIS_RULE_OPTIONAL_FIELDS.length).getValues()
     : [];
-  return baseRows.map(function (row, i) {
+
+  // T: Auto Purpose is optional and independently validated. Missing, blank, or
+  // mismatched T is FALSE (safe default); it never affects category rule matching.
+  let useAutoPurpose = false;
+  if (sheet.getLastColumn() >= PFIS_RULE_AUTO_PURPOSE_COLUMN) {
+    const autoPurposeHeader = pfisString(sheet.getRange(1, PFIS_RULE_AUTO_PURPOSE_COLUMN).getDisplayValue());
+    useAutoPurpose = pfisHeaderToken(autoPurposeHeader) === pfisHeaderToken(PFIS_RULE_AUTO_PURPOSE_HEADER);
+    if (!useAutoPurpose && autoPurposeHeader) {
+      console.warn('Rules!T ignored because its header is not exactly "Auto Purpose".');
+    }
+  }
+  const autoPurposeValues = useAutoPurpose && baseRows.length
+    ? sheet.getRange(2, PFIS_RULE_AUTO_PURPOSE_COLUMN, baseRows.length, 1).getValues()
+    : [];
+
+  const mappedRows = baseRows.map(function (row, i) {
     const obj = pfisObjectFromRow(row, PFIS_RULE_FIELDS);
     if (useOptional) {
       PFIS_RULE_OPTIONAL_FIELDS.forEach(function (field, j) { obj[field] = extraRows[i][j]; });
     } else {
       PFIS_RULE_OPTIONAL_FIELDS.forEach(function (field) { obj[field] = ''; });
     }
+    obj.autoPurpose = useAutoPurpose ? pfisTruthy(autoPurposeValues[i][0]) : false;
     obj.rowNumber = i + 2;
     return obj;
   });
+  PFIS_RUNTIME_RULE_CACHE = mappedRows;
+  return mappedRows.map(function (row) { return Object.assign({}, row); });
+}
+
+function pfisGetConfigRows() {
+  if (PFIS_RUNTIME_CONFIG_CACHE !== null) return PFIS_RUNTIME_CONFIG_CACHE.map(function (row) { return Object.assign({}, row); });
+  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.config);
+  const rows = pfisReadFixedRows(sheet, PFIS_CONFIG_FIELDS.length);
+  let textPatterns = [];
+  if (rows.length > 0 && sheet.getLastColumn() >= PFIS_CONFIG_TEXT_PATTERN_COLUMN) {
+    const header = pfisString(sheet.getRange(1, PFIS_CONFIG_TEXT_PATTERN_COLUMN).getDisplayValue());
+    if (pfisHeaderToken(header) === pfisHeaderToken(PFIS_CONFIG_TEXT_PATTERN_HEADER)) {
+      textPatterns = sheet.getRange(2, PFIS_CONFIG_TEXT_PATTERN_COLUMN, rows.length, 1).getDisplayValues().map(function (r) { return pfisString(r[0]); });
+    } else if (header) {
+      console.warn('Config!J ignored because its header is not exactly "Text Pattern".');
+    }
+  }
+  PFIS_RUNTIME_CONFIG_CACHE = rows.map(function (row, i) {
+    const cfg = pfisObjectFromRow(row, PFIS_CONFIG_FIELDS);
+    cfg.textPattern = textPatterns[i] || '';
+    cfg.rowNumber = i + 2;
+    return cfg;
+  });
+  return PFIS_RUNTIME_CONFIG_CACHE.map(function (row) { return Object.assign({}, row); });
 }
 
 function pfisResolveConfig(parsed, rawEvidence) {
-  const defaults = { account: '', cardName: '', instrument: parsed.instrument || '', isInternal: false, ambiguous: false };
-  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.config);
+  const defaults = { account: '', cardName: '', instrument: parsed.instrument || '', isInternal: false, ambiguous: false, unresolved: true };
   const identifier = pfisNormalizeAccountIdentifier(pfisExtractAccountIdentifier(rawEvidence));
   const bankKey = pfisNormalizeBank(parsed.bank);
   const typeKey = pfisNormalizeAccountType(parsed.accountType);
   const merchantKey = pfisNormalizeMerchant(parsed.merchant);
+  const rawText = pfisSanitizeRawText(rawEvidence, false);
+  const rawKey = pfisNormalizeMerchant(rawText);
+  // Card-product identity is taken from the issuer/product part before "at MERCHANT".
+  const cardContextText = rawText.split(/\bat\s+/i)[0];
+  const cardContextKey = pfisNormalizeMerchant(cardContextText);
+  const cardContextCompact = cardContextKey.replace(/\s+/g, '');
+  const configs = pfisGetConfigRows();
+
   const candidates = [];
-  pfisReadFixedRows(sheet, PFIS_CONFIG_FIELDS.length).forEach(function (row, i) {
-    const cfg = pfisObjectFromRow(row, PFIS_CONFIG_FIELDS);
-    if (!pfisString(cfg.bank) && !pfisString(cfg.accountType) && !pfisString(cfg.accountCardSuffix) && !pfisString(cfg.merchantContains)) return;
+  configs.forEach(function (cfg, i) {
+    if (!pfisString(cfg.bank) && !pfisString(cfg.accountType) && !pfisString(cfg.accountCardSuffix) && !pfisString(cfg.merchantContains) && !pfisString(cfg.textPattern)) return;
     if (pfisString(cfg.bank) && pfisNormalizeBank(cfg.bank) !== bankKey) return;
     const cfgType = pfisNormalizeAccountType(cfg.accountType);
     if (cfgType && typeKey && cfgType !== typeKey) return;
     const cfgMerchant = pfisNormalizeMerchant(cfg.merchantContains);
     if (cfgMerchant && merchantKey.indexOf(cfgMerchant) < 0) return;
-    const cfgId = pfisNormalizeConfiguredSuffix(cfg.accountCardSuffix);
-    // A suffix-specific Config row must not be selected when the alert masks or
-    // omits the identifier; otherwise the backend could assign the wrong account.
-    if (cfgId && (!identifier || cfgId !== identifier)) return;
-    const specificity = (pfisString(cfg.bank) ? 1 : 0) + (cfgType ? 1 : 0) + (cfgMerchant ? 2 : 0) + (cfgId ? 3 : 0);
+
+    const configuredSuffixRaw = pfisCleanText(cfg.accountCardSuffix);
+    const suffixCompact = configuredSuffixRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const numericSuffix = !!configuredSuffixRaw && /^(?:[x*]{0,8}\d{2,8}|\d{4,8})$/i.test(configuredSuffixRaw.replace(/[\s-]/g, ''));
+    const textPattern = pfisNormalizeMerchant(cfg.textPattern);
+    const textPatternMatched = !!textPattern && !!rawKey && rawKey.indexOf(textPattern) >= 0;
+    let specificity = (pfisString(cfg.bank) ? 1 : 0) + (cfgType ? 1 : 0) + (cfgMerchant ? 2 : 0);
+    let identityEvidence = false;
+
+    if (numericSuffix) {
+      const cfgId = pfisNormalizeConfiguredSuffix(configuredSuffixRaw);
+      // If evidence exposes a suffix, it must agree. If no suffix is exposed, a
+      // workbook-authored Text Pattern can serve as the alternate unique identity.
+      if (identifier && (!cfgId || cfgId !== identifier)) return;
+      if (!identifier && !textPatternMatched) return;
+      if (identifier) { specificity += 8; identityEvidence = true; }
+    } else if (configuredSuffixRaw) {
+      // Some existing rows use symbolic aliases in the suffix column (e.g.
+      // AIRTELAXIS_CC / AMAZONPAY_CC). Treat them as product hints, not digits.
+      const alias = suffixCompact.replace(/(?:creditcard|debitcard|cc|card)$/i, '');
+      const aliasMatched = !!alias && cardContextCompact.indexOf(alias) >= 0;
+      if (aliasMatched) { specificity += 6; identityEvidence = true; }
+    }
+
+    if (textPattern) {
+      if (!textPatternMatched) return;
+      specificity += 7;
+      identityEvidence = true;
+    }
+
+    const cardName = pfisNormalizeMerchant(cfg.cardName);
+    const distinctiveCardTokens = cardName.split(' ').filter(function (token) {
+      return token.length >= 4 && ['credit', 'debit', 'card', 'bank', 'account', 'savings', 'axis', 'sbi', 'icici', 'state', 'indian'].indexOf(token) < 0;
+    });
+    if (distinctiveCardTokens.length && distinctiveCardTokens.some(function (token) {
+      return cardContextKey.indexOf(token) >= 0;
+    })) {
+      specificity += 4;
+      identityEvidence = true;
+    }
+
     const priorityText = pfisString(cfg.priority);
     const priority = priorityText !== '' && isFinite(Number(priorityText)) ? Number(priorityText) : 999;
-    candidates.push({ cfg: cfg, specificity: specificity, priority: priority, order: i });
+    candidates.push({ cfg: cfg, specificity: specificity, priority: priority, order: i, identityEvidence: identityEvidence });
   });
-  candidates.sort(function (a, b) { return b.specificity - a.specificity || a.priority - b.priority || a.order - b.order; });
-  if (!candidates.length) return defaults;
 
-  // Never pick the first Config row when equally specific/equally prioritized
-  // entries disagree about the target account, card, or instrument.
-  const best = candidates[0];
-  const tied = candidates.filter(function (candidate) {
-    return candidate.specificity === best.specificity && candidate.priority === best.priority;
-  });
-  const signatures = pfisUnique(tied.map(function (candidate) {
+  if (!candidates.length) return defaults;
+  candidates.sort(function (a, b) { return b.specificity - a.specificity || a.priority - b.priority || a.order - b.order; });
+  const bestSpecificity = candidates[0].specificity;
+  // Priority is for display/order, not proof of card identity. If top-specificity
+  // candidates point at different ledger accounts/cards, stop for review instead
+  // of assigning the lowest-priority number's card silently.
+  const top = candidates.filter(function (candidate) { return candidate.specificity === bestSpecificity; });
+  const signatures = pfisUnique(top.map(function (candidate) {
     const cfg = candidate.cfg;
-    return JSON.stringify([
-      pfisCleanText(cfg.account), pfisCleanText(cfg.cardName), pfisCleanText(cfg.instrument),
-      pfisTruthy(cfg.isInternal), pfisCleanText(cfg.merchantContains)
-    ]);
+    return JSON.stringify([pfisCleanText(cfg.account), pfisCleanText(cfg.cardName), pfisCleanText(cfg.instrument), pfisTruthy(cfg.isInternal)]);
   }));
   if (signatures.length > 1) {
-    console.warn('Ambiguous equally ranked Config rows: ' + tied.map(function (candidate) { return candidate.order + 2; }).join(', '));
+    console.warn('Ambiguous Config mapping; top candidates disagree: ' + top.map(function (candidate) { return candidate.order + 2; }).join(', '));
     return {
       account: '', cardName: '', instrument: defaults.instrument,
-      isInternal: false, ambiguous: true,
-      ambiguousRows: tied.map(function (candidate) { return candidate.order + 2; })
+      isInternal: false, ambiguous: true, unresolved: false,
+      ambiguousRows: top.map(function (candidate) { return candidate.order + 2; })
     };
   }
 
+  const best = top[0];
   const cfg = best.cfg;
   return {
-    account: pfisCleanText(cfg.account),
-    cardName: pfisCleanText(cfg.cardName), instrument: pfisCleanText(cfg.instrument) || defaults.instrument,
+    account: pfisCleanText(cfg.account), cardName: pfisCleanText(cfg.cardName),
+    instrument: pfisCleanText(cfg.instrument) || defaults.instrument,
     isInternal: pfisTruthy(cfg.isInternal) && !!pfisNormalizeMerchant(cfg.merchantContains),
-    ambiguous: false, rowNumber: best.order + 2
+    ambiguous: false, unresolved: false, rowNumber: best.order + 2,
+    identityEvidence: !!best.identityEvidence
   };
 }
-
 function pfisGetCategoryList() {
   if (PFIS_RUNTIME_CATEGORY_CACHE !== null) return PFIS_RUNTIME_CATEGORY_CACHE.slice();
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.categories);
@@ -1772,7 +2457,16 @@ function pfisGetCategoryList() {
 function pfisApplyNotesTemplate(template, dateValue, monthOffset) {
   if (!template) return '';
   const date = pfisParseDateValue(dateValue) || new Date();
-  const target = new Date(date.getFullYear(), date.getMonth() + Number(monthOffset || 0), 1);
+  // Derive the source calendar month in the declared PFIS time zone, not the
+  // Apps Script runtime zone, so a UTC-midnight boundary cannot shift monthLabel.
+  const year = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy'));
+  const month = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'M'));
+  const offsetInput = Number(monthOffset || 0);
+  const offset = isFinite(offsetInput) ? Math.trunc(offsetInput) : 0;
+  const monthIndex = year * 12 + (month - 1) + offset;
+  const targetYear = Math.floor(monthIndex / 12);
+  const targetMonth = monthIndex - targetYear * 12 + 1;
+  const target = pfisCreateIndiaDate(targetYear, targetMonth, 1, 12, 0, 0);
   const label = Utilities.formatDate(target, PFIS_TIME_ZONE, 'MMM-yy');
   return String(template).replace(/\{\{?monthLabel\}\}?/g, label);
 }
@@ -1784,6 +2478,11 @@ function pfisApplyNotesTemplate(template, dateValue, monthOffset) {
 function pfisParseTxnString(raw) {
   if (typeof raw !== 'string') return null;
   const parts = raw.split('|').map(function (value) { return String(value === undefined || value === null ? '' : value).trim(); });
+  // Some Shortcuts concatenate an optional leading value as " | datetime|...".
+  // Accept only the unambiguous case: 11 fields with the first field empty. Do
+  // not guess how to repair arbitrary missing middle fields because that shifts
+  // the meaning of amount/account/type/merchant fields.
+  if (parts.length === 11 && parts[0] === '') parts.shift();
   if (parts.length !== 10) return null;
   const dateInfo = pfisParseInputDate(parts[0]);
   const amount = pfisParseAmount(parts[1], false);
@@ -1806,10 +2505,10 @@ function pfisParseTxnString(raw) {
 function pfisParseInputDate(value) {
   const text = pfisString(value);
   if (!text) return null;
-  const hasExplicitTime = /(?:T|\s)\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?\s*(?:AM|PM)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?$/i.test(text);
+  const hasExplicitTime = /(?:T|\s)\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?\s*(?:AM|PM)?(?:\s*(?:IST|Z|[+-]\d{2}:?\d{2}))?$/i.test(text);
   let date = null;
   // Strict Indian DD-MM-YY/ DD-MM-YYYY formats used by bank alerts.
-  let m = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})(?:[, T]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\s*(Z|[+-]\d{2}:?\d{2})?)?$/i);
+  let m = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})(?:[, T]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\s*(IST|Z|[+-]\d{2}:?\d{2})?)?$/i);
   if (m) {
     const day = Number(m[1]); const month = Number(m[2]);
     let year = Number(m[3]); if (year < 100) year += 2000;
@@ -1817,39 +2516,50 @@ function pfisParseInputDate(value) {
     const ampm = pfisString(m[7]).toUpperCase();
     if (ampm === 'PM' && hour < 12) hour += 12;
     if (ampm === 'AM' && hour === 12) hour = 0;
-    const calendarCheck = new Date(year, month - 1, day);
-    if (calendarCheck.getFullYear() !== year || calendarCheck.getMonth() !== month - 1 || calendarCheck.getDate() !== day) return null;
+    if (!pfisValidCalendarDate(null, year, month, day, hour, minute, second)) return null;
     if (m[8]) {
       let zone = m[8].toUpperCase();
+      if (zone === 'IST') zone = '+05:30';
       if (zone === 'Z') zone = '+00:00';
       if (/^[+-]\d{4}$/.test(zone)) zone = zone.slice(0, 3) + ':' + zone.slice(3);
       const iso = year + '-' + pfisPad2(month) + '-' + pfisPad2(day) + 'T' + pfisPad2(hour) + ':' + pfisPad2(minute) + ':' + pfisPad2(second) + zone;
       date = new Date(iso);
     } else {
-      date = new Date(year, month - 1, day, hour, minute, second);
+      date = pfisCreateIndiaDate(year, month, day, hour, minute, second);
     }
-    if (!pfisValidCalendarDate(date, year, month, day, hour, minute, second)) return null;
-    return { date: date, precision: hasExplicitTime ? 'DATETIME' : 'DATE_ONLY' };
-  }
-  // ISO yyyy-MM-dd with optional time/offset.
-  m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:T|\s+)?(.*)$/);
-  if (m) {
-    const year = Number(m[1]); const month = Number(m[2]); const day = Number(m[3]);
-    if (!m[4]) {
-      date = new Date(year, month - 1, day);
-      if (!pfisValidCalendarDate(date, year, month, day, 0, 0, 0)) return null;
-      return { date: date, precision: 'DATE_ONLY' };
-    }
-    const localCheck = new Date(year, month - 1, day);
-    if (localCheck.getFullYear() !== year || localCheck.getMonth() !== month - 1 || localCheck.getDate() !== day) return null;
-    date = new Date(text);
     if (isNaN(date.getTime())) return null;
     return { date: date, precision: hasExplicitTime ? 'DATETIME' : 'DATE_ONLY' };
   }
-  // Last-resort parse only for unambiguous ISO-compatible formats.
-  if (/^\d{4}-\d{2}-\d{2}T/i.test(text)) {
-    date = new Date(text);
-    if (!isNaN(date.getTime())) return { date: date, precision: hasExplicitTime ? 'DATETIME' : 'DATE_ONLY' };
+  // ISO yyyy-MM-dd with optional time/offset. A timestamp without an explicit
+  // zone is interpreted in PFIS_TIME_ZONE, never in the script runtime's zone.
+  m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:T|\s+)?(.*)$/);
+  if (m) {
+    const year = Number(m[1]); const month = Number(m[2]); const day = Number(m[3]);
+    const rest = pfisString(m[4]);
+    if (!rest) {
+      if (!pfisValidCalendarDate(null, year, month, day, 0, 0, 0)) return null;
+      return { date: pfisCreateIndiaDate(year, month, day, 0, 0, 0), precision: 'DATE_ONLY' };
+    }
+    const timeMatch = rest.match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?\s*(AM|PM)?\s*(IST|Z|[+-]\d{2}:?\d{2})?$/i);
+    if (timeMatch) {
+      let hour = Number(timeMatch[1]); const minute = Number(timeMatch[2]); const second = Number(timeMatch[3] || 0);
+      const millis = Number((timeMatch[4] || '').padEnd(3, '0').slice(0, 3) || 0);
+      const ampm = pfisString(timeMatch[5]).toUpperCase();
+      if (ampm === 'PM' && hour < 12) hour += 12;
+      if (ampm === 'AM' && hour === 12) hour = 0;
+      if (!pfisValidCalendarDate(null, year, month, day, hour, minute, second)) return null;
+      const zoneText = pfisString(timeMatch[6]).toUpperCase();
+      if (zoneText) {
+        let zone = zoneText === 'IST' ? '+05:30' : (zoneText === 'Z' ? '+00:00' : zoneText);
+        if (/^[+-]\d{4}$/.test(zone)) zone = zone.slice(0, 3) + ':' + zone.slice(3);
+        date = new Date(year + '-' + pfisPad2(month) + '-' + pfisPad2(day) + 'T' + pfisPad2(hour) + ':' + pfisPad2(minute) + ':' + pfisPad2(second) + (millis ? '.' + String(millis).padStart(3, '0') : '') + zone);
+      } else {
+        date = pfisCreateIndiaDate(year, month, day, hour, minute, second, millis);
+      }
+      if (isNaN(date.getTime())) return null;
+      return { date: date, precision: hasExplicitTime ? 'DATETIME' : 'DATE_ONLY' };
+    }
+    return null;
   }
   return null;
 }
@@ -1864,10 +2574,17 @@ function pfisParseDateValue(value) {
 }
 
 function pfisValidCalendarDate(date, year, month, day, hour, minute, second) {
-  if (!date || isNaN(date.getTime())) return false;
-  // For an offset timestamp, checking the local date fields would be wrong. The
-  // Date constructor validity plus input ranges is enough for that case.
-  return month >= 1 && month <= 12 && day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 && second <= 59;
+  // Validate the requested calendar components, not the normalized Date object.
+  // E.g. JavaScript otherwise turns 31 February into a date in March.
+  if (year < 1900 || year > 2200 || month < 1 || month > 12 || day < 1 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return false;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return day <= daysInMonth;
+}
+
+function pfisCreateIndiaDate(year, month, day, hour, minute, second, millisecond) {
+  // Explicit UTC arithmetic makes this independent of the Apps Script project's
+  // configured time zone. India Standard Time is UTC+05:30 year-round.
+  return new Date(Date.UTC(year, month - 1, day, hour || 0, minute || 0, second || 0, millisecond || 0) - (5 * 60 + 30) * 60 * 1000);
 }
 
 function pfisParseAmount(value, allowBlank) {
@@ -1885,11 +2602,12 @@ function pfisParseAmount(value, allowBlank) {
 }
 
 function pfisExtractAccountIdentifier(rawEvidence) {
-  const text = String(rawEvidence || '');
+  const text = pfisSanitizeRawText(rawEvidence, false);
   if (!text) return '';
   const patterns = [
     /\b(?:a\/c|account)\s*(?:no\.?|number|#)\s*[:.-]?\s*([xX*]{2,}\s*\d{0,8}|\d{4,8})/i,
     /\bcard\s*(?:no\.?|number|#)\s*[:.-]?\s*([xX*]{2,}\s*\d{0,8}|\d{4,8})/i,
+    /\b(?:ending|ends?\s+in|last\s+(?:four|4|digits?))\s*[:.-]?\s*(?:[xX*]{2,}\s*)?(\d{4})\b/i,
     /\b(?:a\/c|account|card)\s*[:.-]?\s*([xX*]{2,}\s*\d{0,8}|\d{4,8})/i
   ];
   for (let i = 0; i < patterns.length; i++) {
@@ -2027,6 +2745,145 @@ function pfisGetRequiredSheet(name) {
 function pfisReadFixedRows(sheet, width) {
   if (sheet.getLastRow() <= 1) return [];
   return sheet.getRange(2, 1, sheet.getLastRow() - 1, width).getValues();
+}
+
+
+/**
+ * Finds the first logically blank row. It never reuses a row with other data or
+ * formulas even when its key cell is blank. The only permitted nonblank values
+ * are literal FALSE defaults in documented PFIS checkbox columns on an otherwise
+ * empty Transaction Log or Source Log row. Empty dropdown validations/formatting
+ * do not count as data. Searches through the used-row boundary, then appends.
+ */
+function pfisGetNextAvailableRow(sheet, keyColIndex) {
+  const col = Number(keyColIndex) > 0 ? Math.floor(Number(keyColIndex)) : 1;
+  const lastUsedRow = Math.max(1, Number(sheet.getLastRow()) || 1);
+  if (lastUsedRow <= 1) {
+    if (sheet.getMaxRows() < 2) sheet.insertRowsAfter(sheet.getMaxRows(), 2 - sheet.getMaxRows());
+    return 2;
+  }
+
+  // Do not trust a blank key cell alone: a partially damaged row could still
+  // contain audit data. A row may be reused only when every cell is blank,
+  // except literal FALSE values in known checkbox columns that commonly pollute
+  // unused PFIS rows. Formula cells always make a row occupied.
+  const width = Math.max(col, Number(sheet.getLastColumn()) || col);
+  const range = sheet.getRange(2, 1, lastUsedRow - 1, width);
+  const values = range.getValues();
+  const formulas = range.getFormulas();
+  const name = typeof sheet.getName === 'function' ? sheet.getName() : '';
+  const ignorableCheckboxColumns = name === PFIS_SHEETS.transactions ? [13, 14, 15, 36, 37] :
+    (name === PFIS_SHEETS.sources ? [19] : []);
+
+  for (let rowIndex = 0; rowIndex < values.length; rowIndex++) {
+    const key = values[rowIndex][col - 1];
+    if (!(key === '' || key === null || key === undefined || (typeof key === 'string' && key.trim() === ''))) continue;
+
+    let logicallyBlank = true;
+    for (let columnIndex = 0; columnIndex < width; columnIndex++) {
+      if (formulas[rowIndex][columnIndex]) { logicallyBlank = false; break; }
+      const value = values[rowIndex][columnIndex];
+      if (value === '' || value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) continue;
+      const oneBasedColumn = columnIndex + 1;
+      if (value === false && ignorableCheckboxColumns.indexOf(oneBasedColumn) >= 0) continue;
+      logicallyBlank = false;
+      break;
+    }
+    if (logicallyBlank) return rowIndex + 2;
+  }
+
+  const next = lastUsedRow + 1;
+  if (next > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), next - sheet.getMaxRows());
+  return next;
+}
+
+/**
+ * Finds a safe contiguous blank block for a multi-row append. It checks both
+ * the key column and the data columns before reusing a gap, so a partial/malformed
+ * log row is not silently overwritten. Falls back to a new block below lastRow.
+ */
+function pfisGetNextAvailableBlock(sheet, keyColIndex, rowCount, dataColCount) {
+  const col = Number(keyColIndex) > 0 ? Math.floor(Number(keyColIndex)) : 1;
+  const count = Math.max(1, Math.floor(Number(rowCount) || 1));
+  const width = Math.max(col, Math.floor(Number(dataColCount) || col));
+  const lastUsedRow = Math.max(1, Number(sheet.getLastRow()) || 1);
+  if (lastUsedRow >= 2) {
+    const dataRange = sheet.getRange(2, 1, lastUsedRow - 1, width);
+    const rows = dataRange.getValues();
+    const formulas = dataRange.getFormulas();
+    let runStart = -1;
+    let runLength = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const key = rows[i][col - 1];
+      const allBlank = rows[i].every(function (value, index) { return (value === '' || value === null || value === undefined) && !formulas[i][index]; });
+      if ((key === '' || key === null || key === undefined) && allBlank) {
+        if (runStart < 0) runStart = i + 2;
+        runLength++;
+        if (runLength >= count) return runStart;
+      } else {
+        runStart = -1;
+        runLength = 0;
+      }
+    }
+  }
+  const target = lastUsedRow + 1;
+  const finalRow = target + count - 1;
+  if (finalRow > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), finalRow - sheet.getMaxRows());
+  return target;
+}
+
+/**
+ * Manual, conservative cleanup for legacy rows polluted only by default unchecked
+ * checkboxes. Clears literal FALSE values in M:O and AJ:AK only when the row has
+ * no Transaction ID, no formulas, and no other content anywhere in A:AM. It
+ * preserves validations/dropdowns and never touches a row containing transaction
+ * data. Run manually once after reviewing the reported count; not called on ingest.
+ */
+function pfisCleanupBlankTransactionCheckboxDefaults() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw pfisError('BUSY', 'Could not acquire the script lock for blank-row cleanup.');
+  try {
+    const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+    const lastRow = Math.max(1, Number(sheet.getLastRow()) || 1);
+    if (lastRow < 2) return { success: true, rowsChecked: 0, cellsCleared: 0 };
+    const width = 39; // Workbook contract: Transaction Log A:AM.
+    const range = sheet.getRange(2, 1, lastRow - 1, width);
+    const values = range.getValues();
+    const formulas = range.getFormulas();
+    const checkboxCols = [13, 14, 15, 36, 37]; // M, N, O, AJ, AK (1-based)
+    let cellsCleared = 0;
+    const cellsToClear = [];
+    for (let r = 0; r < values.length; r++) {
+      if (pfisString(values[r][0]) !== '') continue; // Never touch a keyed transaction.
+      let safe = true;
+      for (let c = 0; c < width; c++) {
+        if (formulas[r][c]) { safe = false; break; }
+        const isTargetCheckbox = checkboxCols.indexOf(c + 1) >= 0;
+        const val = values[r][c];
+        if (isTargetCheckbox) {
+          if (val === false) continue;
+          if (val === '' || val === null || val === undefined) continue;
+          safe = false; break;
+        }
+        if (!(val === '' || val === null || val === undefined)) { safe = false; break; }
+      }
+      if (!safe) continue;
+      checkboxCols.forEach(function (col) {
+        if (values[r][col - 1] === false) {
+          cellsToClear.push(sheet.getRange(r + 2, col).getA1Notation());
+          cellsCleared++;
+        }
+      });
+    }
+    // clearContent retains the cells' checkbox validation and formatting. Chunked RangeLists reduce service calls.
+    for (let start = 0; start < cellsToClear.length; start += 100) {
+      sheet.getRangeList(cellsToClear.slice(start, start + 100)).clearContent();
+    }
+    return { success: true, rowsChecked: values.length, cellsCleared: cellsCleared,
+      message: 'Only literal FALSE defaults on fully otherwise-empty rows were cleared. No keyed transaction rows were changed.' };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function pfisReadTransactions() {
@@ -2300,7 +3157,14 @@ function pfisSearchTransactions(params, requestId) {
     if (minAmount !== null && (!isFinite(minAmount) || Math.abs(amount) < minAmount)) return false;
     if (maxAmount !== null && (!isFinite(maxAmount) || Math.abs(amount) > maxAmount)) return false;
     return true;
-  }).sort(function (a, b) { return new Date(b.dateTime).getTime() - new Date(a.dateTime).getTime(); });
+  }).sort(function (a, b) {
+    const dateA = pfisParseDateValue(a.dateTime);
+    const dateB = pfisParseDateValue(b.dateTime);
+    const timeA = dateA ? dateA.getTime() : Number.NEGATIVE_INFINITY;
+    const timeB = dateB ? dateB.getTime() : Number.NEGATIVE_INFINITY;
+    if (timeA !== timeB) return timeB - timeA;
+    return pfisString(a.transactionId).localeCompare(pfisString(b.transactionId));
+  });
   return {
     success: true, status: 'OK', period: bounds.label, timeZone: PFIS_TIME_ZONE,
     generatedAt: new Date().toISOString(), totalMatches: all.length, limit: limit, offset: offset,
@@ -2426,17 +3290,81 @@ function pfisGetAnomalies(params, requestId) {
   const highExpenses = data.transactions.filter(function (tx) {
     return pfisNormalizeType(tx.type) === 'expense' && median > 0 && Math.abs(Number(tx.amount) || 0) >= Math.max(median * 3, median + 1);
   }).map(pfisStripForAnalytics);
+
+  // Flag, but never auto-merge, exact timestamp/amount/bank collisions across
+  // different merchants. These are investigation candidates, not proof of fraud.
+  const collisionBuckets = {};
+  data.transactions.forEach(function (tx) {
+    const date = pfisParseDateValue(tx.dateTime);
+    const amount = Math.abs(Number(tx.amount) || 0).toFixed(2);
+    const bank = pfisNormalizeBank(tx.bank);
+    if (!date || !bank || Number(amount) === 0) return;
+    const key = date.getTime() + '|' + bank + '|' + amount;
+    if (!collisionBuckets[key]) collisionBuckets[key] = [];
+    collisionBuckets[key].push(tx);
+  });
+  const sameTimestampAmountDifferentMerchants = Object.keys(collisionBuckets).map(function (key) {
+    const group = collisionBuckets[key];
+    const merchants = pfisUnique(group.map(function (tx) { return pfisNormalizeMerchant(tx.merchant); }).filter(Boolean));
+    if (group.length < 2 || merchants.length < 2) return null;
+    return {
+      dateTime: group[0].dateTime, bank: group[0].bank, absoluteAmount: Math.abs(Number(group[0].amount) || 0),
+      transactions: group.map(pfisStripForAnalytics),
+      reason: 'Same bank, exact timestamp and absolute amount, but different merchants; manually verify before changing either record.'
+    };
+  }).filter(Boolean);
+  const suspectedInventedMidnightTimestamps = pfisFindSuspectedInventedMidnightTimestamps(data.transactions);
+
   return {
     success: true, period: data.bounds.label, generatedAt: new Date().toISOString(),
     duplicateCandidates: duplicateRows.map(pfisStripForAnalytics), sourceConflictTransactions: conflicts.map(pfisStripForAnalytics),
-    unusuallyLargeRelativeToPeriodMedian: highExpenses, method: 'expense >= max(3x median, median + 1); heuristic, not fraud detection.', requestId: requestId
+    unusuallyLargeRelativeToPeriodMedian: highExpenses,
+    sameTimestampAmountDifferentMerchants: sameTimestampAmountDifferentMerchants,
+    suspectedInventedMidnightTimestamps: suspectedInventedMidnightTimestamps,
+    method: 'Expense >= max(3x median, median + 1) is a relative-size heuristic. Timestamp/amount collisions and suspected invented midnight times are review signals, not proof of duplicates or fraud.',
+    requestId: requestId
   };
 }
 
+/**
+ * A conservative diagnostic for alerts stored as DATETIME at midnight when the
+ * raw source text contains no clock time at all. It only flags records for review;
+ * it never edits timestamps or source precision automatically.
+ */
+function pfisFindSuspectedInventedMidnightTimestamps(transactions) {
+  const txs = Array.isArray(transactions) ? transactions : [];
+  if (!txs.length) return [];
+  const ids = {};
+  txs.forEach(function (tx) { if (pfisString(tx.transactionId)) ids[tx.transactionId] = tx; });
+  const sources = pfisReadFixedRows(pfisGetRequiredSheet(PFIS_SHEETS.sources), PFIS_SOURCE_FIELDS.length)
+    .map(function (row) { return pfisObjectFromRow(row, PFIS_SOURCE_FIELDS); });
+  const findings = [];
+  sources.forEach(function (source) {
+    const tx = ids[pfisString(source.linkedTxnId)];
+    if (!tx || pfisString(source.parseStatus).toUpperCase() === 'SUPERSEDED') return;
+    if (pfisString(source.datePrecision).toUpperCase() !== 'DATETIME') return;
+    const sourceDate = pfisParseDateValue(source.extractedDate);
+    if (!sourceDate || Utilities.formatDate(sourceDate, PFIS_TIME_ZONE, 'HH:mm:ss') !== '00:00:00') return;
+    const raw = String(source.rawBody || '');
+    // Any time-like token suppresses this heuristic because it may be source context
+    // rather than transaction time; false negatives are preferred to risky rewrites.
+    if (/\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(raw) || /\b\d{1,2}\s*(?:AM|PM)\b/i.test(raw)) return;
+    findings.push({
+      transactionId: tx.transactionId, dateTime: tx.dateTime, merchant: tx.merchant,
+      sourceId: source.sourceId, sourceType: source.sourceType,
+      reason: 'Source is marked DATETIME at 00:00:00, but the raw message contains no clock time; verify date precision.'
+    });
+  });
+  return pfisUniqueBy(findings, 'transactionId');
+}
+
 function pfisGetDataQuality(params, requestId) {
-  const data = pfisPeriodTransactions(params); const result = {
+  const data = pfisPeriodTransactions(params);
+  const activeCategories = pfisGetCategoryList();
+  const result = {
     transactionCount: data.transactions.length, needsReview: 0, duplicateCandidates: 0, sourceConflicts: 0,
-    missingMerchant: 0, missingCategory: 0, missingPurpose: 0, unknownType: 0, dateOnly: 0,
+    missingMerchant: 0, missingCategory: 0, invalidCategory: 0, missingPurpose: 0, unknownType: 0, dateOnly: 0,
+    suspectedInventedMidnightTimestamps: 0,
     verified: 0, smsOnly: 0, emailOnly: 0, unresolvedSourceConflicts: 0
   };
   data.transactions.forEach(function (tx) {
@@ -2445,8 +3373,11 @@ function pfisGetDataQuality(params, requestId) {
     if (flag === 'DUPLICATE_CANDIDATE') result.duplicateCandidates++;
     if (flag === 'SOURCE_CONFLICT') result.sourceConflicts++;
     if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(tx.merchant))) result.missingMerchant++;
-    if (!pfisString(tx.category)) result.missingCategory++;
-    if (!pfisString(tx.userNotes)) result.missingPurpose++;
+    const category = pfisCleanText(tx.category);
+    if (!category) result.missingCategory++;
+    else if (activeCategories.indexOf(category) < 0) result.invalidCategory++;
+    // A purpose equal to the merchant or a placeholder is still missing purpose.
+    if (!pfisIsMeaningfulPurpose(tx.userNotes, tx.merchant)) result.missingPurpose++;
     if (!pfisNormalizeType(tx.type)) result.unknownType++;
     if (pfisGetTransactionDatePrecision(tx.transactionId) === 'DATE_ONLY') result.dateOnly++;
     const verification = pfisGetVerificationState(tx.transactionId, tx.validationFlag).status;
@@ -2454,6 +3385,7 @@ function pfisGetDataQuality(params, requestId) {
     else if (verification === 'SMS_ONLY') result.smsOnly++;
     else if (verification === 'EMAIL_ONLY') result.emailOnly++;
   });
+  result.suspectedInventedMidnightTimestamps = pfisFindSuspectedInventedMidnightTimestamps(data.transactions).length;
   const sourceBounds = pfisGetPeriodBounds(params.period, params.startDate, params.endDate);
   result.unresolvedSourceConflicts = pfisReadFixedRows(pfisGetRequiredSheet(PFIS_SHEETS.sources), PFIS_SOURCE_FIELDS.length)
     .map(function (row) { return pfisObjectFromRow(row, PFIS_SOURCE_FIELDS); })
@@ -2483,19 +3415,34 @@ function pfisGetPeriodBounds(periodValue, startDateValue, endDateValue) {
   const today = new Date();
   const localText = Utilities.formatDate(today, PFIS_TIME_ZONE, 'yyyy-MM-dd');
   const pieces = localText.split('-').map(Number);
-  const thisMonthStart = new Date(pieces[0], pieces[1] - 1, 1);
-  const nextMonthStart = new Date(pieces[0], pieces[1], 1);
-  const previousMonthStart = new Date(pieces[0], pieces[1] - 2, 1);
+  const thisMonthStart = pfisCreateIndiaDate(pieces[0], pieces[1], 1, 0, 0, 0);
+  const nextMonthStart = pfisCreateIndiaDate(pieces[0], pieces[1] + 1, 1, 0, 0, 0);
+  const previousMonthStart = pfisCreateIndiaDate(pieces[0], pieces[1] - 1, 1, 0, 0, 0);
   const period = pfisString(periodValue).toLowerCase();
-  let start = null; let endExclusive = null; let label = 'all_time';
+  let start = null;
+  let endExclusive = null;
+  let label = 'all_time';
+
   if (startDateValue || endDateValue) {
     start = startDateValue ? pfisParseDateValue(String(startDateValue)) : null;
     const end = endDateValue ? pfisParseDateValue(String(endDateValue)) : null;
-    endExclusive = end ? new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1) : null;
+    if (end) {
+      // Treat endDate as inclusive in the PFIS calendar (Asia/Kolkata), not the
+      // Apps Script runtime zone. Extracting its IST calendar date also handles
+      // stored Date objects and DD/MM/YYYY input consistently.
+      const endParts = Utilities.formatDate(end, PFIS_TIME_ZONE, 'yyyy-MM-dd').split('-').map(Number);
+      endExclusive = pfisCreateIndiaDate(endParts[0], endParts[1], endParts[2] + 1, 0, 0, 0);
+    }
     label = (startDateValue || 'beginning') + '..' + (endDateValue || 'latest');
-  } else if (period === 'this_month' || period === 'current_month') { start = thisMonthStart; endExclusive = nextMonthStart; label = 'this_month'; }
-  else if (period === 'last_month' || period === 'previous_month') { start = previousMonthStart; endExclusive = thisMonthStart; label = 'last_month'; }
-  else if (period === 'this_year') { start = new Date(pieces[0], 0, 1); endExclusive = new Date(pieces[0] + 1, 0, 1); label = 'this_year'; }
+  } else if (period === 'this_month' || period === 'current_month') {
+    start = thisMonthStart; endExclusive = nextMonthStart; label = 'this_month';
+  } else if (period === 'last_month' || period === 'previous_month') {
+    start = previousMonthStart; endExclusive = thisMonthStart; label = 'last_month';
+  } else if (period === 'this_year') {
+    start = pfisCreateIndiaDate(pieces[0], 1, 1, 0, 0, 0);
+    endExclusive = pfisCreateIndiaDate(pieces[0] + 1, 1, 1, 0, 0, 0);
+    label = 'this_year';
+  }
   return { start: start, endExclusive: endExclusive, label: label };
 }
 
@@ -2550,7 +3497,22 @@ function pfisComputeHash(value) {
 }
 
 function pfisNormalizeEvidence(value) {
-  return String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/[\t ]+/g, ' ').replace(/[ \t]+\n/g, '\n').trim();
+  return pfisSanitizeRawText(value, true).replace(/[ \t]+\n/g, '\n').trim();
+}
+
+/** Normalize invisible/irregular Unicode whitespace before text matching. When preserveLineBreaks is true, keep line boundaries for line-aware parsers. */
+function pfisSanitizeRawText(raw, preserveLineBreaks) {
+  if (raw === null || raw === undefined) return '';
+  let text = String(raw)
+    .replace(/[\u00A0\u1680\u180E\u2000-\u200B\u202F\u205F\u3000\uFEFF]/g, ' ')
+    .replace(/[\u200C\u200D\u2060]/g, '')
+    .replace(/\r\n?/g, '\n');
+  if (preserveLineBreaks === true) {
+    text = text.split('\n').map(function (line) { return line.replace(/[\t ]+/g, ' ').trim(); }).join('\n');
+  } else {
+    text = text.replace(/\n/g, ' ').replace(/\s+/g, ' ');
+  }
+  return text.trim();
 }
 
 /** Parse only explicit numeric confidence in the range [0,1]; never fabricate one. */
@@ -2568,33 +3530,69 @@ function pfisParseConfidence(value) {
  */
 function pfisWriteLegacyTransactionAux(rowNumber, transaction, auditEvent) {
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
-  const cols = PFIS_AUX_TX_COLUMNS;
-  if (sheet.getLastColumn() < cols.flowDirection) return;
-  const headers = sheet.getRange(1, cols.flowDirection, 1, 2).getDisplayValues()[0].map(function (v) { return pfisString(v).trim(); });
-  const flowHeaderOk = headers[0].toLowerCase() === 'flow direction';
-  const auditHeaderOk = headers[1].toLowerCase() === 'audit trail';
+  const legacy = PFIS_LEGACY_TX_COLUMNS;
+  const firstCol = legacy.first; // AD
+  if (sheet.getMaxColumns() < firstCol) return;
 
-  if (flowHeaderOk) {
-    const cell = sheet.getRange(rowNumber, cols.flowDirection);
-    // Respect a workbook formula if one is intentionally present in this row.
-    if (!cell.getFormula()) {
-      const amount = Number(transaction && transaction.amount);
-      if (isFinite(amount)) cell.setValue(amount > 0 ? 'INFLOW' : (amount < 0 ? 'OUTFLOW' : 'NEUTRAL'));
+  // Read the optional AD:AM legacy block once and write it once. Formula cells
+  // are copied back as formulas, never replaced by their calculated values.
+  const availableCols = Math.min(10, sheet.getMaxColumns() - firstCol + 1);
+  if (availableCols < legacy.count) return; // The auxiliary schema is incomplete.
+  const headers = sheet.getRange(1, firstCol, 1, availableCols).getDisplayValues()[0].map(function (v) {
+    return pfisString(v).trim();
+  });
+  const expectedLegacy = PFIS_LEGACY_TX_HEADERS;
+  const legacyHeadersOk = expectedLegacy.every(function (header, i) {
+    return pfisHeaderToken(headers[i]) === pfisHeaderToken(header);
+  });
+  const flowHeaderOk = headers.length >= 9 && pfisHeaderToken(headers[8]) === pfisHeaderToken('Flow Direction');
+  const auditHeaderOk = headers.length >= 10 && pfisHeaderToken(headers[9]) === pfisHeaderToken('Audit Trail');
+  if (!legacyHeadersOk && !flowHeaderOk && !auditHeaderOk) return;
+
+  const range = sheet.getRange(rowNumber, firstCol, 1, availableCols);
+  const currentValues = range.getValues()[0];
+  const formulas = range.getFormulas()[0];
+  const output = currentValues.map(function (value, i) { return formulas[i] || value; });
+  let changed = false;
+  const t = transaction || {};
+
+  if (legacyHeadersOk) {
+    const values = [
+      t.originalText,
+      t.sourceId,
+      t.batchId,
+      t.sourceHash,
+      t.canonicalKey || (t.transactionId ? 'CANON-' + t.transactionId : undefined),
+      t.merchantCleaned !== undefined ? t.merchantCleaned : (t.merchant !== undefined ? pfisNormalizeMerchant(t.merchant) : undefined),
+      t.isInvestment !== undefined ? !!t.isInvestment : (t.type !== undefined ? pfisNormalizeType(t.type) === 'investment' : undefined),
+      t.isCardPayment !== undefined ? !!t.isCardPayment : (t.type !== undefined ? pfisNormalizeType(t.type) === 'card_payment' : undefined)
+    ];
+    values.forEach(function (value, i) {
+      if (value === undefined || value === null || formulas[i]) return;
+      if (output[i] !== value) { output[i] = value; changed = true; }
+    });
+  }
+
+  const flowIndex = PFIS_AUX_TX_COLUMNS.flowDirection - firstCol;
+  if (flowHeaderOk && flowIndex < availableCols && !formulas[flowIndex]) {
+    const amount = Number(t.amount);
+    if (isFinite(amount)) {
+      const flow = amount > 0 ? 'INFLOW' : (amount < 0 ? 'OUTFLOW' : 'NEUTRAL');
+      if (output[flowIndex] !== flow) { output[flowIndex] = flow; changed = true; }
     }
   }
 
-  if (auditHeaderOk && pfisString(auditEvent)) {
-    const cell = sheet.getRange(rowNumber, cols.auditTrail);
-    if (cell.getFormula()) return;
+  const auditIndex = PFIS_AUX_TX_COLUMNS.auditTrail - firstCol;
+  if (auditHeaderOk && auditIndex < availableCols && !formulas[auditIndex] && pfisString(auditEvent)) {
     const now = Utilities.formatDate(new Date(), PFIS_TIME_ZONE, 'yyyy-MM-dd HH:mm:ss');
     const entry = now + ' | ' + pfisString(auditEvent);
-    const previous = pfisString(cell.getValue());
+    const previous = pfisString(currentValues[auditIndex]);
     let combined = previous ? previous + '\n' + entry : entry;
-    if (combined.length > PFIS_AUDIT_TRAIL_MAX_CHARS) {
-      combined = combined.substring(combined.length - PFIS_AUDIT_TRAIL_MAX_CHARS);
-    }
-    cell.setValue(combined);
+    if (combined.length > PFIS_AUDIT_TRAIL_MAX_CHARS) combined = combined.substring(combined.length - PFIS_AUDIT_TRAIL_MAX_CHARS);
+    if (output[auditIndex] !== combined) { output[auditIndex] = combined; changed = true; }
   }
+
+  if (changed) range.setValues([output]);
 }
 
 /**
@@ -2603,42 +3601,37 @@ function pfisWriteLegacyTransactionAux(rowNumber, transaction, auditEvent) {
  * backend without the user's confirmation. Reads only a bounded recent window.
  */
 function pfisFindPurposeExamples(transactionId, merchant, transactionType, limitInput) {
-  // Return only a few high-quality examples, never full raw messages. Exact
-  // normalized merchant and semantic type prevent unrelated history leaking into
-  // the suggestion context. Only approved, non-review, valid rows are eligible.
+  // Return only high-quality examples, never full raw messages. Matching is exact
+  // on normalized merchant and semantic type; only approved, non-review, valid
+  // ledger rows with meaningful purpose and valid category are eligible.
   const merchantKey = pfisNormalizeMerchant(merchant);
   const typeKey = pfisNormalizeType(transactionType);
   if (!merchantKey || !pfisIsMatchableMerchant(merchantKey) || !typeKey) return [];
 
   const limit = Math.max(1, Math.min(3, Math.floor(Number(limitInput) || 3)));
-  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
-  const lastRow = sheet.getLastRow();
-  if (lastRow <= 2) return [];
-
-  // Bounded scan: newest rows first. The ledger is canonical; Source Log raw
-  // bodies are deliberately not sent to Apple Intelligence/Gemini as context.
-  const maxRows = Math.min(500, lastRow - 1);
-  const startRow = lastRow - maxRows + 1;
-  const rows = sheet.getRange(startRow, 1, maxRows, PFIS_TX_FIELDS.length).getValues();
+  // pfisReadTransactions filters rows without Transaction IDs, so checkbox defaults
+  // or formatting below the ledger cannot shift this historical search window.
+  const transactions = pfisReadTransactions();
+  const recent = transactions.slice(Math.max(0, transactions.length - 500)).reverse();
   const categories = pfisGetCategoryList();
   const examples = [];
   const seen = Object.create(null);
 
-  for (let i = rows.length - 1; i >= 0 && examples.length < limit; i--) {
-    const row = rows[i];
-    if (pfisString(row[0]) === pfisString(transactionId)) continue;
-    if (pfisNormalizeMerchant(row[5]) !== merchantKey) continue;
-    if (pfisNormalizeType(row[8]) !== typeKey) continue;
-    if (pfisTruthy(row[14])) continue; // Needs Review
+  for (let i = 0; i < recent.length && examples.length < limit; i++) {
+    const row = recent[i];
+    if (pfisString(row.transactionId) === pfisString(transactionId)) continue;
+    if (pfisNormalizeMerchant(row.merchant) !== merchantKey) continue;
+    if (pfisNormalizeType(row.type) !== typeKey) continue;
+    if (pfisTruthy(row.needsReview)) continue;
 
-    const reviewStatus = pfisString(row[19]).toUpperCase();
+    const reviewStatus = pfisString(row.reviewStatus).toUpperCase();
     if (reviewStatus && reviewStatus !== 'APPROVED') continue;
-    const validationFlag = pfisString(row[26]).toUpperCase();
+    const validationFlag = pfisString(row.validationFlag).toUpperCase();
     if (validationFlag && validationFlag !== 'VALID') continue;
 
-    const purpose = pfisCleanText(row[7]);
-    const category = pfisCleanText(row[6]);
-    if (!pfisIsMeaningfulPurpose(purpose, row[5])) continue;
+    const purpose = pfisCleanText(row.userNotes);
+    const category = pfisCleanText(row.category);
+    if (!pfisIsMeaningfulPurpose(purpose, row.merchant)) continue;
     if (!category || categories.indexOf(category) < 0) continue;
 
     const fingerprint = pfisNormalizeMerchant(purpose) + '|' + category;
@@ -2699,15 +3692,15 @@ function pfisBuildTransactionResponse(transaction, requestId, status, changedFie
 
   if (enrichment.requiresCategoryClassification) response.allowedCategories = categories;
 
-  // Purpose history is a bounded, sanitized hint for the frontend model, not an
-  // automatic write. The user must confirm/edit the proposed purpose before the
-  // Shortcut submits it through action=update.
+  // Stable top-level keys support the existing Shortcut's default-answer field.
+  // Suggestions come only from approved history for the exact normalized merchant
+  // and semantic type; the backend never saves the suggestion automatically.
+  response.purposeSuggestion = '';
+  response.purposeExamples = [];
   if (enrichment.requiresPurpose && transaction) {
     const examples = pfisFindPurposeExamples(transaction.transactionId, transaction.merchant, transaction.type, 3);
-    if (examples.length) {
-      response.purposeExamples = examples;
-      response.purposeSuggestion = examples[0].purpose;
-    }
+    response.purposeExamples = examples;
+    response.purposeSuggestion = examples.length ? examples[0].purpose : '';
   }
   if (Array.isArray(changedFields) && changedFields.length) response.changedFields = changedFields;
   return response;
@@ -2730,20 +3723,22 @@ function pfisRecommendNextAction(status, transaction, enrichment) {
     return 'SHOW_RECEIPT';
   }
 
-  // Data-integrity problems require review, not an AI guess for purpose/category.
+  // Serious source/type conflicts require review before AI enrichment. Missing
+  // category, purpose, merchant readability, card mapping, and timestamp precision
+  // must not block safe enrichment of fields that have independent evidence.
   const hardReviewReasons = [
     'source_conflict', 'same_reference_conflicting_transaction_facts',
-    'duplicate_candidate', 'unknown_transaction_type',
-    'merchant_missing_or_unusable', 'time_precision_unavailable',
-    'config_mapping_ambiguous'
+    'duplicate_candidate', 'unknown_transaction_type'
   ];
   if (hardReviewReasons.indexOf(reviewReason) >= 0) return 'REVIEW';
 
   const state = enrichment || pfisGetEnrichmentState(
     tx.category, tx.userNotes, undefined, tx.merchant
   );
-  if (state.requiresPurpose) return 'ASK_PURPOSE';
+  // Category first: the Shortcut's classifier returns ASK_PURPOSE only when the
+  // merchant and raw alert do not provide enough evidence for a reliable category.
   if (state.requiresCategoryClassification) return 'CLASSIFY_CATEGORY';
+  if (state.requiresPurpose) return 'ASK_PURPOSE';
   if (pfisTruthy(tx.needsReview)) return 'REVIEW';
   return 'SHOW_RECEIPT';
 }
@@ -3156,6 +4151,14 @@ function pfisBuildDisplayText(payload) {
   if (isError) {
     add(lines, '❗ Error', p.error);
     add(lines, 'Details', p.message);
+    if (p.errorLoggedToSheet === true) {
+      const loggedPlaces = [];
+      if (p.sourceLogLogged === true) loggedPlaces.push('Source Log');
+      if (p.changeLogLogged === true) loggedPlaces.push('Change Log');
+      add(lines, '🗂️ Audit log', loggedPlaces.length ? 'Recorded in ' + loggedPlaces.join(' and ') : 'Recorded');
+    } else if (p.errorLoggedToSheet === false) {
+      add(lines, '🗂️ Audit log', 'Could not be written; check Apps Script execution logs.');
+    }
     add(lines, '🔎 Request reference', firstValue(p.requestId, p.sourceId));
   } else if (p.message && status !== 'IDEMPOTENT_REPLAY') {
     section(lines, 'ℹ️ DETAILS');
@@ -3224,3 +4227,4 @@ function pfisUnique(values) { const seen = {}; return values.filter(function (va
 function pfisUniqueBy(values, key) { const seen = {}; return values.filter(function (value) { const token = pfisString(value[key]); if (!token || seen[token]) return false; seen[token] = true; return true; }); }
 function pfisParseProcessingMeta(value) { try { return JSON.parse(String(value || '{}')); } catch (error) { return {}; } }
 
+ 

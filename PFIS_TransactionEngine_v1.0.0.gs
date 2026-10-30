@@ -4435,17 +4435,15 @@ function pfisMarkTransactionForClientReview(transactionId, sourceId, requestId) 
     ? 'NEEDS_REVIEW' : flag;
   const now = new Date();
 
-  const updatedRow = sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0];
-  updatedRow[14] = true;             // O: Needs Review
-  updatedRow[19] = 'Pending';        // T: Review Status
-  updatedRow[20] = reviewReason;     // U: Review Reason
-  updatedRow[21] = '';               // V: Reviewed By
-  updatedRow[22] = '';               // W: Reviewed At
-  updatedRow[26] = nextFlag;         // AA: Validation Flag
-  updatedRow[28] = now;              // AC: Last Updated At
-  // Persist the review state in one row write so the core flags cannot be
-  // left partially updated by a sequence of independent cell writes.
-  sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).setValues([updatedRow]);
+  // Touch only review-owned columns. Do not rewrite A:AC from a previously
+  // read row, because a manual edit to financial facts must never be clobbered.
+  sheet.getRange(rowNumber, 15).setValue(true);       // O: Needs Review
+  sheet.getRange(rowNumber, 20).setValue('Pending');  // T: Review Status
+  sheet.getRange(rowNumber, 21).setValue(reviewReason); // U: Review Reason
+  sheet.getRange(rowNumber, 22).setValue('');         // V: Reviewed By
+  sheet.getRange(rowNumber, 23).setValue('');         // W: Reviewed At
+  sheet.getRange(rowNumber, 27).setValue(nextFlag);   // AA: Validation Flag
+  sheet.getRange(rowNumber, 29).setValue(now);        // AC: Last Updated At
 
   const auditEvents = [
     { field: 'Needs Review', oldValue: String(pfisTruthy(current.needsReview)), newValue: 'true' },
@@ -4513,17 +4511,15 @@ function pfisAcknowledgeClientReview(transactionId, reason, actor, requestId) {
   }
 
   const now = new Date();
-  const updatedRow = sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0];
-  updatedRow[14] = false;            // O: Needs Review
-  updatedRow[19] = 'Approved';       // T: Review Status
-  updatedRow[20] = '';               // U: Review Reason
-  updatedRow[21] = actor;            // V: Reviewed By
-  updatedRow[22] = now;              // W: Reviewed At
-  updatedRow[26] = 'VALID';          // AA: Validation Flag
-  updatedRow[28] = now;              // AC: Last Updated At
-  // Keep all financial and source facts untouched; update only the review
-  // lifecycle fields in one contiguous row write.
-  sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).setValues([updatedRow]);
+  // Touch only review-owned columns; financial and source facts are never
+  // rewritten during acknowledgement.
+  sheet.getRange(rowNumber, 15).setValue(false);      // O: Needs Review
+  sheet.getRange(rowNumber, 20).setValue('Approved'); // T: Review Status
+  sheet.getRange(rowNumber, 21).setValue('');         // U: Review Reason
+  sheet.getRange(rowNumber, 22).setValue(actor);      // V: Reviewed By
+  sheet.getRange(rowNumber, 23).setValue(now);        // W: Reviewed At
+  sheet.getRange(rowNumber, 27).setValue('VALID');    // AA: Validation Flag
+  sheet.getRange(rowNumber, 29).setValue(now);        // AC: Last Updated At
 
   pfisAppendChangeOnceBatch([
     { field: 'Needs Review', oldValue: String(pfisTruthy(current.needsReview)), newValue: 'false' },

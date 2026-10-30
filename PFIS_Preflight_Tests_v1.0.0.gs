@@ -201,9 +201,9 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       pfisPreflightAssert_(recurringWithoutPermission === '',
         'Is Recurring must not independently authorize purpose autofill.');
       var explicitlyTrusted = pfisGetTrustedPurposeFromRule({
-        isRecurring: false, autoPurpose: true, notes: 'H610 Garbage'
-      }, 'GUDIVENUKALAGUDIVENUKALA');
-      pfisPreflightAssert_(explicitlyTrusted === 'H610 Garbage',
+        isRecurring: false, autoPurpose: true, notes: 'Example recurring payment'
+      }, 'EXAMPLEMERCHANTEXAMPLEMERCHANT');
+      pfisPreflightAssert_(explicitlyTrusted === 'Example recurring payment',
         'Auto Purpose=TRUE should authorize a meaningful trusted purpose.');
       var placeholder = pfisGetTrustedPurposeFromRule({
         isRecurring: true, autoPurpose: true, notes: 'Done for Oct-26'

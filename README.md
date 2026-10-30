@@ -322,7 +322,6 @@ The write actions include `ingest`, `update`, `reprocesssource` and `resolveexce
 
 - [Production Transaction Engine](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_TransactionEngine_v1.0.0.gs)
 - [Preflight regression harness](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Preflight_Tests_v1.0.0.gs)
-- [Engineering review notes](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/REVIEW_NOTES.md)
 - [All README illustrations](https://github.com/asish312/Personal-Finance-Intelligence-System/tree/main/docs/images)
 
 ### Technical contract

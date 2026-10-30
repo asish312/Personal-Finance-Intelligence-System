@@ -1,380 +1,373 @@
-# PFIS Transaction Engine v1.0.0
+<div align="center">
 
-## 1. Purpose
+# ✨ Personal Finance Intelligence System
 
-The Personal Finance Intelligence System (PFIS) Transaction Engine
-ingests bank SMS and email alerts into a canonical transaction ledger in
-Google Sheets. It validates incoming parser output, preserves source
-evidence, resolves rules and account configuration, prevents replayed
-source messages from creating repeated transactions, reconciles matching
-SMS/email evidence, supports controlled transaction updates, and
-maintains an audit history.
+### Capture clearly. Reconcile confidently. Understand your money.
 
-This README describes the project as its **first project version:
-v1.0.0**. The schema version and project version are both treated as
-`v1.0.0`. Keep this version label for incremental fixes; bump it only
-when a major change is intentionally released.
+**A privacy-conscious personal finance workflow built with Google Apps Script, Google Sheets and evidence-led transaction processing.**
 
-## 2. Core design and required sheets
+<p>
+  <img src="https://img.shields.io/badge/Project-PFIS-2563eb?style=for-the-badge" alt="Project PFIS"/>
+  <img src="https://img.shields.io/badge/Version-v1.0.0-0f9d8a?style=for-the-badge" alt="Version 1.0.0"/>
+  <img src="https://img.shields.io/badge/Runtime-Google%20Apps%20Script-16a34a?style=for-the-badge" alt="Google Apps Script"/>
+  <img src="https://img.shields.io/badge/Analytics-Synthetic%20Demo%20Only-7c3aed?style=for-the-badge" alt="Synthetic demo analytics"/>
+</p>
 
-The engine requires these six sheets:
+<sub>All values, names, transaction IDs, charts and dashboard figures shown in this README are fictional examples. They are not copied from any live workbook, bank account or personal financial record.</sub>
 
-1.  `Transaction Log` --- canonical transaction ledger.
-2.  `Source Log` --- retained SMS/email source evidence and processing
-    outcomes.
-3.  `Change Log` --- append-only audit history for system and user
-    changes.
-4.  `Rules` --- classification and enrichment rules.
-5.  `Config` --- bank, account, card, instrument and
-    internal-transaction configuration.
-6.  `Categories` --- valid category list used for validation and
-    enrichment.
+</div>
 
-The engine does not create or maintain the workbook's
-analytics/dashboard sheets. Existing dashboards, formulas, reports, and
-helper tabs remain separate and must be checked independently when
-changing the workbook.
+---
 
-**Do not reorder the core columns or rename required headers without
-updating and validating the engine.** The core Transaction Log schema
-occupies columns A:AC. Legacy fields are optional and are updated only
-when the expected headers are present in their documented positions.
-`Flow Direction` and `Audit Trail` are optional legacy fields;
-`Change Log` remains the authoritative detailed audit history.
+## 📊 See the experience
 
-## 3. Ingestion contract
+The visuals below are **illustrative product mockups** made specifically for this README. They show the type of financial insights and controls the PFIS workbook is designed to present. They are not live screenshots or a claim that every visual component is automatically maintained by the Apps Script engine.
 
-Send write operations as HTTP POST requests with a JSON body. A typical
-ingestion payload is:
+<p align="center">
+  <img src="docs/images/pfis-demo-dashboard.svg" alt="PFIS illustrative analytics dashboard using synthetic financial data" width="100%"/>
+</p>
 
-``` json
+<p align="center">
+  <img src="docs/images/pfis-demo-budget-sweep.svg" alt="PFIS illustrative zero-based budget and savings sweep using synthetic figures" width="100%"/>
+</p>
+
+<p align="center">
+  <img src="docs/images/pfis-demo-transaction-controls.svg" alt="PFIS illustrative source reconciliation and transaction review dashboard using fictional IDs" width="100%"/>
+</p>
+
+> **Demo-data guarantee:** Every displayed figure is invented for demonstration. No actual transaction amount, account balance, merchant, card detail, transaction ID or personal record from the production spreadsheet is reproduced here.
+
+## 🧭 What is PFIS?
+
+The **Personal Finance Intelligence System (PFIS)** is a personal-finance workflow that turns bank notifications into a structured, auditable transaction ledger.
+
+It is designed around a simple principle:
+
+**A transaction should be traceable to its evidence, classified with care, and explainable later.**
+
+PFIS receives bank SMS and email alerts, validates parser output, preserves original source evidence, resolves rules and account mappings, reconciles matching notifications, and records changes in an audit history. The accompanying Google Sheets workbook provides the financial summaries, dashboards, review views and planning tools.
+
+### What it is designed to do
+
+| Capability | What it provides |
+|---|---|
+| 📥 **Transaction capture** | Accepts structured SMS/email parser output through an Apps Script Web App |
+| 🧾 **Canonical ledger** | Maintains one structured Transaction Log |
+| 🔎 **Evidence preservation** | Retains source messages, IDs, hashes and processing outcomes |
+| 🔁 **Duplicate protection** | Handles exact source replays and high-confidence transaction matches |
+| 🧩 **Rule-based classification** | Applies merchant, amount and combined rules |
+| 🏦 **Account resolution** | Uses bank/account/card configuration and available identifiers |
+| 🧑‍⚖️ **Review controls** | Keeps conflicts and uncertain matches reviewable |
+| 📝 **Audit history** | Records supported changes in an append-only Change Log |
+| 📈 **Financial analytics** | Supports cash-flow, category, merchant, recurring and data-quality analysis |
+| 💰 **Budget planning** | Separates the month income is received from the month it is allocated to |
+
+## 🏗️ How the system fits together
+
+```mermaid
+flowchart TD
+    A["Bank SMS"] --> C["iOS Shortcut / Parser"]
+    B["Bank Email"] --> C
+    C --> D["Apps Script Web App"]
+    D --> E["Validation & Normalisation"]
+    E --> F["Rules + Account Configuration"]
+    F --> G{"Evidence match?"}
+    G -->|"Exact replay / strong match"| H["Link source evidence"]
+    G -->|"New transaction"| I["Canonical Transaction Log"]
+    G -->|"Ambiguous / conflicting"| J["Review queue"]
+    H --> K["Source Log"]
+    I --> K
+    J --> K
+    I --> L["Change Log / Audit"]
+    I --> M["Google Sheets Analytics"]
+    K --> M
+    L --> M
+```
+
+The transaction engine is responsible for deterministic ingestion, reconciliation, validation and audit behaviour. Dashboard formulas, reporting layouts, charts and other workbook presentation layers are maintained separately and must be validated independently.
+
+## 🗂️ Workbook architecture
+
+The Apps Script engine requires six core sheets:
+
+| Sheet | Responsibility |
+|---|---|
+| `Transaction Log` | Canonical transaction ledger; one row per accepted transaction |
+| `Source Log` | Original SMS/email evidence, hashes, parse status and transaction links |
+| `Change Log` | Detailed audit history for supported system and user changes |
+| `Rules` | Transaction classification, purpose triggers and budget allocation rules |
+| `Config` | Bank, account, card, instrument and internal-transfer mappings |
+| `Categories` | Active categories used for validation and fallback classification |
+
+The workbook may also contain supporting sheets such as `Recent Transactions`, `Monthly Summary`, `Dashboard`, `Dashboard_Calc`, `Insights & Data Quality`, `Reports`, `Data Dictionary`, `PFIS System Guide`, `Card Reconciliation Log`, `Rejected & Archive Log`, `Holiday Calendar` and `Savings Sweep Log`.
+
+These supporting tabs are workbook/reporting layers; the engine does not generate all their formulas, visuals or planning workflows.
+
+### Schema compatibility
+
+- The canonical Transaction Log schema occupies **A:AC**.
+- Legacy auxiliary fields occupy **AD:AM** when their documented headers are present.
+- Optional reporting periods are stored in **AN: Budget Month** and **AO: Income Month** when those headers exist.
+- The Rules core schema is **A:M**.
+- Optional rule extensions include **N:S**, **T: Auto Purpose**, **U: Purpose Trigger**, **V: Calendar Scope**, and **W: Budget Month Offset**.
+- Config's core fields are **A:I**; `Text Pattern` is an optional J-column extension.
+- The optional `Holiday Calendar` uses the headers `Date`, `Calendar Scope`, `Is Working Day`, and `Description`.
+
+**Do not reorder the core columns or rename required headers without updating and validating the engine.** The engine reads the canonical fields by established physical positions; optional period fields are located by header name.
+
+## 🔄 Ingestion contract
+
+All write operations use **HTTP POST with a JSON body**. A typical synthetic request looks like this:
+
+```json
 {
   "action": "ingest",
   "sourceType": "SMS",
-  "txnString": "datetime|signed_amount|bank|account_type|instrument|type|merchant_name|counterparty|ref_no|balance_after",
-  "originalText": "complete raw SMS or email text"
+  "txnString": "14/10/2026 09:15:00|-845.50|Demo Bank|Savings Account|UPI|expense|Harbor Coffee|Harbor Coffee|DEMO-UTR-1001|NA",
+  "originalText": "DEMO ALERT: INR 845.50 debited at Harbor Coffee on 14/10/2026 at 09:15. Reference DEMO-UTR-1001."
 }
 ```
 
-For email, use `"sourceType": "EMAIL"` and pass `sender` and `subject`
-when available. Do not URL-encode the raw body before sending JSON. Do
-not omit `txnString`.
+For email, set `"sourceType": "EMAIL"` and pass `sender` and `subject` when available. Do not URL-encode the raw body before sending JSON. Do not omit `txnString`.
 
-The `txnString` contains ten logical pipe-delimited fields. For backwards compatibility, the parser also accepts exactly one unambiguous formatting defect found in some Shortcuts output: an **extra leading empty field** (11 split parts where the first part is blank). It removes only that leading blank. It never guesses how to repair missing or shifted middle fields; those are rejected and logged as parse failures. Placeholder values such as `NA` / `N/A` in optional text/amount fields are normalized to blank.
+The `txnString` has ten logical pipe-delimited fields:
 
-The `txnString` contains exactly ten pipe-delimited fields:
+| Position | Field | Meaning |
+|---:|---|---|
+| 1 | `datetime` | Transaction date/time; date-only values retain lower precision |
+| 2 | `signed_amount` | Outflows negative; inflows positive |
+| 3 | `bank` | Bank/provider name |
+| 4 | `account_type` | Savings, current, credit card, wallet, etc.; may be blank if unknown |
+| 5 | `instrument` | Source-provided payment instrument |
+| 6 | `type` | `expense`, `income`, `card_payment`, `investment`, `transfer` or `refund` |
+| 7 | `merchant_name` | Merchant or transaction description |
+| 8 | `counterparty` | Recipient, sender or counterparty |
+| 9 | `ref_no` | UTR/reference when available |
+| 10 | `balance_after` | Actual post-transaction account balance, if supplied |
 
-1.  `datetime` --- transaction date/time. Date-only values may be
-    accepted, but do not treat a date-only value as proof of a
-    time-based match.
-2.  `signed_amount` --- expenses/outflows are negative; income/inflows
-    are positive.
-3.  `bank`.
-4.  `account_type` --- may be blank if unknown.
-5.  `instrument` --- a source-provided instrument takes precedence over
-    defaults.
-6.  `type` --- semantic type such as `expense`, `income`,
-    `card_payment`, `investment`, `transfer`, or `refund`.
-    Invalid/unknown types should remain reviewable.
-7.  `merchant_name`.
-8.  `counterparty`.
-9.  `ref_no` --- reference/UTR when available.
-10. `balance_after` --- include only an actual post-transaction account
-    balance. Never substitute available credit or wallet limit.
+For backwards compatibility, the parser accepts one known formatting defect: an extra leading empty pipe field. It does not guess how to repair missing or shifted middle fields. Placeholder values such as `NA` / `N/A` in optional fields are normalized to blank.
 
-The engine should preserve the source message even when it cannot safely
-create or reconcile a canonical transaction. Check the returned status
-and identifiers rather than assuming every technically successful
-request means a new transaction was inserted.
+A successful HTTP response does not necessarily mean a new ledger row was inserted. Always inspect `status`, `transactionId`, `sourceId` and `requestId`.
 
-## 4. Duplicate, replay and reconciliation policy
+## 🛡️ Evidence, replay and duplicate policy
 
-The engine distinguishes exact source replay from a likely duplicate
-transaction.
+PFIS distinguishes between a repeated source message, a second notification about the same event, and a transaction that merely looks similar.
 
-### Exact source replay
+| Situation | Expected behaviour |
+|---|---|
+| Exact source replay | Return the existing result; do not insert another canonical transaction |
+| Strong SMS/email match | Link the second source to the existing canonical transaction |
+| Generic merchant alert | Use supporting bank, amount, account and time evidence; do not rely on a generic merchant name alone |
+| Card-payment confirmation | Reconcile eligible wallet/payment-rail and issuer notifications as one payment event when issuer, amount, date and identity evidence agree |
+| Similar same-channel alert | Keep as a review candidate when the match is uncertain |
+| Conflicting amount, reference or account identity | Preserve the conflict for review; do not silently merge |
+| Confirmed duplicate | Archive only after an explicit human decision |
 
--   A repeated, already-processed source with the same channel and
-    normalized source evidence is treated as an idempotent replay.
--   It must not create another canonical transaction.
--   Source evidence and processing status are retained for traceability
-    according to the engine's replay path.
+A date-only value is not proof of an exact time match. A timestamp, amount or shared reference alone is not sufficient to justify destructive merging.
 
-### Cross-channel reconciliation
+### Human resolution
 
-SMS and email may describe the same underlying bank transaction.
-Reconciliation uses transaction evidence rather than assuming that all
-messages from the same bank are equivalent.
+The `resolveexception` action supports:
 
--   Matching evidence includes signed amount, normalized bank, merchant,
-    date/time, and compatible account/card identity.
--   A strong reference/UTR match can support reconciliation beyond the
-    normal five-minute timing window when the other transaction facts
-    agree.
--   Contradictory meaningful account/card identifiers, conflicting
-    amounts, or conflicting references must not be silently merged.
--   A date-only value cannot establish a precise time-window match.
--   When evidence is insufficient or multiple candidates are plausible,
-    retain the case for review rather than guessing.
+- `CONFIRM_DISTINCT` — retain the transaction after human confirmation.
+- `CONFIRM_DUPLICATE` — archive a confirmed duplicate using `duplicateOf` to identify the surviving canonical transaction.
 
-### Same-channel duplicate suppression
+A specific reason is required. The confirmed-duplicate path preserves the archived transaction, re-links associated source evidence to the survivor, and records audit history. Historical transactions are not automatically deleted or merged by new duplicate-prevention logic.
 
-When a repeated SMS or email is received with a different source body,
-the engine checks whether it is a high-confidence duplicate of an
-existing canonical transaction. Automatic suppression requires a unique
-match with compatible transaction facts, including exact transaction
-timestamp, amount, bank, merchant and account identity, and no
-conflicting reference evidence.
+## 🧠 Rules, purpose and salary allocation
 
--   If the match is sufficiently strong, do not insert a second
-    `Transaction Log` row. Retain/link the incoming source evidence and
-    record the suppression in the audit trail.
--   If the match is not unique or transaction facts conflict, do not
-    automatically suppress it. Keep the case reviewable.
--   Timestamp equality **alone** is not sufficient to prove a duplicate.
--   An already-existing duplicate row is not automatically deleted by
-    this prevention logic; review and correct historical rows
-    separately.
+Rules support these match types:
 
-This policy favors avoiding silent financial-ledger corruption over
-aggressively merging transactions based only on similarity.
+- `MERCHANT`
+- `AMOUNT`
+- `AMOUNT+MERCHANT`
 
-## 5. Enrichment and response contract
+More-specific rules should win. Lower numeric priority breaks ties where the evidence is otherwise safe. Equally ranked rules that disagree remain ambiguous rather than being guessed.
 
-The engine returns processing information intended to support iOS
-Shortcuts and downstream enrichment. Depending on the operation, useful
-response fields include:
+### Purpose is optional
 
--   `success` --- whether the request was processed technically.
--   `status` --- outcome such as accepted, reconciled, duplicate
-    candidate, conflict, or idempotent replay.
--   `transactionId` --- stable transaction identity; use this for
-    updates.
--   `sourceId` --- source evidence identity.
--   `requestId` --- correlation ID for logs and diagnostics.
--   `needsEnrichment` --- whether additional user/category enrichment is
-    needed.
--   `requiresPurpose` --- whether purpose/user notes are missing.
--   `requiresCategoryClassification` --- whether category is missing or
-    invalid.
--   `allowedCategories` --- active category choices when classification
-    is required.
--   `purposeSuggestion` --- optional historical hint; it is not
-    automatically saved.
+A blank Purpose / User Notes value is valid. It does not block ingestion, approval, normal reporting or the required enrichment queue.
 
-Shortcuts should evaluate purpose and category requirements
-independently. If purpose is missing, ask the user. If category is
-missing, classify using the purpose, merchant, amount, type and allowed
-category list, then validate the result against that list before
-updating the transaction.
+- A meaningful configured purpose may be written when `Auto Purpose=TRUE`.
+- A rule may also use an explicitly configured `Purpose Trigger`.
+- Recurrence alone is not permission to invent the purpose of a transaction.
+- Missing Purpose can still be measured as a data-quality attribute.
+- If a category is blank or unmapped, the engine uses the active `Miscellaneous` category when available.
 
-A transaction may still require review while enrichment is pending.
-Adding a category or purpose must not clear duplicate, source-conflict,
-invalid-type, missing-precision, or other integrity-review states.
+### Separate earned month from budget month
 
-## 6. Transaction update contract
+Salary descriptions and budget allocation use separate offsets:
 
-Use HTTP POST with JSON, for example:
+| Rule field | What it controls |
+|---|---|
+| `Month Offset` (H) | Month label in the configured Notes Template |
+| `Purpose Trigger` (U) | Condition for triggering rule-generated purpose |
+| `Calendar Scope` (V) | Working-day calendar to evaluate |
+| `Budget Month Offset` (W) | Budget period assigned to the transaction |
 
-``` json
-{
-  "action": "update",
-  "transactionId": "202610-001",
-  "category": "Housing & utilities",
-  "purpose": "The actual user-provided purpose",
-  "actor": "user",
-  "reason": "shortcut_enrichment"
-}
-```
+For a month-end salary example:
 
-Use the stable `transactionId`, not a sheet row number. Empty
-category/purpose values and requests without supported update fields
-should be rejected. An unchanged valid update should report no change
-rather than claiming that a field was modified. Actual changes must be
-represented in the audit history.
+- `Month Offset=0` keeps the salary purpose tied to the transaction's actual month.
+- `Purpose Trigger=LAST_WORKING_DAY_OF_MONTH` checks the transaction date.
+- `Budget Month Offset=1` assigns that income to the next budget month.
 
-## 7. Rules behavior
+The working-day helper treats Monday–Friday as working by default. Optional `Holiday Calendar` rows can override a date for a named scope such as `HCL` or for `ALL`. Only verified holiday/working-day values should be entered.
 
-The Rules sheet's core fields are A:M:
+The engine populates optional `Income Month` for income transactions and `Budget Month` for transactions when those headers exist. It does not create a forecast salary transaction.
 
-`Enabled`, `Match Type`, `Amount`, `Merchant Contains`, `Category`,
-`Merchant Override`, `Notes Template`, `Month Offset`, `Is Recurring`,
-`Type Override`, `Account Override`, `Card Name Override`, `Priority`.
+## 💸 Budgeting and savings sweep concepts
 
-Optional fields may exist after column M, but they are not part of the
-minimum required schema unless explicitly supported by the deployed
-engine.
+The workbook's budget model separates actual cash flow from budget allocation:
 
-Supported match types include:
+- **Actual cash flow** is based on the real transaction date.
+- **Income Month** is the month income is received.
+- **Budget Month** is the period the income is allocated to.
+- **Planned savings sweep** is an intention, not yet actual savings.
+- **Actual verified savings** requires a reconciled transfer from the source account to the destination savings account.
 
--   `MERCHANT`
--   `AMOUNT`
--   `AMOUNT+MERCHANT`
+A sweep should be treated as completed only when both the source debit and destination credit have been identified and reconciled. Internal transfers must not be counted as consumption expenses or fresh income.
 
-Rules should be normalized for common sheet values such as `Y`/`TRUE`,
-currency-formatted amounts, and match-type punctuation.
-`AMOUNT+MERCHANT` requires both an amount and merchant pattern;
-malformed rules must not silently become broader rules.
+The dashboard visual above is a fictional example of how the distinction can be presented. **The Apps Script does not initiate bank transfers or move money.** The `Savings Sweep Log` and associated budget formulas are workbook-side planning/reconciliation features and must be configured and validated separately.
 
-More-specific rules should win; lower numeric priority wins among
-equally specific rules. Equally ranked rules that disagree should remain
-ambiguous rather than being guessed. Amount-only rules are inherently
-risky: amount equality alone does not prove merchant identity. Use
-merchant evidence from the rule or incoming message and review broad
-rules carefully.
+## 📈 Analytics and data quality
 
-Recurring status alone must not bypass missing purpose/category
-enrichment. Rule behavior must not override source facts without an
-explicit supported rule/config contract.
+The engine exposes structured read operations that a dashboard or other client can use:
 
-## 8. Config and account/card resolution
+| Action | Purpose |
+|---|---|
+| `health` / `ping` | Runtime and version health |
+| `validate` / `validateschema` | Workbook schema validation |
+| `gettransaction` / `gettransactiondetail` | Read a transaction |
+| `getpendingreview` | Pending transaction/source-conflict review items |
+| `getneedsenrichment` | Transactions requiring category classification |
+| `searchtransactions` | Search and filter the canonical ledger |
+| `getfinancialoverview` | Summary-level financial metrics |
+| `getcategorybreakdown` | Category analysis |
+| `getmerchantanalysis` | Merchant analysis |
+| `getrecurringcommitments` | Recurring commitments |
+| `getcashflow` | Cash-flow analysis |
+| `getspendingbehavior` | Spending behaviour metrics |
+| `getanomalies` | Anomaly candidates |
+| `getdataquality` | Data-quality counts and evidence status |
+
+The `getdataquality` response nests its metrics under `response.data`. Examples include:
+
+- `needsReview`
+- `duplicateCandidates`
+- `sourceConflicts`
+- `missingMerchant`
+- `missingCategory`
+- `missingPurpose`
+- `unknownType`
+- `dateOnly`
+- `suspectedInventedMidnightTimestamps`
+- `verified`, `smsOnly` and `emailOnly`
+
+**Missing Purpose is separate from Needs Review.** A transaction may have no Purpose and still be valid. Duplicate candidates, source conflicts, invalid transaction types and other integrity problems remain reviewable.
+
+The engine returns analytics data; the workbook is responsible for presenting it. Formula ranges, helper tabs, chart sources and dashboard refresh behaviour should be validated independently.
+
+## ⚙️ Config and account/card resolution
 
 The required Config fields A:I are:
 
-`Bank`, `Account Type`, `Account/Card Suffix`, `Merchant Contains`,
-`Account`, `Card Name`, `Instrument`, `Is Internal`, `Priority`.
+`Bank`, `Account Type`, `Account/Card Suffix`, `Merchant Contains`, `Account`, `Card Name`, `Instrument`, `Is Internal`, `Priority`.
 
-If the workbook includes a `Text Pattern` field, confirm that the
-deployed engine supports and uses it before relying on it for account
-resolution.
+An optional J-column `Text Pattern` can provide additional identity evidence when supported by the workbook configuration.
 
--   Higher specificity should win; lower numeric priority can break a
-    tie only when the source evidence identifies a safe candidate.
--   A suffix-specific row must not match when the source provides only a
-    masked or missing identifier.
--   Source instrument takes precedence over rule override, which takes
-    precedence over Config default.
--   Do not use priority alone to guess between two different cards when
-    the alert does not identify which card was used. Keep the result
-    reviewable.
--   Internal-transfer/card-payment treatment must be explicitly
-    configured and tested against downstream cash-flow reports. Do not
-    mark an ordinary purchase as internal.
+- Higher specificity should win; priority may break a safe tie.
+- A suffix-specific rule must not match when the source does not identify the configured suffix.
+- Source instrument takes precedence over rule override, which takes precedence over Config default.
+- Do not guess between different cards when the alert does not identify which card was used.
+- Mark `Is Internal` only for accounts genuinely owned by the user and only after testing how the reporting layer treats internal transfers.
 
-## 9. Dates, timezones and reporting
+## 🧪 Testing and release checklist
 
-Transaction timestamps and reporting period boundaries must be
-interpreted in `Asia/Kolkata` (India Standard Time), regardless of the
-Apps Script runtime's default timezone.
+Before production ingestion or deployment:
 
-Use the engine's custom date parser for date strings, including Indian
-formats such as `DD/MM/YYYY` and `DD-MM-YYYY`; do not rely on JavaScript
-`new Date(string)` for non-ISO dates. Date-only source values should
-retain their lower precision and must not be treated as exact
-timestamps.
+1. Run schema/config validation against the intended staging spreadsheet.
+2. Run `PFIS_RUN_ALL_PREFLIGHT_TESTS()` from the Apps Script editor.
+3. Confirm the synthetic test report and cleanup status.
+4. Test one representative SMS ingestion.
+5. Test its corresponding email, including a delayed email with a matching reference.
+6. Replay an identical source and confirm no second canonical transaction is inserted.
+7. Test a same-channel likely duplicate and confirm uncertain cases remain reviewable.
+8. Test a conflicting amount/reference/account and confirm it is preserved for review.
+9. Test a generic merchant notification and an eligible card-payment confirmation pair.
+10. Test a last-working-day purpose trigger, including a configured holiday override.
+11. Test blank Purpose and blank Category handling.
+12. Test a confirmed duplicate archive and verify source re-linking and Change Log entries.
+13. Check Transaction Log, Source Log and Change Log IDs, links and row placement.
+14. Validate workbook formulas, monthly summaries and dashboards separately.
+15. Deploy a new Web App version when applicable, then perform a controlled production smoke test.
 
-The Google Sheet's display timezone and the Apps Script project timezone
-should be checked during staging. Consistent timezone handling in the
-engine does not automatically repair existing spreadsheet formulas or
-dashboard logic.
+Local/mocked logic checks are not equivalent to running the complete test harness against Google Sheets and Apps Script services. Do not describe the system as production-certified until the actual staging run passes.
 
-## 10. Row allocation, concurrency and performance
+## 🚀 Setup and deployment
 
--   Write destinations must be found using the logical key column and a
-    full-row safety check, not merely `getLastRow() + 1`.
--   A row with a blank ID but other data or formulas is not a safe
-    reusable row.
--   Rows containing only default unchecked checkbox values may be
-    treated as logically blank only when the allocator's safety rules
-    confirm there is no other transaction/audit data.
--   Use `LockService` to serialize conflicting ingestion/write
-    operations and protect transaction IDs, duplicate checks and row
-    allocation.
--   Cache Rules, Config and Categories during a request/batch rather
-    than repeatedly reading the same tabs in loops.
--   Batch multi-entry audit writes and auxiliary-column writes where
-    possible, while preserving existing formulas.
--   Do not run cleanup against production data without a backup and a
-    reviewed dry run. Never clear `Source Log` or `Change Log` as
-    routine cleanup.
+### Required Script Property
 
-## 11. Runtime configuration and deployment
+- `SPREADSHEET_ID` — the Google Spreadsheet ID, taken from the URL between `/d/` and `/edit`.
 
-Required Script Property:
+### Optional Script Property
 
--   `SPREADSHEET_ID` --- the Google Spreadsheet ID, taken from the URL
-    between `/d/` and `/edit`.
+- `WEB_APP_SECRET` — when configured, requests must include the expected token in the JSON body.
 
-Optional Script Property:
+### Deployment notes
 
--   `WEB_APP_SECRET` --- if configured, requests must include the
-    matching token as required by the deployed endpoint.
+1. Open the Apps Script project connected to the intended staging workbook.
+2. Add the transaction engine file and preflight test file to the same project.
+3. Configure script properties and verify the spreadsheet timezone/reporting setup.
+4. Run schema validation and the preflight suite.
+5. Inspect the execution report and test the end-to-end ingestion paths.
+6. Deploy a new Web App version when the deployed endpoint must use updated code.
+7. Promote to production only after staging is clean.
 
-Use POST JSON consistently for write operations. Deploying updated code
-to an existing Apps Script Web App requires deploying a new version when
-applicable; saving the editor alone does not necessarily update the
-deployed endpoint.
+Keep staging and production spreadsheets separate. Do not point destructive or synthetic test runs at a production ledger.
 
-Keep production and staging spreadsheets separate. The test harness must
-use a dedicated test spreadsheet and must not be pointed at the
-production ledger for destructive tests.
+## ⚡ Reliability and performance principles
 
-## 12. Error logging and retry behavior
+- Use POST JSON for write operations; never use GET for ingestion or updates.
+- Serialize writes with `LockService` to protect transaction IDs, duplicate checks and row allocation.
+- Allocate rows using logical key-column and full-row safety checks; a blank ID alone does not make a row reusable.
+- Cache Rules, Config, Categories, source and transaction reads within a request.
+- Preserve source evidence and detailed audit history.
+- Make retries idempotent wherever the source identity is known.
+- Do not let diagnostic logging mask the original processing error.
+- Do not clear Source Log or Change Log as routine cleanup.
 
-Unexpected runtime exceptions caught by the request router are logged on a best-effort basis:
+## 📚 Project files
 
-- `Change Log` receives an idempotent `SERVER_ERROR` audit entry containing the request ID, action/table, error code, and diagnostic text.
-- For an ingestion request with source type and raw evidence, `Source Log` receives a `SERVER_ERROR` diagnostic row if no source row has already been created. If processing was already underway, the existing `PROCESSING_*` source row keeps its recovery state and receives the error in `Processing Error`.
-- Diagnostic logging checks the relevant sheet schema first and must not mask the original error. If the workbook is unavailable or the target log schema is unsafe, the API response reports that the error could not be sheet-logged and execution logs remain the fallback.
-- `SERVER_ERROR` diagnostic source rows are excluded from source replay matching so they do not block a retry. Processing-state records are not changed to `SERVER_ERROR`, preserving interrupted-write recovery.
+| File | Purpose |
+|---|---|
+| `PFIS_TransactionEngine_v1.0.0.gs` | Production Apps Script transaction engine |
+| `PFIS_Preflight_Tests_v1.0.0.gs` | Bounded synthetic regression/preflight harness |
+| `PFIS_Shortcut_Implementation_v1.0.0.txt` | iOS Shortcut implementation reference |
+| `PFIS_Prompts_Final_v1.0.0_Prompts.txt` | Prompt/reference material |
+| `REVIEW_NOTES.md` | Engineering review notes |
+| `docs/images/` | Synthetic README dashboard illustrations |
 
-Expected validation outcomes such as `PARSE_FAILED`, duplicate suppression, reconciliation, or a source conflict are normal pipeline outcomes rather than unexpected exceptions. They use their own Source Log statuses.
+## 🔐 Privacy and example-data policy
 
-## 13. Testing and release checklist
+This repository's README visuals and payload examples use fictional names, figures, identifiers and dates. They are not screenshots of the live financial workbook.
 
-Before live ingestion:
+Do not commit:
+- Real bank SMS/email contents
+- Account or card numbers
+- Personal transaction IDs
+- Real balances or financial statements
+- Secrets, access tokens or spreadsheet IDs
 
-1.  Run the engine's schema/config validation against the intended
-    staging spreadsheet.
-2.  Run the preflight/test harness from the Apps Script editor.
-3.  Confirm the test harness reports each case and cleanup status.
-4.  Test one representative SMS ingestion.
-5.  Test the corresponding email, including a delayed email with a
-    matching reference.
-6.  Replay the same source and confirm no second canonical transaction
-    is created.
-7.  Test a same-channel duplicate with the same transaction timestamp
-    and compatible transaction facts.
-8.  Test a conflicting amount/reference and confirm the engine preserves
-    a reviewable conflict instead of merging it.
-9.  Test a missing or ambiguous card identifier and confirm it is not
-    guessed.
-10. Test category/purpose updates and verify Change Log entries.
-11. Check the Transaction Log, Source Log and Change Log for correct
-    IDs, links and row placement.
-12. Check the live dashboard/monthly formulas independently; XLSX
-    exports may not preserve all Google Sheets formulas.
-13. Only after staging passes, deploy the Web App version and perform a
-    controlled production smoke test.
+Use synthetic fixtures for screenshots, documentation, examples and tests.
 
-Local mocked tests are useful for deterministic logic but are not
-equivalent to executing against Google Sheets and Apps Script services.
-Do not describe the system as production-certified until the actual
-staging test has passed.
+---
 
-## 14. Data management and known boundaries
+<div align="center">
 
--   Preserve `Source Log` as evidence/provenance history.
--   Preserve `Change Log` as the detailed audit trail.
--   Sender and subject may be blank for SMS sources.
--   A successful HTTP response does not necessarily mean a new
-    transaction was inserted; inspect `status`.
--   Historical duplicates are not automatically deleted by new
-    duplicate-prevention logic.
--   Dashboard/report formulas and other workbook scripts are outside the
-    engine's core responsibilities and require their own validation.
--   Never replace unknown merchant/account data with a confident guess
-    merely to avoid a review state.
+### Built for clarity, traceability and better financial decisions.
 
-## 15. Project version
+**PFIS · Personal Finance Intelligence System · v1.0.0**
 
-**Project:** PFIS Transaction Engine\
-**Version:** v1.0.0\
-**Purpose:** First documented project release\
-**Core runtime:** Google Apps Script + Google Sheets, with iOS Shortcuts
-as the source collection/enrichment client
+<sub>Google Apps Script · Google Sheets · Evidence-led transaction intelligence</sub>
 
-Keep this README aligned with the exact engine and test harness deployed
-in the project. Update it whenever the ingestion contract, schema,
-duplicate policy, configuration requirements or deployment procedure
-changes.
+</div>

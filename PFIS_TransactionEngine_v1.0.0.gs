@@ -744,7 +744,8 @@ function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceI
     sourceId: sourceId || '', batchId: pfisString(params && params.batchId), sourceHash: sourceHash || '',
     canonicalKey: transactionId ? 'CANON-' + transactionId : '',
     merchantCleaned: pfisNormalizeMerchant(ruleResult.merchantOverride || parsed.merchant),
-    isInvestment: type === 'investment', isCardPayment: type === 'card_payment'
+    isInvestment: type === 'investment', isCardPayment: type === 'card_payment',
+    budgetMonthOffset: isFinite(Number(ruleResult.budgetMonthOffset)) ? Math.trunc(Number(ruleResult.budgetMonthOffset)) : 0
   };
 }
 
@@ -1479,7 +1480,35 @@ function pfisAppendTransaction(transaction, auditSummary) {
     : ('Created transaction ' + pfisString(transaction.transactionId)));
 
   pfisWriteLegacyTransactionAux(targetRow, transaction, summaryText, targetSheet);
+  pfisWriteOptionalBudgetPeriods(targetRow, transaction, targetSheet);
   return targetRow;
+}
+
+/**
+ * Optional derived period columns are header-driven for backward compatibility.
+ * Income Month = actual transaction month. Budget Month = transaction month plus
+ * the explicitly configured Rules!W offset; there is no day-of-month heuristic.
+ */
+function pfisWriteOptionalBudgetPeriods(rowNumber, transaction, targetSheet) {
+  const sheet = targetSheet || pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn < 1) return;
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0].map(pfisHeaderToken);
+  const date = pfisParseDateValue(transaction && transaction.dateTime);
+  if (!date) return;
+  const year = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy'));
+  const month = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'M'));
+  const budgetOffset = isFinite(Number(transaction.budgetMonthOffset)) ? Math.trunc(Number(transaction.budgetMonthOffset)) : 0;
+  function monthStart(offset) {
+    const index = year * 12 + (month - 1) + offset;
+    const y = Math.floor(index / 12);
+    const m = index - y * 12 + 1;
+    return pfisCreateIndiaDate(y, m, 1, 12, 0, 0);
+  }
+  const incomeMonthCol = headers.indexOf('incomemonth') + 1;
+  const budgetMonthCol = headers.indexOf('budgetmonth') + 1;
+  if (incomeMonthCol > 0) sheet.getRange(rowNumber, incomeMonthCol).setValue(monthStart(0));
+  if (budgetMonthCol > 0) sheet.getRange(rowNumber, budgetMonthCol).setValue(monthStart(budgetOffset));
 }
 
 function pfisAppendSourceRow(source) {
@@ -2382,6 +2411,7 @@ function pfisEvaluateRules(parsed, rawEvidence) {
     autoReview: pfisTruthy(rule.autoReview),
     purposeTrigger: pfisString(rule.purposeTrigger).toUpperCase(),
     calendarScope: pfisString(rule.calendarScope).toUpperCase(),
+    budgetMonthOffset: isFinite(Number(rule.budgetMonthOffset)) ? Math.trunc(Number(rule.budgetMonthOffset)) : 0,
     ruleEngine: pfisCleanText(rule.ruleEngine),
     notesMetadata: notesMetadata
   };
@@ -2493,6 +2523,13 @@ function pfisGetRuleRows() {
     ? sheet.getRange(2, PFIS_RULE_CALENDAR_SCOPE_COLUMN, baseRows.length, 1).getDisplayValues()
     : [];
 
+  const budgetOffsetHeader = sheet.getLastColumn() >= 23
+    ? pfisString(sheet.getRange(1, 23).getDisplayValue()) : '';
+  const useBudgetOffset = pfisHeaderToken(budgetOffsetHeader) === 'budgetmonthoffset';
+  const budgetOffsetValues = useBudgetOffset && baseRows.length
+    ? sheet.getRange(2, 23, baseRows.length, 1).getValues()
+    : [];
+
   if (purposeTriggerHeader && !usePurposeTrigger) {
     console.warn('Rules!U ignored because its header is not exactly "Purpose Trigger".');
   }
@@ -2510,6 +2547,8 @@ function pfisGetRuleRows() {
     obj.autoPurpose = useAutoPurpose ? pfisTruthy(autoPurposeValues[i][0]) : false;
     obj.purposeTrigger = usePurposeTrigger ? pfisString(purposeTriggerValues[i][0]).toUpperCase() : '';
     obj.calendarScope = useCalendarScope ? pfisString(calendarScopeValues[i][0]).toUpperCase() : '';
+    const budgetOffset = useBudgetOffset ? Number(budgetOffsetValues[i][0]) : 0;
+    obj.budgetMonthOffset = isFinite(budgetOffset) ? Math.trunc(budgetOffset) : 0;
     obj.rowNumber = i + 2;
     return obj;
   });
@@ -3982,14 +4021,11 @@ function pfisBuildUpdateResponse(transaction, requestId, status, changedFields) 
 function pfisGetEnrichmentState(category, notes, categoryList, merchant) {
   const categories = Array.isArray(categoryList) ? categoryList : pfisGetCategoryList();
   const categoryValue = pfisCleanText(category);
-  // A purpose must be meaningful: blanks, generic placeholders, and a value that
-  // merely repeats the merchant name are treated as missing enrichment.
-  const purposeIsMeaningful = pfisIsMeaningfulPurpose(notes, merchant);
-  // This flag tells Shortcuts to classify with its selected AI model; it is not
-  // a request for the user to select the category manually.
+  // Purpose is optional. It remains visible in data-quality metrics but never
+  // blocks capture, approval, review completion or reporting.
   return {
     requiresCategoryClassification: !categoryValue || categories.indexOf(categoryValue) < 0,
-    requiresPurpose: !purposeIsMeaningful
+    requiresPurpose: false
   };
 }
 

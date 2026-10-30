@@ -75,6 +75,12 @@ const PFIS_SHEETS = Object.freeze({
   categories: 'Categories',
   archive: 'Rejected & Archive Log'
 });
+const PFIS_PURPOSE_REVIEW_SHEET = 'Purpose Review Queue';
+const PFIS_PURPOSE_REVIEW_HEADERS = Object.freeze([
+  'Suggestion ID', 'Transaction ID', 'Transaction Date', 'Merchant', 'Amount', 'Category',
+  'Type', 'Suggested Purpose', 'Evidence Summary', 'Evidence Source IDs', 'Confidence',
+  'Status', 'Gemini Run At', 'Reviewed By', 'Reviewed At', 'Applied At', 'Apply Result'
+]);
 
 // The field arrays below ARE the physical schema. Runtime never maps using
 // displayed header names. Column 1 is index 0 in a JavaScript row array.
@@ -618,9 +624,9 @@ function pfisIngestSource(params, requestId, options) {
 }
 
 /**
- * A rule-generated purpose is trusted only when its explicit Auto Purpose flag is
- * TRUE and the matched rule supplies a meaningful purpose. Recurrence alone is
- * not permission to infer the purpose of an individual payment.
+ * A rule-generated purpose is trusted only when Auto Purpose=TRUE OR a supported
+ * Purpose Trigger is satisfied using the transaction's own date. Recurrence alone
+ * is not permission to infer the purpose of an individual payment.
  */
 function pfisGetTrustedPurposeFromRule(ruleResult, merchant, transactionDate) {
   if (!ruleResult) return '';
@@ -2335,6 +2341,144 @@ function pfisUpdateTransaction(params, requestId) {
   pfisInvalidateTransactionCache();
   pfisWriteLegacyTransactionAux(rowNumber, latest, 'Updated ' + changed.join(', ') + ' by ' + (pfisString(params.actor) || 'user'));
   return pfisBuildUpdateResponse(pfisGetTransaction(transactionId, false), requestId, 'UPDATED', changed);
+}
+
+
+
+/**
+ * Apply only explicitly human-approved Purpose suggestions prepared in the optional
+ * Purpose Review Queue. Gemini may write proposals to that queue, but must never
+ * write directly to Transaction Log. This function routes approved suggestions
+ * through pfisUpdateTransaction so Change Log auditing and normal validation apply.
+ *
+ * Required queue headers are PFIS_PURPOSE_REVIEW_HEADERS. Evidence Source IDs must
+ * identify Source Log rows linked to the same canonical Transaction ID.
+ *
+ * Human approval requires Status=APPROVED, Reviewed By and Reviewed At.
+ */
+function PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    return { success: false, status: 'BUSY', message: 'Could not acquire the PFIS write lock.', applied: 0 };
+  }
+  const summary = { success: true, status: 'COMPLETED', scanned: 0, applied: 0, stale: 0, blocked: 0, failed: 0, results: [] };
+  try {
+    const spreadsheet = pfisGetSpreadsheet();
+    const queue = spreadsheet.getSheetByName(PFIS_PURPOSE_REVIEW_SHEET);
+    if (!queue) {
+      return { success: false, status: 'MISSING_PURPOSE_REVIEW_QUEUE', message: 'Create the optional Purpose Review Queue sheet with the documented headers.', applied: 0 };
+    }
+    const width = PFIS_PURPOSE_REVIEW_HEADERS.length;
+    const headers = queue.getRange(1, 1, 1, width).getDisplayValues()[0];
+    const badHeaders = PFIS_PURPOSE_REVIEW_HEADERS.filter(function (header, index) {
+      return pfisHeaderToken(headers[index]) !== pfisHeaderToken(header);
+    });
+    if (badHeaders.length) {
+      return { success: false, status: 'PURPOSE_QUEUE_SCHEMA_MISMATCH', message: 'Purpose Review Queue headers do not match the documented layout.', badHeaders: badHeaders, applied: 0 };
+    }
+    if (queue.getLastRow() < 2) return summary;
+
+    const sourceSheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
+    const sourceRows = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length);
+    const sourceToTransaction = Object.create(null);
+    sourceRows.forEach(function (row) {
+      const source = pfisObjectFromRow(row, PFIS_SOURCE_FIELDS);
+      if (pfisString(source.sourceId)) sourceToTransaction[pfisString(source.sourceId)] = pfisString(source.linkedTxnId);
+    });
+
+    const transactionSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+    const rows = queue.getRange(2, 1, queue.getLastRow() - 1, width).getValues();
+    rows.forEach(function (row, index) {
+      const queueRow = index + 2;
+      const status = pfisString(row[11]).toUpperCase();
+      if (status !== 'APPROVED') return;
+      summary.scanned++;
+
+      const suggestionId = pfisString(row[0]) || ('ROW-' + queueRow);
+      const transactionId = pfisString(row[1]);
+      const suggestedPurpose = pfisCleanText(row[7]);
+      const evidenceSummary = pfisCleanText(row[8]);
+      const evidenceSourceIds = pfisString(row[9]).split(/[,;|\\s]+/).filter(Boolean);
+      const reviewer = pfisCleanText(row[13]);
+      const reviewedAt = row[14];
+
+      function setQueueResult(newStatus, appliedAt, resultText) {
+        queue.getRange(queueRow, 12, 1, 6).setValues([[
+          newStatus, row[12], reviewer, reviewedAt, appliedAt || '', resultText || ''
+        ]]);
+      }
+      function block(message, state) {
+        setQueueResult(state || 'BLOCKED', '', message);
+        summary.blocked++;
+        summary.results.push({ suggestionId: suggestionId, transactionId: transactionId, status: state || 'BLOCKED', message: message });
+      }
+
+      try {
+        if (!transactionId) return block('Transaction ID is required.');
+        if (!suggestedPurpose || !evidenceSummary || !evidenceSourceIds.length) {
+          return block('Suggested Purpose, Evidence Summary and at least one Evidence Source ID are required.');
+        }
+        if (!reviewer || !reviewedAt) return block('Human approval requires Reviewed By and Reviewed At.');
+        if (!evidenceSourceIds.every(function (sourceId) { return sourceToTransaction[sourceId] === transactionId; })) {
+          return block('Evidence Source ID does not link to the specified canonical transaction.');
+        }
+
+        const transactionRow = pfisFindTransactionRow(transactionId);
+        if (transactionRow < 2) {
+          setQueueResult('STALE', '', 'Canonical transaction no longer exists.');
+          summary.stale++;
+          summary.results.push({ suggestionId: suggestionId, transactionId: transactionId, status: 'STALE', message: 'Canonical transaction no longer exists.' });
+          return;
+        }
+        const transaction = pfisObjectFromRow(
+          transactionSheet.getRange(transactionRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0],
+          PFIS_TX_FIELDS
+        );
+        if (pfisString(transaction.userNotes)) {
+          setQueueResult('STALE', '', 'Canonical Purpose is already populated; no overwrite was performed.');
+          summary.stale++;
+          summary.results.push({ suggestionId: suggestionId, transactionId: transactionId, status: 'STALE', message: 'Existing Purpose was preserved.' });
+          return;
+        }
+        const flag = pfisString(transaction.validationFlag).toUpperCase();
+        if (['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT', 'DUPLICATE_REJECTED'].indexOf(flag) >= 0) {
+          return block('Resolve the transaction integrity exception before applying a Purpose suggestion.', 'BLOCKED_REVIEW');
+        }
+        if (!pfisIsMeaningfulPurpose(suggestedPurpose, transaction.merchant)) {
+          return block('Suggested Purpose is a placeholder or repeats the merchant name.', 'BLOCKED_INVALID_PURPOSE');
+        }
+
+        const response = pfisUpdateTransaction({
+          transactionId: transactionId,
+          purpose: suggestedPurpose,
+          actor: reviewer,
+          reason: 'Human-approved Gemini Purpose suggestion ' + suggestionId + '; evidence: ' + evidenceSourceIds.join(',')
+        }, Utilities.getUuid());
+
+        if (response && response.success && ['UPDATED', 'NO_CHANGE'].indexOf(pfisString(response.status).toUpperCase()) >= 0) {
+          const appliedAt = new Date();
+          setQueueResult('APPLIED', appliedAt, 'Applied through PFIS update pipeline; Change Log audit recorded.');
+          summary.applied++;
+          summary.results.push({ suggestionId: suggestionId, transactionId: transactionId, status: 'APPLIED' });
+        } else {
+          const message = response && (response.message || response.error || response.status)
+            ? String(response.message || response.error || response.status) : 'Purpose update returned an unsuccessful response.';
+          setQueueResult('APPLY_ERROR', '', message);
+          summary.failed++;
+          summary.results.push({ suggestionId: suggestionId, transactionId: transactionId, status: 'APPLY_ERROR', message: message });
+        }
+      } catch (rowError) {
+        const message = String(rowError && rowError.message ? rowError.message : rowError);
+        setQueueResult('APPLY_ERROR', '', message);
+        summary.failed++;
+        summary.results.push({ suggestionId: suggestionId, transactionId: transactionId, status: 'APPLY_ERROR', message: message });
+      }
+    });
+    summary.status = summary.failed || summary.blocked ? 'COMPLETED_WITH_EXCEPTIONS' : 'COMPLETED';
+    return summary;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, configResult, requestId) {
@@ -4179,7 +4323,7 @@ function pfisBuildTransactionResponse(transaction, requestId, status, changedFie
     sourceCount: verification.sourceCount,
     sourceTypes: verification.sourceTypes,
     needsReview: transaction ? pfisTruthy(transaction.needsReview) : false,
-    needsEnrichment: enrichment.requiresPurpose || enrichment.requiresCategoryClassification,
+    needsEnrichment: enrichment.requiresCategoryClassification,
     requiresPurpose: enrichment.requiresPurpose,
     requiresCategoryClassification: enrichment.requiresCategoryClassification
   };
@@ -4232,10 +4376,10 @@ function pfisRecommendNextAction(status, transaction, enrichment) {
   const state = enrichment || pfisGetEnrichmentState(
     tx.category, tx.userNotes, undefined, tx.merchant
   );
-  // Category first: the Shortcut's classifier returns ASK_PURPOSE only when the
-  // merchant and raw alert do not provide enough evidence for a reliable category.
+  // Purpose is optional and is never a Shortcut question. The only normal
+  // enrichment route is category classification; trusted rule purposes were
+  // already applied during insertion/reconciliation.
   if (state.requiresCategoryClassification) return 'CLASSIFY_CATEGORY';
-  if (state.requiresPurpose) return 'ASK_PURPOSE';
   if (pfisTruthy(tx.needsReview)) return 'REVIEW';
   return 'SHOW_RECEIPT';
 }

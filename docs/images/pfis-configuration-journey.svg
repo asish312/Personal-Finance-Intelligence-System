@@ -27,7 +27,7 @@
 <g class="ui"><text x="1116" y="502" class="w h">04 · Holiday Calendar</text><text x="1116" y="529" class="m sm">When does an employer's month end?</text>
 <rect x="1116" y="565" width="410" height="94" rx="12" fill="#243a56"/>
 <g class="m tiny"><text x="1140" y="592">DATE</text><text x="1260" y="592">SCOPE</text><text x="1384" y="592">WORKING?</text></g>
-<g class="w sm"><text x="1140" y="625">30 Oct</text><text x="1260" y="625">HCL</text><text x="1384" y="625" fill="#7fe0cc">TRUE</text></g>
+<g class="w sm"><text x="1140" y="625">30 Oct</text><text x="1260" y="625">Example Employer</text><text x="1384" y="625" fill="#7fe0cc">TRUE</text></g>
 <text x="1116" y="687" class="m tiny">Weekend defaults + verified scoped overrides.</text></g>
 <!-- output -->
 <path d="M392 432V448M1160 432V448M544 718V756H800M1322 718V756H800" stroke="#6c85a7" stroke-width="2.5" fill="none" stroke-linecap="round"/>

@@ -2398,7 +2398,7 @@ function PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS() {
       const transactionId = pfisString(row[1]);
       const suggestedPurpose = pfisCleanText(row[7]);
       const evidenceSummary = pfisCleanText(row[8]);
-      const evidenceSourceIds = pfisString(row[9]).split(/[,;|\\s]+/).filter(Boolean);
+      const evidenceSourceIds = pfisString(row[9]).split(/[,;|\s]+/).filter(Boolean);
       const reviewer = pfisCleanText(row[13]);
       const reviewedAt = row[14];
 

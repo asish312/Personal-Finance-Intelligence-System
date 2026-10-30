@@ -1525,35 +1525,18 @@ function pfisInvalidateSourceCache() {
 
 function pfisAppendTransaction(transaction, auditSummary) {
   // Check if the engine marked this as a duplicate candidate
+  // Potential duplicates stay in the live ledger and review queue. Only an
+  // explicit human CONFIRM_DUPLICATE decision may send a row to the archive.
   let isDuplicate = transaction && (
-    transaction.validationFlag === 'DUPLICATE_CANDIDATE' ||
     transaction.validationFlag === 'DUPLICATE_REJECTED' ||
     transaction.reviewStatus === 'Rejected - Duplicate'
   );
 
   const txSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
 
-  // Secondary safeguard: Check if Hash, Canonical Key, or Ref No already exists in Transaction Log
-  if (!isDuplicate && txSheet.getLastRow() > 1) {
-    const incomingHash = pfisString(transaction.sourceHash);
-    const incomingCanonKey = pfisString(transaction.canonicalKey);
-    const incomingRefNo = pfisString(transaction.refNo);
-
-    // Read Columns Q (17: Ref No), AG (33: Hash), and AH (34: Canon Key)
-    const data = txSheet.getRange(2, 1, txSheet.getLastRow() - 1, 34).getValues();
-    for (let i = 0; i < data.length; i++) {
-      const rowRef = pfisString(data[i][16]);
-      const rowHash = pfisString(data[i][32]);
-      const rowCanon = pfisString(data[i][33]);
-
-      if ((incomingHash && rowHash === incomingHash) ||
-        (incomingCanonKey && rowCanon === incomingCanonKey) ||
-        (incomingRefNo && incomingRefNo !== 'NA' && rowRef === incomingRefNo)) {
-        isDuplicate = true;
-        break;
-      }
-    }
-  }
+  // Exact source replay is handled by Source Log hash idempotency and event matching.
+  // A hash, a generated canonical key, or a shared reference number by itself is
+  // not enough evidence to auto-reject a financial transaction.
 
   // Route to 'Rejected & Archive Log' if duplicate, otherwise 'Transaction Log'
   const targetSheet = isDuplicate
@@ -1940,16 +1923,91 @@ function pfisGetNeedsEnrichment(limitInput) {
  * Required POST JSON: {action:"resolveexception", transactionId:"...",
  * resolution:"CONFIRM_DISTINCT", reason:"...", actor:"user"}.
  */
+function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor, requestId) {
+  const duplicateRow = pfisFindTransactionRow(transactionId);
+  const primaryRow = pfisFindTransactionRow(duplicateOf);
+  if (duplicateRow < 2 || primaryRow < 2 || transactionId === duplicateOf) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'DUPLICATE_TARGET_INVALID',
+      message: 'Both the duplicate candidate and its primary transaction must exist as separate active ledger rows.',
+      transactionId: transactionId, duplicateOf: duplicateOf, requestId: requestId };
+  }
+  const txSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const archiveSheet = pfisGetSpreadsheet().getSheetByName('Rejected & Archive Log');
+  if (!archiveSheet || archiveSheet.getLastColumn() < PFIS_TX_FIELDS.length) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_SHEET_INVALID',
+      message: 'Rejected & Archive Log is missing or does not contain the canonical A:AC schema. No rows were changed.',
+      transactionId: transactionId, requestId: requestId };
+  }
+  const record = pfisObjectFromRow(
+    txSheet.getRange(duplicateRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  if (pfisString(record.validationFlag).toUpperCase() !== 'DUPLICATE_CANDIDATE') {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'NOT_DUPLICATE_CANDIDATE',
+      message: 'Only a transaction explicitly flagged DUPLICATE_CANDIDATE can be archived this way.',
+      transactionId: transactionId, requestId: requestId };
+  }
+  const now = new Date();
+  record.needsReview = false;
+  record.reviewStatus = 'Rejected - Duplicate';
+  record.reviewReason = 'confirmed_duplicate_of:' + duplicateOf + ' | ' + reason;
+  record.reviewedBy = actor;
+  record.reviewedAt = now;
+  record.validationFlag = 'DUPLICATE_REJECTED';
+  record.lastUpdatedAt = now;
+
+  const archiveRow = pfisGetNextAvailableRow(archiveSheet, 1);
+  archiveSheet.getRange(archiveRow, 1, 1, PFIS_TX_FIELDS.length)
+    .setValues([pfisRowFromObject(record, PFIS_TX_FIELDS)]);
+  pfisWriteLegacyTransactionAux(archiveRow, record,
+    'Human-confirmed duplicate of ' + duplicateOf + ': ' + reason, archiveSheet);
+  pfisWriteOptionalBudgetPeriods(archiveRow, record, archiveSheet);
+
+  // Re-point all source evidence to the surviving canonical transaction. Preserve
+  // the archived transaction snapshot and full explanation in Change Log.
+  const sourceSheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
+  const sourceRows = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length);
+  sourceRows.forEach(function (row, i) {
+    const source = pfisObjectFromRow(row, PFIS_SOURCE_FIELDS);
+    if (pfisString(source.linkedTxnId) !== transactionId) return;
+    const sourceRow = i + 2;
+    sourceSheet.getRange(sourceRow, 16).setValue(duplicateOf);
+    sourceSheet.getRange(sourceRow, 9).setValue('DUPLICATE_SUPPRESSED');
+    sourceSheet.getRange(sourceRow, 19).setValue(true);
+    sourceSheet.getRange(sourceRow, 20).setValue(
+      'Human-confirmed duplicate archived as ' + transactionId + '; linked to surviving transaction ' + duplicateOf +
+      '. Reason: ' + reason);
+  });
+
+  // Clear the active row only after the archive copy and source relinking succeeded.
+  const lastColumn = Math.max(txSheet.getLastColumn(), PFIS_TX_FIELDS.length);
+  txSheet.getRange(duplicateRow, 1, 1, lastColumn).clearContent();
+  pfisInvalidateTransactionCache();
+  pfisInvalidateSourceCache();
+  pfisAppendChangeOnceBatch([
+    { eventKey: 'duplicate-archived:' + transactionId + ':' + requestId, change: {
+      transactionId: transactionId, targetTable: 'Rejected & Archive Log', actor: actor,
+      field: 'Archive Status', oldValue: 'DUPLICATE_CANDIDATE', newValue: 'DUPLICATE_REJECTED',
+      reason: 'Human-confirmed duplicate of ' + duplicateOf + ': ' + reason, requestId: requestId
+    }},
+    { eventKey: 'duplicate-survivor:' + transactionId + ':' + duplicateOf + ':' + requestId, change: {
+      transactionId: duplicateOf, targetTable: PFIS_SHEETS.transactions, actor: actor,
+      field: 'Duplicate Evidence Linked', oldValue: '', newValue: transactionId,
+      reason: 'Duplicate transaction ' + transactionId + ' archived; its source evidence was linked to this surviving transaction.', requestId: requestId
+    }}
+  ]);
+  return { success: true, status: 'DUPLICATE_ARCHIVED', transactionId: transactionId,
+    duplicateOf: duplicateOf, archiveRow: archiveRow, requestId: requestId };
+}
+
 function pfisResolveTransactionException(params, requestId) {
   const transactionId = pfisString(params.transactionId || params.txnId);
   const resolution = pfisString(params.resolution).toUpperCase().replace(/[ -]+/g, '_');
   const reason = pfisCleanText(params.reason);
   if (!transactionId) return { success: false, status: 'UPDATE_REJECTED', error: 'BAD_REQUEST', message: 'transactionId is required.', requestId: requestId };
-  if (resolution !== 'CONFIRM_DISTINCT') {
+  if (['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE'].indexOf(resolution) < 0) {
     return {
       success: false, status: 'UPDATE_REJECTED', error: 'UNSUPPORTED_RESOLUTION',
-      message: 'Only CONFIRM_DISTINCT is supported. Duplicate deletion/merging is intentionally not automated because it can change reported cash flow.',
-      transactionId: transactionId, allowedResolutions: ['CONFIRM_DISTINCT'], requestId: requestId
+      message: 'Use CONFIRM_DISTINCT to retain a real transaction or CONFIRM_DUPLICATE with duplicateOf to archive a confirmed duplicate.',
+      transactionId: transactionId, allowedResolutions: ['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE'], requestId: requestId
     };
   }
   if (!reason || reason.length < 8) {
@@ -1958,6 +2016,15 @@ function pfisResolveTransactionException(params, requestId) {
       message: 'Provide a specific human review reason of at least 8 characters; no fields were changed.', transactionId: transactionId, requestId: requestId
     };
   }
+  if (resolution === 'CONFIRM_DUPLICATE') {
+    const duplicateOf = pfisString(params.duplicateOf);
+    if (!duplicateOf) return {
+      success: false, status: 'UPDATE_REJECTED', error: 'DUPLICATE_OF_REQUIRED',
+      message: 'duplicateOf must contain the surviving canonical transaction ID.', transactionId: transactionId, requestId: requestId
+    };
+    return pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, pfisString(params.actor) || 'user', requestId);
+  }
+
   const rowNumber = pfisFindTransactionRow(transactionId);
   if (rowNumber < 2) return {
     success: false, status: 'NOT_FOUND', error: 'NOT_FOUND',
@@ -2048,26 +2115,30 @@ function pfisUpdateTransaction(params, requestId) {
   // where purpose is saved but an explicitly supplied category is blank/invalid.
   if (has('category')) {
     const category = pfisString(params.category);
-    if (!category) {
-      return {
-        success: false, status: 'UPDATE_REJECTED', error: 'EMPTY_CATEGORY',
-        message: 'category was supplied but empty; no fields were changed.', transactionId: transactionId, requestId: requestId
-      };
-    }
     if (!categories.length) {
       return {
         success: false, status: 'UPDATE_REJECTED', error: 'NO_ACTIVE_CATEGORIES',
         message: 'No active categories exist in the Categories sheet; no fields were changed.', transactionId: transactionId, requestId: requestId
       };
     }
-    if (categories.indexOf(category) < 0) {
-      return {
-        success: false, status: 'UPDATE_REJECTED', error: 'INVALID_CATEGORY',
-        message: 'category must exactly match an active Categories sheet value.', transactionId: transactionId,
-        allowedCategories: categories, requestId: requestId
+    if (!category) {
+      const fallback = categories.indexOf('Miscellaneous') >= 0 ? 'Miscellaneous' : '';
+      if (!fallback) return {
+        success: false, status: 'UPDATE_REJECTED', error: 'NO_MISCELLANEOUS_CATEGORY',
+        message: 'Empty category received, but Miscellaneous is not an active category.',
+        transactionId: transactionId, allowedCategories: categories, requestId: requestId
       };
+      patch.category = fallback;
+    } else {
+      if (categories.indexOf(category) < 0) {
+        return {
+          success: false, status: 'UPDATE_REJECTED', error: 'INVALID_CATEGORY',
+          message: 'category must exactly match an active Categories sheet value.', transactionId: transactionId,
+          allowedCategories: categories, requestId: requestId
+        };
+      }
+      patch.category = category;
     }
-    patch.category = category;
   }
 
   let purposeKey = '';
@@ -2076,13 +2147,8 @@ function pfisUpdateTransaction(params, requestId) {
   else if (has('notes')) purposeKey = 'notes';
   if (purposeKey) {
     const purpose = pfisString(params[purposeKey]);
-    if (!purpose) {
-      return {
-        success: false, status: 'UPDATE_REJECTED', error: 'EMPTY_PURPOSE',
-        message: 'purpose was supplied but empty; no fields were changed.', transactionId: transactionId, requestId: requestId
-      };
-    }
-    if (!pfisIsMeaningfulPurpose(purpose, has('merchant') ? params.merchant : current.merchant)) {
+    // Blank purpose is valid. It is optional enrichment, not an API failure.
+    if (purpose && !pfisIsMeaningfulPurpose(purpose, has('merchant') ? params.merchant : current.merchant)) {
       return {
         success: false, status: 'UPDATE_REJECTED', error: 'UNINFORMATIVE_PURPOSE',
         message: 'purpose is a placeholder or repeats the merchant name. Provide the actual reason for the payment; no fields were changed.',

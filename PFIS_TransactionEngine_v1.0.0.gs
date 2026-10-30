@@ -272,6 +272,29 @@ function pfisRouteRequest(input, method) {
   try {
     pfisPerfMeasure('authorization', function () { return pfisAuthorize(params); });
 
+    const hasReviewIntent = Object.prototype.hasOwnProperty.call(params, 'isReviewNeeded');
+    if (Object.prototype.hasOwnProperty.call(params, 'deviceLocked')) {
+      return {
+        success: false, status: 'BAD_REQUEST', error: 'UNSUPPORTED_DEVICE_STATE_FIELD',
+        message: 'deviceLocked is not part of the PFIS API contract. Send isReviewNeeded as a JSON boolean when human review is required.',
+        requestId: requestId
+      };
+    }
+    if (hasReviewIntent && ['', 'ingest', 'ingesttransaction', 'reprocesssource'].indexOf(action) < 0) {
+      return {
+        success: false, status: 'BAD_REQUEST', error: 'REVIEW_FLAG_NOT_ALLOWED_FOR_ACTION',
+        message: 'isReviewNeeded is supported only for ingest and reprocesssource requests.',
+        requestId: requestId
+      };
+    }
+    if (hasReviewIntent && typeof params.isReviewNeeded !== 'boolean') {
+      return {
+        success: false, status: 'BAD_REQUEST', error: 'INVALID_REVIEW_FLAG',
+        message: 'isReviewNeeded must be the JSON boolean true or false; strings and numbers are rejected.',
+        requestId: requestId
+      };
+    }
+
     // Read-only operations are dispatched before source-specific ingestion.
     if (action === 'health' || action === 'ping') {
       return {
@@ -321,29 +344,6 @@ function pfisRouteRequest(input, method) {
     }
     if (method === 'GET') {
       return { success: false, error: 'METHOD_NOT_ALLOWED', message: 'Use POST for all write operations.', requestId: requestId };
-    }
-
-    const hasReviewIntent = Object.prototype.hasOwnProperty.call(params, 'isReviewNeeded');
-    if (Object.prototype.hasOwnProperty.call(params, 'deviceLocked')) {
-      return {
-        success: false, status: 'BAD_REQUEST', error: 'UNSUPPORTED_DEVICE_STATE_FIELD',
-        message: 'deviceLocked is not part of the PFIS API contract. Send isReviewNeeded as a JSON boolean when human review is required.',
-        requestId: requestId
-      };
-    }
-    if (hasReviewIntent && ['', 'ingest', 'ingesttransaction', 'reprocesssource'].indexOf(action) < 0) {
-      return {
-        success: false, status: 'BAD_REQUEST', error: 'REVIEW_FLAG_NOT_ALLOWED_FOR_ACTION',
-        message: 'isReviewNeeded is supported only for ingest and reprocesssource requests.',
-        requestId: requestId
-      };
-    }
-    if (hasReviewIntent && typeof params.isReviewNeeded !== 'boolean') {
-      return {
-        success: false, status: 'BAD_REQUEST', error: 'INVALID_REVIEW_FLAG',
-        message: 'isReviewNeeded must be the JSON boolean true or false; strings and numbers are rejected.',
-        requestId: requestId
-      };
     }
 
     const lock = LockService.getScriptLock();

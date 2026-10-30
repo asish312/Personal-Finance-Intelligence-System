@@ -1795,7 +1795,7 @@ function pfisGetTransaction(transactionId, includeEvidence) {
 
   // If not in active Transaction Log, check Rejected & Archive Log
   if (rowNumber < 2) {
-    const archiveSheet = pfisGetSpreadsheet().getSheetByName('Rejected & Archive Log');
+    const archiveSheet = pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive);
     if (archiveSheet) {
       rowNumber = pfisFindRowByValue(archiveSheet, 1, transactionId);
       if (rowNumber >= 2) sheet = archiveSheet;

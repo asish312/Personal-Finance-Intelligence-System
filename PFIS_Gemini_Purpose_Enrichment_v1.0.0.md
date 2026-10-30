@@ -234,18 +234,7 @@ The helper does not call Gemini and does not create suggestions. Gemini writes p
 
 Run the function manually after approving rows, or create an Apps Script time-driven trigger for this function (for example every 15 minutes). The trigger only applies rows explicitly marked APPROVED with reviewer fields populated. It does not approve rows itself.
 
-## 10. Gemini Tasks availability and shared-sheet confirmation
-
-Gemini Tasks and schedules depend on account type, plan, Keep Activity, region and connected-app permissions. Current Google help says scheduled Tasks require a personal Google Account, age 18+, an eligible Google AI plan, Keep Activity and Personal Intelligence; availability varies by region. Work/school account availability differs.
-
-Google also states that edits to shared spreadsheets require the user to review and confirm Gemini's planned edits. Therefore, do not assume a daily Task can always update a shared workbook fully unattended. Confirm that the Task can read the intended workbook and append to Purpose Review Queue before relying on it.
-
-Official references:
-- Gemini Tasks and schedules: https://support.google.com/gemini/answer/17094710
-- What Gemini Tasks can do with Google Sheets: https://support.google.com/gemini/answer/17094507
-- Connect Google Workspace to Gemini: https://support.google.com/gemini/answer/15229592
-
-## 11. Security and failure handling
+## 10. Security and failure handling
 
 - Do not expose WEB_APP_SECRET to Gemini.
 - Do not copy complete bank notification text into the queue.

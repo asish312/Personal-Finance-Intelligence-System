@@ -39,9 +39,13 @@
  * - For updates use action "update" and transactionId. Category must match an active
  *   category, with blank category falling back to Miscellaneous when available. Purpose /
  *   userNotes is optional; blank purpose is accepted. Do not update backend-owned flags.
- * - For a potential duplicate/source conflict, use action "resolveexception" with either
- *   CONFIRM_DISTINCT (retain the transaction) or CONFIRM_DUPLICATE plus duplicateOf and
- *   a human reason (archive the confirmed duplicate and link its source evidence).
+ * - Optional ingest/reprocess input `isReviewNeeded` is a strict JSON boolean.
+ *   true requests an auditable human review when the capture client could not
+ *   complete an interactive review. It is semantic intent, not device state.
+ *   Omitted/false never clears backend review state. Do not send `deviceLocked`.
+ * - For a potential duplicate/source conflict, use action "resolveexception" with
+ *   CONFIRM_DISTINCT, CONFIRM_DUPLICATE plus duplicateOf, or ACKNOWLEDGE_REVIEW
+ *   for a caller-requested review; every resolution requires a human reason.
  * - Response status describes this request. verificationStatus describes evidence.
  *   needsEnrichment/requiresPurpose/requiresCategoryClassification describe missing
  *   information; needsReview/reviewStatus describe unresolved review conditions.
@@ -53,7 +57,7 @@
  * Time zone: Asia/Kolkata
  */
 
-const ENGINE_VERSION = 'v1.0.0';
+const ENGINE_VERSION = 'v1.0.1';
 const SCHEMA_VERSION = 'v1.0.0';
 const PARSER_VERSION = 'v1.0.0';
 const PFIS_TIME_ZONE = 'Asia/Kolkata';
@@ -319,6 +323,29 @@ function pfisRouteRequest(input, method) {
       return { success: false, error: 'METHOD_NOT_ALLOWED', message: 'Use POST for all write operations.', requestId: requestId };
     }
 
+    const hasReviewIntent = Object.prototype.hasOwnProperty.call(params, 'isReviewNeeded');
+    if (Object.prototype.hasOwnProperty.call(params, 'deviceLocked')) {
+      return {
+        success: false, status: 'BAD_REQUEST', error: 'UNSUPPORTED_DEVICE_STATE_FIELD',
+        message: 'deviceLocked is not part of the PFIS API contract. Send isReviewNeeded as a JSON boolean when human review is required.',
+        requestId: requestId
+      };
+    }
+    if (hasReviewIntent && ['', 'ingest', 'ingesttransaction', 'reprocesssource'].indexOf(action) < 0) {
+      return {
+        success: false, status: 'BAD_REQUEST', error: 'REVIEW_FLAG_NOT_ALLOWED_FOR_ACTION',
+        message: 'isReviewNeeded is supported only for ingest and reprocesssource requests.',
+        requestId: requestId
+      };
+    }
+    if (hasReviewIntent && typeof params.isReviewNeeded !== 'boolean') {
+      return {
+        success: false, status: 'BAD_REQUEST', error: 'INVALID_REVIEW_FLAG',
+        message: 'isReviewNeeded must be the JSON boolean true or false; strings and numbers are rejected.',
+        requestId: requestId
+      };
+    }
+
     const lock = LockService.getScriptLock();
     const lockStartedAt = Date.now();
     const lockAcquired = lock.tryLock(30000);
@@ -330,8 +357,14 @@ function pfisRouteRequest(input, method) {
       pfisAssertSchema();
       if (action === 'update' || action === 'updatetransaction') return pfisPerfMeasure('update_pipeline', function () { return pfisUpdateTransaction(params, requestId); });
       if (action === 'resolveexception') return pfisPerfMeasure('resolve_exception_pipeline', function () { return pfisResolveTransactionException(params, requestId); });
-      if (action === 'reprocesssource') return pfisPerfMeasure('reprocess_pipeline', function () { return pfisReprocessSource(params, requestId); });
-      return pfisPerfMeasure('ingest_pipeline', function () { return pfisIngestSource(params, requestId); });
+      if (action === 'reprocesssource') return pfisPerfMeasure('reprocess_pipeline', function () {
+        const result = pfisReprocessSource(params, requestId);
+        return pfisApplyClientReviewIntent(result, params, requestId);
+      });
+      return pfisPerfMeasure('ingest_pipeline', function () {
+        const result = pfisIngestSource(params, requestId);
+        return pfisApplyClientReviewIntent(result, params, requestId);
+      });
     } finally {
       lock.releaseLock();
     }
@@ -995,7 +1028,11 @@ function pfisStoreParseFailure(sourceType, evidenceText, params, requestId, mess
     extractedAmount: '', extractedDate: '', datePrecision: '', accountIdentifier: pfisExtractAccountIdentifier(evidenceText),
     extractedMerchant: '', extractedReferenceNo: '', linkedTxnId: '', ingestedAt: new Date(),
     processingError: ignoredNonFinancial ? '' : message, archivedFlag: false,
-    notes: ignoredNonFinancial ? 'Non-financial OTP/verification alert; no ledger transaction was created.' : 'Parser output could not be validated.',
+    notes: ignoredNonFinancial
+      ? 'Non-financial OTP/verification alert; no ledger transaction was created.'
+      : (pfisTruthy(params.isReviewNeeded)
+        ? 'Caller requested human review; parsing failed and no ledger transaction was created.'
+        : 'Parser output could not be validated.'),
     requestId: requestId, batchId: pfisString(params.batchId)
   });
   if (ignoredNonFinancial) {
@@ -1931,11 +1968,16 @@ function pfisGetPendingReview(limitInput) {
   });
   const sources = pfisReadFixedRows(pfisGetRequiredSheet(PFIS_SHEETS.sources), PFIS_SOURCE_FIELDS.length)
     .map(function (row) { return pfisObjectFromRow(row, PFIS_SOURCE_FIELDS); })
-    .filter(function (source) { return pfisString(source.parseStatus).toUpperCase() === 'CONFLICT'; })
+    .filter(function (source) {
+      return ['CONFLICT', 'PARSE_FAILED'].indexOf(pfisString(source.parseStatus).toUpperCase()) >= 0;
+    })
     .map(function (source) {
+      const status = pfisString(source.parseStatus).toUpperCase();
       return {
-        kind: 'source_conflict', sourceId: source.sourceId, transactionId: source.linkedTxnId || null,
-        sourceType: source.sourceType, receivedAt: source.receivedAt, reason: source.processingError || source.notes
+        kind: status === 'PARSE_FAILED' ? 'source_parse_failure' : 'source_conflict',
+        sourceId: source.sourceId, transactionId: source.linkedTxnId || null,
+        sourceType: source.sourceType, receivedAt: source.receivedAt,
+        reason: source.processingError || source.notes
       };
     });
   return txns.concat(sources).slice(0, limit);
@@ -2082,11 +2124,12 @@ function pfisResolveTransactionException(params, requestId) {
   const resolution = pfisString(params.resolution).toUpperCase().replace(/[ -]+/g, '_');
   const reason = pfisCleanText(params.reason);
   if (!transactionId) return { success: false, status: 'UPDATE_REJECTED', error: 'BAD_REQUEST', message: 'transactionId is required.', requestId: requestId };
-  if (['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE'].indexOf(resolution) < 0) {
+  if (['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE', 'ACKNOWLEDGE_REVIEW'].indexOf(resolution) < 0) {
     return {
       success: false, status: 'UPDATE_REJECTED', error: 'UNSUPPORTED_RESOLUTION',
-      message: 'Use CONFIRM_DISTINCT to retain a real transaction or CONFIRM_DUPLICATE with duplicateOf to archive a confirmed duplicate.',
-      transactionId: transactionId, allowedResolutions: ['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE'], requestId: requestId
+      message: 'Use CONFIRM_DISTINCT, CONFIRM_DUPLICATE with duplicateOf, or ACKNOWLEDGE_REVIEW for a caller-requested review.',
+      transactionId: transactionId,
+      allowedResolutions: ['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE', 'ACKNOWLEDGE_REVIEW'], requestId: requestId
     };
   }
   if (!reason || reason.length < 8) {
@@ -2094,6 +2137,9 @@ function pfisResolveTransactionException(params, requestId) {
       success: false, status: 'UPDATE_REJECTED', error: 'RESOLUTION_REASON_REQUIRED',
       message: 'Provide a specific human review reason of at least 8 characters; no fields were changed.', transactionId: transactionId, requestId: requestId
     };
+  }
+  if (resolution === 'ACKNOWLEDGE_REVIEW') {
+    return pfisAcknowledgeClientReview(transactionId, reason, pfisString(params.actor) || 'user', requestId);
   }
   if (resolution === 'CONFIRM_DUPLICATE') {
     const duplicateOf = pfisString(params.duplicateOf);
@@ -2538,7 +2584,7 @@ function pfisIsPersistentReviewReason(reason) {
     'same_reference_conflicting_transaction_facts', 'ambiguous_cross_channel_match',
     'ambiguous_time_precision_match', 'ambiguous_exact_same_channel_duplicate',
     'same_channel_reference_conflict_needs_review', 'recovered_conflict',
-    'source_conflict', 'duplicate_candidate'
+    'source_conflict', 'duplicate_candidate', 'client_requested_review'
   ].indexOf(pfisString(reason).toLowerCase()) >= 0;
 }
 
@@ -4309,6 +4355,162 @@ function pfisBuildIngestResponse(transaction, requestId, sourceType, status, sou
 }
 
 /**
+ * Applies caller-requested review intent after every ingest/reprocess outcome,
+ * including replay and cross-channel reconciliation paths which can return early.
+ * The intent never changes financial facts and never downgrades an existing flag.
+ */
+function pfisApplyClientReviewIntent(response, params, requestId) {
+  if (!params || params.isReviewNeeded !== true) return response;
+  if (!response) return response;
+
+  if (!response.transactionId) {
+    if (pfisString(response.status).toUpperCase() === 'PARSE_FAILED' && response.sourceId) {
+      response.reviewRequestStatus = 'SOURCE_ONLY';
+    } else {
+      response.reviewRequestStatus = 'NOT_APPLICABLE_NO_TRANSACTION';
+    }
+    return response;
+  }
+
+  const outcome = pfisMarkTransactionForClientReview(
+    response.transactionId, response.sourceId, requestId);
+  if (!outcome.success) {
+    response.success = false;
+    response.error = outcome.error || 'REVIEW_REQUEST_NOT_APPLIED';
+    response.reviewRequestStatus = 'NOT_APPLIED';
+    response.message = outcome.message || 'The transaction could not be placed into the review queue.';
+    response.nextAction = 'SHOW_ERROR';
+    return response;
+  }
+
+  const transaction = pfisGetTransaction(response.transactionId, false);
+  if (!transaction) {
+    response.success = false;
+    response.error = 'REVIEW_TARGET_NOT_FOUND';
+    response.reviewRequestStatus = 'NOT_APPLIED';
+    response.message = 'The review request was recorded, but the linked active transaction could not be reloaded.';
+    response.nextAction = 'SHOW_ERROR';
+    return response;
+  }
+
+  const refreshed = pfisBuildTransactionResponse(transaction, requestId, response.status, []);
+  response.transaction = refreshed.transaction;
+  response.needsReview = refreshed.needsReview;
+  response.nextAction = 'REVIEW';
+  response.reviewReason = transaction.reviewReason;
+  response.reviewRequestStatus = outcome.alreadyPending ? 'ALREADY_PENDING' : 'APPLIED';
+  return response;
+}
+
+/**
+ * Marks a canonical transaction for human review without altering its financial
+ * facts. Stronger duplicate/source-conflict flags and existing review reasons win.
+ */
+function pfisMarkTransactionForClientReview(transactionId, sourceId, requestId) {
+  const rowNumber = pfisFindTransactionRow(transactionId);
+  if (rowNumber < 2) {
+    return { success: false, error: 'REVIEW_TARGET_NOT_FOUND',
+      message: 'The transaction is not present in the active Transaction Log.' };
+  }
+
+  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const current = pfisObjectFromRow(
+    sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  const flag = pfisString(current.validationFlag).toUpperCase();
+  const alreadyPending = pfisTruthy(current.needsReview) ||
+    pfisString(current.reviewStatus).toUpperCase() === 'PENDING' ||
+    ['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT', 'NEEDS_REVIEW'].indexOf(flag) >= 0;
+  const reviewReason = pfisString(current.reviewReason) || 'client_requested_review';
+  const nextFlag = !flag || flag === 'VALID' || flag === 'NEEDS_REVIEW'
+    ? 'NEEDS_REVIEW' : flag;
+  const now = new Date();
+
+  sheet.getRange(rowNumber, 15).setValue(true);
+  sheet.getRange(rowNumber, 20).setValue('Pending');
+  sheet.getRange(rowNumber, 21).setValue(reviewReason);
+  sheet.getRange(rowNumber, 22).setValue('');
+  sheet.getRange(rowNumber, 23).setValue('');
+  sheet.getRange(rowNumber, 27).setValue(nextFlag);
+  sheet.getRange(rowNumber, 29).setValue(now);
+
+  pfisAppendChangeOnce('client-review-request:' + (sourceId || requestId) + ':' + transactionId, {
+    transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: 'system_capture',
+    field: 'Client Review Requested', oldValue: String(alreadyPending), newValue: 'true',
+    reason: 'The capture client explicitly deferred interactive review. Existing review reasons and higher-priority validation flags were preserved.',
+    requestId: requestId
+  });
+  pfisInvalidateTransactionCache();
+  pfisWriteLegacyTransactionAux(rowNumber,
+    pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS),
+    'Caller requested human review: ' + reviewReason);
+  return { success: true, alreadyPending: alreadyPending };
+}
+
+/**
+ * Acknowledges only the specific review request created by isReviewNeeded=true.
+ * Other review reasons must be resolved through their own supported workflow.
+ */
+function pfisAcknowledgeClientReview(transactionId, reason, actor, requestId) {
+  const rowNumber = pfisFindTransactionRow(transactionId);
+  if (rowNumber < 2) {
+    return { success: false, status: 'NOT_FOUND', error: 'NOT_FOUND',
+      message: 'Transaction not found: ' + transactionId, transactionId: transactionId, requestId: requestId };
+  }
+
+  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const current = pfisObjectFromRow(
+    sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  if (pfisString(current.reviewReason).toLowerCase() !== 'client_requested_review' ||
+      !pfisTruthy(current.needsReview) ||
+      pfisString(current.reviewStatus).toUpperCase() !== 'PENDING' ||
+      pfisString(current.validationFlag).toUpperCase() !== 'NEEDS_REVIEW') {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'NOT_CLIENT_REQUESTED_REVIEW',
+      message: 'ACKNOWLEDGE_REVIEW applies only to an open client-requested review; no fields were changed.',
+      transactionId: transactionId, requestId: requestId };
+  }
+
+  const categories = pfisGetCategoryList();
+  const missing = [];
+  if (!pfisNormalizeType(current.type)) missing.push('type');
+  if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(current.merchant))) missing.push('merchant');
+  if (!current.category || categories.indexOf(pfisCleanText(current.category)) < 0) missing.push('active category');
+  if (missing.length) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'REVIEW_DATA_INCOMPLETE',
+      message: 'The transaction still needs valid ' + missing.join(', ') + '. No review fields were changed.',
+      missingFields: missing, transactionId: transactionId, requestId: requestId };
+  }
+
+  const now = new Date();
+  const updates = [
+    [15, false], [20, 'Approved'], [21, ''], [22, actor], [23, now], [27, 'VALID'], [29, now]
+  ];
+  updates.forEach(function (item) { sheet.getRange(rowNumber, item[0]).setValue(item[1]); });
+  pfisAppendChangeOnceBatch([
+    { field: 'Needs Review', oldValue: 'true', newValue: 'false' },
+    { field: 'Review Status', oldValue: 'Pending', newValue: 'Approved' },
+    { field: 'Review Reason', oldValue: 'client_requested_review', newValue: '' },
+    { field: 'Reviewed By', oldValue: pfisString(current.reviewedBy), newValue: actor },
+    { field: 'Reviewed At', oldValue: pfisString(current.reviewedAt), newValue: now.toISOString() },
+    { field: 'Validation Flag', oldValue: 'NEEDS_REVIEW', newValue: 'VALID' }
+  ].map(function (event) {
+    return {
+      eventKey: 'client-review-ack:' + transactionId + ':' + requestId + ':' + event.field,
+      change: {
+        transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: actor,
+        field: event.field, oldValue: event.oldValue, newValue: event.newValue,
+        reason: 'Human acknowledged the caller-requested review: ' + reason, requestId: requestId
+      }
+    };
+  }));
+  pfisInvalidateTransactionCache();
+  pfisWriteLegacyTransactionAux(rowNumber,
+    pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS),
+    'Human acknowledged caller-requested review: ' + reason);
+  return pfisBuildUpdateResponse(pfisGetTransaction(transactionId, false), requestId,
+    'REVIEW_ACKNOWLEDGED', ['needsReview', 'reviewStatus', 'reviewReason', 'reviewedBy', 'reviewedAt', 'validationFlag']);
+}
+
+/**
  * Compact, stable API view. Stored transaction facts appear once in transaction;
  * verification/enrichment are derived states and appear only at top level.
  */
@@ -4368,6 +4570,7 @@ function pfisRecommendNextAction(status, transaction, enrichment) {
   const tx = transaction || {};
   const reviewReason = pfisString(tx.reviewReason).toLowerCase();
 
+  if (reviewReason === 'client_requested_review') return 'REVIEW';
   if (['CONFLICT', 'SOURCE_CONFLICT', 'DUPLICATE_CANDIDATE'].indexOf(operation) >= 0) {
     return 'REVIEW';
   }

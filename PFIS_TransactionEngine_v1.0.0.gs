@@ -1945,9 +1945,18 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
       message: 'Rejected & Archive Log is missing or does not contain the canonical A:AC schema. No rows were changed.',
       transactionId: transactionId, requestId: requestId };
   }
+  const observedArchiveHeaders = archiveSheet.getRange(1, 1, 1, PFIS_TX_FIELDS.length).getDisplayValues()[0];
+  const invalidArchiveHeaders = PFIS_TX_HEADERS.filter(function (header, index) {
+    return pfisHeaderToken(observedArchiveHeaders[index]) !== pfisHeaderToken(header);
+  });
+  if (invalidArchiveHeaders.length) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_SCHEMA_MISMATCH',
+      message: 'Rejected & Archive Log core headers do not match Transaction Log. No rows were changed.',
+      transactionId: transactionId, requestId: requestId };
+  }
   const primary = pfisObjectFromRow(
     txSheet.getRange(primaryRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
-  if (['DUPLICATE_CANDIDATE', 'DUPLICATE_REJECTED'].indexOf(pfisString(primary.validationFlag).toUpperCase()) >= 0) {
+  if (['DUPLICATE_CANDIDATE', 'DUPLICATE_REJECTED', 'SOURCE_CONFLICT'].indexOf(pfisString(primary.validationFlag).toUpperCase()) >= 0) {
     return { success: false, status: 'UPDATE_REJECTED', error: 'PRIMARY_NOT_CANONICAL',
       message: 'duplicateOf must identify a surviving canonical transaction, not another duplicate candidate or rejected row.',
       transactionId: transactionId, duplicateOf: duplicateOf, requestId: requestId };
@@ -1972,6 +1981,18 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
   // Copy the complete row, including Budget Month, Income Month and any future
   // auxiliary fields; recomputing from the core A:AC schema would lose metadata.
   const archiveWidth = Math.max(archiveSheet.getLastColumn(), rowWidth);
+  if (archiveSheet.getMaxColumns() < archiveWidth) {
+    archiveSheet.insertColumnsAfter(archiveSheet.getMaxColumns(), archiveWidth - archiveSheet.getMaxColumns());
+  }
+  // Extend archive headers only where the ledger has a header and the archive
+  // column is unlabeled (e.g. Budget Month / Income Month).
+  const ledgerHeaders = txSheet.getRange(1, 1, 1, rowWidth).getDisplayValues()[0];
+  const archiveHeaders = archiveSheet.getRange(1, 1, 1, archiveWidth).getDisplayValues()[0];
+  for (let col = PFIS_TX_FIELDS.length; col < rowWidth; col++) {
+    if (!pfisString(archiveHeaders[col]) && pfisString(ledgerHeaders[col])) {
+      archiveSheet.getRange(1, col + 1).setValue(ledgerHeaders[col]);
+    }
+  }
   const archivedValues = new Array(archiveWidth).fill('');
   originalValues.forEach(function (value, index) { archivedValues[index] = value; });
   pfisRowFromObject(record, PFIS_TX_FIELDS).forEach(function (value, index) { archivedValues[index] = value; });

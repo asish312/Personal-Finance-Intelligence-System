@@ -8,7 +8,7 @@
 
 A personal-finance workflow built with Google Apps Script, Google Sheets, iOS Shortcuts and an optional Gemini-assisted enrichment layer.
 
-**Production contract: v1.0.0** · Google Apps Script · Google Sheets
+**Production contract: v1.0.1** · Schema/parser: v1.0.0 · Google Apps Script · Google Sheets
 
 <sub>Every illustration, merchant, amount and transaction ID in this README is fictional. No live workbook figures or personal account details are reproduced.</sub>
 
@@ -103,7 +103,7 @@ Keep three responsibilities separate:
 | **02 · Review Queue** | One human decision inbox | Duplicates, conflicts, parse failures, missing category and unresolved mapping |
 | **03 · Rejected & Archive Log** | One resolved archive | Confirmed duplicates and rejected/archived cases, never silently deleted |
 
-**Current implementation gap:** the engine currently returns transaction review cases and source conflicts from <code>getpendingreview</code>, but does not include <code>PARSE_FAILED</code> source rows. Category enrichment is still exposed separately by <code>getneedsenrichment</code>. The workbook must not imply these are already one fully unified inbox. The long-term design is one Review Queue view keyed by a unique Case ID, aggregating transaction-level and source-level cases without copying or double-counting the underlying records.
+**Current implementation boundary:** <code>getpendingreview</code> returns flagged transactions plus source <code>CONFLICT</code> and <code>PARSE_FAILED</code> cases. Category classification remains a separate <code>getneedsenrichment</code> route. The API response is not itself a workbook Review Queue: the workbook still needs a clearly labelled view that joins those case types without copying or double-counting the underlying records.
 
 Do not put every blank optional field into this queue. Blank Purpose is valid. A review case must represent an unresolved decision or failed invariant.
 
@@ -153,7 +153,7 @@ Do not use an available balance, credit limit, statement balance or minimum due 
 
 A malformed parse should not be silently discarded. The current engine already stores the original source text and a <code>PARSE_FAILED</code> Source Log row, with a source ID and error reason. It does not create a canonical Transaction Log row when required facts are absent.
 
-That is the correct separation of evidence and ledger, but the review surface is incomplete: <code>getpendingreview</code> currently excludes <code>PARSE_FAILED</code>. A production-safe long-term flow is:
+That is the correct separation of evidence and ledger. The v1.0.1 API now includes <code>PARSE_FAILED</code> source rows in <code>getpendingreview</code> as <code>kind=source_parse_failure</code>; it does not invent a Transaction Log row. Keep the source-only case visible until it is reprocessed or otherwise resolved. The workbook view should distinguish source-only parse failures from ledger transactions.
 
 1. Preserve the raw source, hash, sender, received time, parser version and parser error in Source Log.
 2. Add a source-level review case to the one Review Queue.
@@ -509,7 +509,7 @@ The current engine has <code>requiresPurpose=false</code>. The Shortcut must **n
 }
 ~~~
 
-For email, use <code>sourceType=EMAIL</code> and include sender/subject when available. Use the deployed Apps Script Web App URL ending in <code>/exec</code>, POST, JSON request body and <code>Content-Type: application/json</code>.
+For email, use <code>sourceType=EMAIL</code> and include sender/subject when available. Use the deployed Apps Script Web App URL ending in <code>/exec</code>, POST, JSON request body and <code>Content-Type: application/json</code>. Optional <code>isReviewNeeded</code> is a strict JSON boolean on <code>ingest</code> and <code>reprocesssource</code> only. Send <code>true</code> when the capture client intentionally defers interactive review; the API persists <code>Needs Review=TRUE</code>, <code>Review Status=Pending</code> and <code>Review Reason=client_requested_review</code> unless a stronger existing reason already applies. Omit it or send <code>false</code> for normal behaviour. Strings such as <code>"true"</code>, numbers and the old <code>deviceLocked</code> key are rejected. A parse failure stays a source-only case and is not promoted to a fabricated ledger row.
 
 ### Shortcut response routing
 
@@ -517,10 +517,10 @@ For email, use <code>sourceType=EMAIL</code> and include sender/subject when ava
 |---|---|
 | SHOW_RECEIPT | Display date/time, merchant, amount, category, account label, verification and Transaction ID |
 | CLASSIFY_CATEGORY | Ask AI for one exact active category; validate it against allowedCategories; send one update |
-| REVIEW | Show review reason and validation flag; no automatic approval/archive |
+| REVIEW | Show the review reason and validation flag; no automatic approval/archive. A client-requested review stays pending until explicitly acknowledged. |
 | SHOW_ERROR | Show error/message and requestId; never show a success receipt |
 
-For network timeouts, retry the **exact same** txnString and originalText. Do not modify the amount/date/fields and submit a new payload to force a success. Source-hash idempotency handles exact replays.
+For a caller-requested review, acknowledge only after a human checks the source: POST <code>{"action":"resolveexception","transactionId":"...","resolution":"ACKNOWLEDGE_REVIEW","reason":"Human review explanation","actor":"reviewer"}</code>. The reason must be at least eight characters. This resolution is accepted only for an open <code>client_requested_review</code> case; it cannot clear duplicates, source conflicts, configuration problems or other review reasons. For network timeouts, retry the **exact same** txnString and originalText. Do not modify the amount/date/fields and submit a new payload to force a success. Source-hash idempotency handles exact replays.
 
 ### Extraction prompt — core rules
 
@@ -733,10 +733,12 @@ Implement workbook-only improvements:
 7. Create one unified Review Queue view covering transaction flags, source parse failures, source conflicts, and category gaps. Give every case a unique Case ID, deduplicate by Transaction ID or Source ID, and keep missing Purpose out of mandatory review.
 8. Create a Purpose Review Queue separately for optional Gemini suggestions. Gemini writes SUGGESTED rows only; human approval is mandatory before Apps Script applies them.
 9. Build a Savings Sweep Log that separates planned from verified savings and requires both source debit and destination credit Transaction IDs with matching amounts.
-10. Update Data Dictionary, labels, help text and charts. Each chart must use an actual calculation range and show its period and unit.
+10. Update the existing Insights & Data Quality review surface using the current API/workbook contract: include Transaction Log rows where Needs Review=TRUE or Review Status=Pending; include Source Log Parse Status=CONFLICT and PARSE_FAILED as source-only cases; identify each case by Transaction ID or Source ID and avoid double-counting. Show the reason code client_requested_review with a human-readable label such as “Capture client requested human review”. Keep category classification gaps visibly distinct because getneedsenrichment remains a separate API route. Clearly show that PARSE_FAILED has no canonical Transaction Log row until corrected/reprocessed.
+11. Update Data Dictionary, PFIS System Guide, labels, help text and charts. Document isReviewNeeded as an API request boolean mapped to existing Transaction Log O/T/U fields; do not add a physical transaction column. Each chart must use an actual calculation range and show its period and unit.
 
 Non-negotiable:
-- Do not edit Apps Script or iOS Shortcut files.
+- Do not edit Apps Script or iOS Shortcut files. The v1.0.1 API is already implemented; do not recreate it in spreadsheet formulas.
+- Do not add a Transaction Log column for isReviewNeeded; use existing O (Needs Review), T (Review Status) and U (Review Reason).
 - Do not alter Transaction IDs, amounts, dates, bank facts, merchant facts or source/audit evidence.
 - Do not auto-merge/delete duplicate candidates.
 - Purpose is optional and must not increase Needs Review.
@@ -753,10 +755,10 @@ These are implementation boundaries, not features to pretend are complete:
 
 | Area | Current behaviour / risk | Long-term target |
 |---|---|---|
-| Unified review | <code>getpendingreview</code> returns transaction review flags and source CONFLICTs; <code>PARSE_FAILED</code> is not currently included | One Review Queue that aggregates transaction and source cases once |
+| Unified review | v1.0.1 <code>getpendingreview</code> returns transaction review flags plus source CONFLICT and PARSE_FAILED cases; category classification remains on <code>getneedsenrichment</code> | Workbook Review Queue view aggregates the case types once and labels source-only cases clearly |
 | Category enrichment | <code>getneedsenrichment</code> is a separate API route | Show category gaps in the same Review Queue, with a distinct action type |
 | Purpose | Optional; rule-generated or Gemini-suggested with approval | Keep it optional and preserve rule evidence/audit |
-| Parser failure | Original source is retained as PARSE_FAILED, but not surfaced in pending review | Source-level review case; create provisional ledger item only when minimum facts are safe |
+| Parser failure | Original source is retained as PARSE_FAILED and v1.0.1 now surfaces it as a source-only pending-review case; no canonical transaction is fabricated | Correct the parser output and reprocess the original source, retaining superseded evidence |
 | Recent Transactions | Workbook formula/view responsibility, not an Apps Script refresh command | Dynamic latest-30 formula over the full canonical ledger |
 | Workbook formula portability | Google Sheets-only QUERY/UNIQUE/FILTER formulas may export to XLSX as unsupported functions or cached values | Validate formulas in Google Sheets; document Excel-export limitations |
 | Dashboard ranges | Fixed row references become stale as ledger grows | Dynamic/open-ended ranges or bounded helper tables |
@@ -801,7 +803,7 @@ Purpose suggestions remain optional and live in Purpose Review Queue because the
 | <code>README.md</code> | Complete project story, UI, configuration, Shortcut, Gemini, operations and maintainer notes |
 | <code>docs/images/</code> | Fictional SVG illustrations embedded above |
 
-Production engine, schema and parser identifiers remain **v1.0.0**. Keep one branch: <code>main</code>.
+Production engine is **v1.0.1**; schema and parser identifiers remain **v1.0.0**. The existing .gs file paths are stable replacement paths, not a versioned Apps Script deployment. Keep one branch: <code>main</code>.
 
 ---
 
@@ -809,7 +811,7 @@ Production engine, schema and parser identifiers remain **v1.0.0**. Keep one bra
 
 ### Capture the event. Preserve the evidence. Understand the pattern.
 
-**PFIS · Personal Finance Intelligence System · v1.0.0**
+**PFIS · Personal Finance Intelligence System · Engine v1.0.1 / Schema v1.0.0**
 
 <sub>Google Apps Script · Google Sheets · iOS Shortcuts · Optional Gemini-assisted enrichment</sub>
 

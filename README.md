@@ -97,32 +97,11 @@ PFIS has three user-facing surfaces and one backend service.
 
 Keep three responsibilities separate:
 
-<grid columns="3" gap={2}>
-  <grid-item>
-    <box background="#E8F2FF" radius="lg" padding={3} gap={1}>
-      <title size="lg" color="#184D86">01</title>
-      **Transaction Log**
-      <text color="#184D86" size="sm">One canonical insertion area</text>
-      <caption>Accepted transactions and provisional items with valid minimum financial facts.</caption>
-    </box>
-  </grid-item>
-  <grid-item>
-    <box background="#FFF3DA" radius="lg" padding={3} gap={1}>
-      <title size="lg" color="#87550A">02</title>
-      **Review Queue**
-      <text color="#87550A" size="sm">One human decision inbox</text>
-      <caption>Duplicates, conflicts, parse failures, missing category and unresolved mapping.</caption>
-    </box>
-  </grid-item>
-  <grid-item>
-    <box background="#E6F6F0" radius="lg" padding={3} gap={1}>
-      <title size="lg" color="#176B52">03</title>
-      **Rejected & Archive Log**
-      <text color="#176B52" size="sm">One resolved archive</text>
-      <caption>Confirmed duplicates and rejected/archived cases, never silently deleted.</caption>
-    </box>
-  </grid-item>
-</grid>
+| Stage | One responsibility | Contents |
+|---|---|---|
+| **01 · Transaction Log** | One canonical insertion area | Accepted transactions and provisional items with valid minimum financial facts |
+| **02 · Review Queue** | One human decision inbox | Duplicates, conflicts, parse failures, missing category and unresolved mapping |
+| **03 · Rejected & Archive Log** | One resolved archive | Confirmed duplicates and rejected/archived cases, never silently deleted |
 
 **Current implementation gap:** the engine currently returns transaction review cases and source conflicts from <code>getpendingreview</code>, but does not include <code>PARSE_FAILED</code> source rows. Category enrichment is still exposed separately by <code>getneedsenrichment</code>. The workbook must not imply these are already one fully unified inbox. The long-term design is one Review Queue view keyed by a unique Case ID, aggregating transaction-level and source-level cases without copying or double-counting the underlying records.
 

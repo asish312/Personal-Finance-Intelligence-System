@@ -18,27 +18,30 @@
  *   Near-time lookalikes with a different timestamp remain review candidates so
  *   legitimate repeated purchases are not silently discarded. Exact source replays
  *   are also idempotent.
- * - Only a matched rule with Auto Purpose=TRUE and a meaningful configured purpose may
- *   prefill User Notes. Recurrence alone does not authorize purpose autofill.
+ * - A matched rule may prefill User Notes when Auto Purpose=TRUE, or when its configured
+ *   Purpose Trigger is satisfied using the transaction's own date. Recurrence alone does
+ *   not authorize purpose autofill; a blank purpose is valid and never blocks ingestion.
  * - When an amount-specific rule misses but merchant-anchored rules agree on one active
  *   category, insertion assigns category only; amount-specific purpose/overrides do not leak.
- * - The backend returns purposeSuggestion/purposeExamples from approved history for the
- *   exact normalized merchant and type; suggestions are never saved without confirmation.
- * - Missing categories are routed before purpose questions; Shortcuts may return ASK_PURPOSE
- *   when evidence is insufficient, and the backend validates saved categories/purposes.
- * - No AI/model call occurs in Apps Script. Shortcuts runs category fallback only when the
- *   backend cannot assign a category and collects user-confirmed purpose.
+ * - Missing or unmapped categories fall back to the active Miscellaneous category when
+ *   available. Purpose suggestions are not required enrichment and are not auto-saved.
+ * - Budget Month is an explicit rule offset, separate from the earned Income Month. The
+ *   optional Income Month and Budget Month sheet columns are populated by matching headers.
+ * - Potential duplicate candidates remain in the active ledger and review queue. Only an
+ *   explicit human CONFIRM_DUPLICATE decision archives a candidate and re-links its evidence.
+ * - No AI/model call occurs in Apps Script. Shortcuts may classify unresolved categories;
+ *   User Notes/Purpose remains optional.
  *
  * API CONTRACT
  * - GET: health/schema/read actions only. Never use GET for a write.
  * - POST: JSON body contains action plus all fields. For ingestion use action
  *   "ingest", sourceType (SMS or EMAIL), txnString, originalText, sender, subject.
- * - For updates use action "update", transactionId, and non-empty category and/or
- *   purpose (userNotes is accepted for backwards compatibility). Do not send empty
- *   values or try to update backend-owned flags from Shortcuts.
- * - For a potential duplicate/source conflict, use action "resolveexception" with
- *   resolution "CONFIRM_DISTINCT" and a human reason. This confirms that the row
- *   is a separate real transaction; it never deletes or merges ledger rows.
+ * - For updates use action "update" and transactionId. Category must match an active
+ *   category, with blank category falling back to Miscellaneous when available. Purpose /
+ *   userNotes is optional; blank purpose is accepted. Do not update backend-owned flags.
+ * - For a potential duplicate/source conflict, use action "resolveexception" with either
+ *   CONFIRM_DISTINCT (retain the transaction) or CONFIRM_DUPLICATE plus duplicateOf and
+ *   a human reason (archive the confirmed duplicate and link its source evidence).
  * - Response status describes this request. verificationStatus describes evidence.
  *   needsEnrichment/requiresPurpose/requiresCategoryClassification describe missing
  *   information; needsReview/reviewStatus describe unresolved review conditions.
@@ -69,7 +72,8 @@ const PFIS_SHEETS = Object.freeze({
   changes: 'Change Log',
   rules: 'Rules',
   config: 'Config',
-  categories: 'Categories'
+  categories: 'Categories',
+  archive: 'Rejected & Archive Log'
 });
 
 // The field arrays below ARE the physical schema. Runtime never maps using
@@ -133,6 +137,11 @@ const PFIS_RULE_OPTIONAL_HEADERS = Object.freeze([
 ]);
 const PFIS_RULE_AUTO_PURPOSE_COLUMN = 20; // T
 const PFIS_RULE_AUTO_PURPOSE_HEADER = 'Auto Purpose';
+const PFIS_RULE_PURPOSE_TRIGGER_COLUMN = 21; // U
+const PFIS_RULE_PURPOSE_TRIGGER_HEADER = 'Purpose Trigger';
+const PFIS_RULE_CALENDAR_SCOPE_COLUMN = 22; // V
+const PFIS_RULE_CALENDAR_SCOPE_HEADER = 'Calendar Scope';
+const PFIS_HOLIDAY_CALENDAR_SHEET = 'Holiday Calendar';
 const PFIS_AUX_TX_COLUMNS = Object.freeze({ flowDirection: 38, auditTrail: 39 });
 const PFIS_AUDIT_TRAIL_MAX_CHARS = 1800;
 
@@ -175,6 +184,7 @@ var PFIS_RUNTIME_TRANSACTION_CACHE = null;
 var PFIS_RUNTIME_CATEGORY_CACHE = null;
 var PFIS_RUNTIME_RULE_CACHE = null;
 var PFIS_RUNTIME_CONFIG_CACHE = null;
+var PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
 var PFIS_PERF_CONTEXT = null;
 
 // -----------------------------------------------------------------------------
@@ -247,6 +257,7 @@ function pfisRouteRequest(input, method) {
   PFIS_RUNTIME_CATEGORY_CACHE = null;
   PFIS_RUNTIME_RULE_CACHE = null;
   PFIS_RUNTIME_CONFIG_CACHE = null;
+  PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
 
   try {
     pfisPerfMeasure('authorization', function () { return pfisAuthorize(params); });
@@ -506,8 +517,14 @@ function pfisIngestSource(params, requestId, options) {
   }
   parsed.rawEvidence = evidenceText;
   parsed.accountIdentifier = pfisExtractAccountIdentifier(evidenceText);
+  // An internal midnight value is not a real timestamp unless the original
+  // notification contains a clock time. Downgrade it before matching/logging.
+  pfisNormalizeSourceDatePrecision(parsed, evidenceText);
   const ruleResult = pfisPerfMeasure('rules_evaluation', function () { return pfisEvaluateRules(parsed, evidenceText); });
   const configResult = pfisPerfMeasure('config_resolution', function () { return pfisResolveConfig(parsed, evidenceText); });
+  parsed.account = pfisCleanText(ruleResult.accountOverride || configResult.account);
+  parsed.cardName = pfisCleanText(ruleResult.cardNameOverride || configResult.cardName);
+  parsed.resolvedType = pfisNormalizeType(ruleResult.typeOverride || parsed.type);
   const canonicalMerchant = pfisCleanText(ruleResult.merchantOverride || parsed.merchant);
   parsed.canonicalMerchant = canonicalMerchant;
 
@@ -517,6 +534,16 @@ function pfisIngestSource(params, requestId, options) {
   }
   if (crossMatch.status === 'CONFLICT') {
     return pfisRecordSourceConflict(crossMatch, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult);
+  }
+
+  const paymentEventMatch = pfisPerfMeasure('card_payment_event_matching', function () {
+    return pfisFindCardPaymentEventMatch(parsed, evidenceText, sourceType);
+  });
+  if (paymentEventMatch.status === 'MATCHED') {
+    return pfisLinkPaymentEventSource(paymentEventMatch, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult);
+  }
+  if (paymentEventMatch.status === 'CONFLICT') {
+    return pfisRecordSourceConflict(paymentEventMatch, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult);
   }
 
   const duplicate = pfisPerfMeasure('same_channel_duplicate_matching', function () { return pfisFindSameChannelDuplicate(parsed, sourceType, canonicalMerchant); });
@@ -595,25 +622,98 @@ function pfisIngestSource(params, requestId, options) {
  * TRUE and the matched rule supplies a meaningful purpose. Recurrence alone is
  * not permission to infer the purpose of an individual payment.
  */
-function pfisGetTrustedPurposeFromRule(ruleResult, merchant) {
-  if (!ruleResult || !pfisTruthy(ruleResult.autoPurpose)) return '';
+function pfisGetTrustedPurposeFromRule(ruleResult, merchant, transactionDate) {
+  if (!ruleResult) return '';
+  const trigger = pfisString(ruleResult.purposeTrigger).toUpperCase();
+  const triggerSatisfied = trigger === 'LAST_WORKING_DAY_OF_MONTH' &&
+    pfisIsLastWorkingDayOfMonth(transactionDate, ruleResult.calendarScope);
+  if (!pfisTruthy(ruleResult.autoPurpose) && !triggerSatisfied) return '';
   const purpose = pfisCleanText(ruleResult.notes);
   return pfisIsMeaningfulPurpose(purpose, merchant) ? purpose : '';
+}
+
+/**
+ * Tests the transaction's own calendar date, never the request-arrival/current date.
+ * Saturday/Sunday are non-working by default. Optional Holiday Calendar rows can
+ * override dates per scope (e.g. HCL) or globally (ALL).
+ *
+ * Holiday Calendar headers: Date | Calendar Scope | Is Working Day | Description
+ */
+function pfisGetHolidayCalendarOverrides() {
+  if (PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE !== null) return PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE;
+  const overrides = Object.create(null);
+  const sheet = pfisGetSpreadsheet().getSheetByName(PFIS_HOLIDAY_CALENDAR_SHEET);
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 3) {
+    PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = overrides;
+    return overrides;
+  }
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(pfisHeaderToken);
+  const dateIndex = headers.indexOf('date');
+  const scopeIndex = headers.indexOf('calendarscope');
+  const workingIndex = headers.indexOf('isworkingday');
+  if (dateIndex < 0 || workingIndex < 0) {
+    console.warn('Holiday Calendar ignored: Date and Is Working Day headers are required.');
+    PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = overrides;
+    return overrides;
+  }
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  rows.forEach(function (row) {
+    const date = pfisParseDateValue(row[dateIndex]);
+    if (!date) return;
+    const workingValue = row[workingIndex];
+    if (workingValue === '' || workingValue === null || workingValue === undefined) return;
+    const dateKey = Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy-MM-dd');
+    const scope = scopeIndex >= 0 ? (pfisString(row[scopeIndex]).toUpperCase() || 'ALL') : 'ALL';
+    overrides[dateKey + '|' + scope] = pfisTruthy(workingValue);
+  });
+  PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = overrides;
+  return overrides;
+}
+
+function pfisIsCalendarWorkingDay(dateValue, calendarScope) {
+  const date = pfisParseDateValue(dateValue);
+  if (!date) return false;
+  const dateKey = Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy-MM-dd');
+  const scope = pfisString(calendarScope).toUpperCase() || 'ALL';
+  const overrides = pfisGetHolidayCalendarOverrides();
+  const scopedKey = dateKey + '|' + scope;
+  const allKey = dateKey + '|ALL';
+  if (Object.prototype.hasOwnProperty.call(overrides, scopedKey)) return overrides[scopedKey];
+  if (Object.prototype.hasOwnProperty.call(overrides, allKey)) return overrides[allKey];
+  const isoDay = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'u'));
+  return isoDay >= 1 && isoDay <= 5;
+}
+
+function pfisIsLastWorkingDayOfMonth(dateValue, calendarScope) {
+  const date = pfisParseDateValue(dateValue);
+  if (!date || !pfisIsCalendarWorkingDay(date, calendarScope)) return false;
+  const year = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy'));
+  const month = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'M'));
+  const day = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'd'));
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  for (let nextDay = day + 1; nextDay <= daysInMonth; nextDay++) {
+    const candidate = pfisCreateIndiaDate(year, month, nextDay, 12, 0, 0);
+    if (pfisIsCalendarWorkingDay(candidate, calendarScope)) return false;
+  }
+  return true;
 }
 
 function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceId, sourceHash,
   ruleResult, configResult, reviewReason, duplicate) {
   const now = new Date();
   const type = pfisNormalizeType(ruleResult.typeOverride || parsed.type);
-  const category = pfisGetCategoryList().indexOf(ruleResult.category) >= 0 ? ruleResult.category : '';
-  // Only a matched rule with Auto Purpose=TRUE may prefill User Notes.
-  // Recurrence alone does not establish a purpose; otherwise keep it blank.
-  // Frontend/model enrichment is saved only through the explicit update action.
-  const userNotes = pfisGetTrustedPurposeFromRule(ruleResult, ruleResult.merchantOverride || parsed.merchant);
-  // Keep review state consistent with enrichment: a new row missing category or
-  // purpose is retained immediately, but is not treated as complete/approved.
-  // A duplicate/conflict/type/merchant problem takes precedence over enrichment.
-  const enrichmentMissing = !category || !pfisIsMeaningfulPurpose(userNotes, ruleResult.merchantOverride || parsed.merchant);
+  const categories = pfisGetCategoryList();
+  const configuredCategory = pfisCleanText(ruleResult.category);
+  const category = categories.indexOf(configuredCategory) >= 0
+    ? configuredCategory
+    : (categories.indexOf('Miscellaneous') >= 0 ? 'Miscellaneous' : '');
+  // User Notes can be populated by Auto Purpose=TRUE or an explicitly satisfied
+  // Purpose Trigger. Missing purpose is normal and never creates a review blocker.
+  const userNotes = pfisGetTrustedPurposeFromRule(
+    ruleResult, ruleResult.merchantOverride || parsed.merchant, parsed.datetime);
+  // Purpose is optional. Only an unresolved category is an enrichment gap;
+  // an active Miscellaneous fallback is a valid, auditable category.
+  const enrichmentMissing = !category;
   const accountOverrideResolvesConfig = !!pfisCleanText(ruleResult.accountOverride);
   const configReviewReason = configResult && configResult.ambiguous ? 'config_mapping_ambiguous' :
     (configResult && configResult.unresolved && !accountOverrideResolvesConfig ? 'config_mapping_unresolved' : '');
@@ -659,7 +759,8 @@ function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceI
     sourceId: sourceId || '', batchId: pfisString(params && params.batchId), sourceHash: sourceHash || '',
     canonicalKey: transactionId ? 'CANON-' + transactionId : '',
     merchantCleaned: pfisNormalizeMerchant(ruleResult.merchantOverride || parsed.merchant),
-    isInvestment: type === 'investment', isCardPayment: type === 'card_payment'
+    isInvestment: type === 'investment', isCardPayment: type === 'card_payment',
+    budgetMonthOffset: isFinite(Number(ruleResult.budgetMonthOffset)) ? Math.trunc(Number(ruleResult.budgetMonthOffset)) : 0
   };
 }
 
@@ -1076,6 +1177,119 @@ function pfisFindCrossChannelMatch(incoming, sourceType, merchant) {
   return { status: 'NO_MATCH', timePrecisionCandidate: timeCandidates.length === 1, timePrecisionCandidateIds: timeCandidates };
 }
 
+/**
+ * Card payment notifications may come from the wallet/payment rail and from the
+ * issuer. Treat them as corroborating evidence for one settlement only when
+ * amount, IST calendar date and issuer agree, and the match is unique.
+ */
+function pfisFindCardPaymentEventMatch(incoming, rawEvidence, sourceType) {
+  if (pfisNormalizeType(incoming.resolvedType || incoming.type) !== 'card_payment') {
+    return { status: 'NO_MATCH' };
+  }
+  const normalizedSourceType = pfisNormalizeSourceType(sourceType);
+  if (!normalizedSourceType) return { status: 'NO_MATCH' };
+  const otherSourceType = normalizedSourceType === 'SMS' ? 'EMAIL' : 'SMS';
+  const incomingIssuer = pfisGetPaymentIssuerKey(rawEvidence, incoming.bank, incoming.merchant, incoming.cardName);
+  if (!incomingIssuer) return { status: 'NO_MATCH' };
+  const txRows = pfisReadTransactions();
+  const sourceIndex = pfisBuildSourceIndex();
+  const candidates = [];
+  txRows.forEach(function (existing) {
+    if (pfisNormalizeType(existing.type) !== 'card_payment') return;
+    if (!pfisSameMoney(existing.amount, incoming.amount)) return;
+    if (!pfisSameCalendarDay(existing.dateTime, incoming.datetime)) return;
+    const linkedSources = sourceIndex[existing.transactionId] || [];
+    const existingSourceTypes = pfisUnique(linkedSources.map(function (s) { return pfisNormalizeSourceType(s.sourceType); }));
+    // This matcher handles issuer/payment-rail confirmation pairs and repeated
+    // same-channel issuer messages. Existing source evidence is mandatory.
+    if (!existingSourceTypes.length) return;
+    const hasCrossChannelEvidence = existingSourceTypes.indexOf(otherSourceType) >= 0;
+    const isSameChannelIssuerReplay = existingSourceTypes.indexOf(normalizedSourceType) >= 0 &&
+      existingSourceTypes.indexOf(otherSourceType) < 0;
+    if (!hasCrossChannelEvidence && !isSameChannelIssuerReplay) return;
+    // Same-channel issuer notifications may be reconciled by calendar day only
+    // when at least one source is date-only. If both have precise times, the
+    // ordinary five-minute transaction matcher must decide instead.
+    const hasDateOnlyEvidence = pfisString(incoming.datePrecision).toUpperCase() !== 'DATETIME' ||
+      linkedSources.some(function (s) { return pfisString(s.datePrecision).toUpperCase() !== 'DATETIME'; });
+    if (isSameChannelIssuerReplay && !hasDateOnlyEvidence) return;
+    const existingEvidence = linkedSources.map(function (s) { return s.rawBody || ''; }).join('\n');
+    const existingIssuer = pfisGetPaymentIssuerKey(existingEvidence, existing.bank, existing.merchant, existing.cardName);
+    if (existingIssuer !== incomingIssuer) return;
+    const accountA = pfisString(existing.account).toLowerCase();
+    const accountB = pfisString(incoming.account).toLowerCase();
+    const bothCreditCardAccounts = pfisNormalizeAccountType(existing.accountType) === 'creditcard' &&
+      pfisNormalizeAccountType(incoming.accountType) === 'creditcard';
+    // References from a wallet/payment rail and issuer are separate namespaces.
+    // Same-channel issuer messages must not contradict two supplied references.
+    const existingRef = pfisNormalizeReference(existing.refNo);
+    const incomingRef = pfisNormalizeReference(incoming.refNo);
+    if (isSameChannelIssuerReplay && existingRef && incomingRef && existingRef !== incomingRef) return;
+    if (bothCreditCardAccounts && accountA && accountB && accountA !== accountB) return;
+    if (bothCreditCardAccounts && existing.cardName && incoming.cardName &&
+        pfisNormalizeMerchant(existing.cardName) !== pfisNormalizeMerchant(incoming.cardName)) return;
+    candidates.push({
+      transactionId: existing.transactionId,
+      reason: isSameChannelIssuerReplay
+        ? 'same_channel_card_payment_issuer_amount_day'
+        : 'cross_channel_card_payment_issuer_amount_day'
+    });
+  });
+  const unique = pfisUniqueBy(candidates, 'transactionId');
+  if (unique.length === 1) {
+    return { status: 'MATCHED', transactionId: unique[0].transactionId, reason: unique[0].reason };
+  }
+  if (unique.length > 1) {
+    return { status: 'CONFLICT', reason: 'ambiguous_card_payment_event_match',
+      candidateTransactionIds: unique.map(function (x) { return x.transactionId; }) };
+  }
+  return { status: 'NO_MATCH' };
+}
+
+function pfisGetPaymentIssuerKey(rawEvidence, bank, merchant, cardName) {
+  const haystack = pfisNormalizeMerchant([rawEvidence, bank, merchant, cardName].filter(Boolean).join(' '));
+  if (!haystack) return '';
+  if (haystack.indexOf('state bank of india') >= 0 || /\bsbi\b/.test(haystack) || haystack.indexOf('sbicard') >= 0) return 'sbi';
+  if (haystack.indexOf('icici') >= 0) return 'icici';
+  if (haystack.indexOf('axis') >= 0) return 'axis';
+  if (haystack.indexOf('hdfc') >= 0) return 'hdfc';
+  if (haystack.indexOf('kotak') >= 0) return 'kotak';
+  if (haystack.indexOf('yes bank') >= 0) return 'yesbank';
+  return '';
+}
+
+function pfisLinkPaymentEventSource(match, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult) {
+  const sourceId = pfisMakeId('SRC-');
+  const transactionId = pfisString(match.transactionId);
+  const sourceRowNumber = pfisAppendSourceRow({
+    sourceId: sourceId, receivedAt: new Date(), sourceType: sourceType,
+    sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
+    sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PROCESSING_RECONCILE',
+    extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
+    accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
+    extractedReferenceNo: parsed.refNo, linkedTxnId: transactionId, ingestedAt: new Date(),
+    processingError: '', archivedFlag: false,
+    notes: JSON.stringify({ phase: 'PAYMENT_EVENT_RECONCILE', reason: match.reason, transactionId: transactionId }),
+    requestId: requestId, batchId: pfisString(params.batchId)
+  });
+  pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, configResult, requestId);
+  pfisAppendChangeOnce('payment-event-source-linked:' + sourceId, {
+    transactionId: transactionId, targetTable: PFIS_SHEETS.sources, actor: 'system_payment_event',
+    field: 'Payment Event Evidence Linked', oldValue: '', newValue: transactionId,
+    reason: 'Matching card-payment issuer, amount and calendar date linked this notification to the existing canonical settlement.', requestId: requestId
+  });
+  pfisFinalizeSource(sourceRowNumber, 'RECONCILED',
+    'Linked as supporting evidence for the same card-payment event: ' + match.reason, '');
+  const transaction = pfisGetTransaction(transactionId, false);
+  const response = pfisBuildIngestResponse(transaction, requestId, sourceType, 'RECONCILED', sourceId);
+  response.transactionInserted = false;
+  response.sourceRecorded = true;
+  response.paymentEventLinked = true;
+  response.duplicateOf = transactionId;
+  response.message = 'This notification was linked to an existing card-payment event. No second ledger transaction was inserted.';
+  return response;
+}
+
 function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMerchant) {
   const sameBank = pfisNormalizeBank(existing.bank) === pfisNormalizeBank(incoming.bank);
   if (!sameBank) return { kind: 'NO_MATCH' };
@@ -1085,9 +1299,11 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   const merchantUsable = pfisIsMatchableMerchant(existingMerchant) && pfisIsMatchableMerchant(incomingMerchantKey);
   const sameMerchant = merchantUsable && existingMerchant === incomingMerchantKey;
   const sameAmount = pfisSameMoney(existing.amount, incoming.amount);
-  const existingRef = pfisNormalizeReference(existing.refNo);
+  const existingRef = pfisNormalizeReference(existing.refNo) ||
+    pfisNormalizeReference(existingSource.extractedReferenceNo);
   const incomingRef = pfisNormalizeReference(incoming.refNo);
   const sameRef = !!existingRef && existingRef === incomingRef;
+  const referenceConflict = !!existingRef && !!incomingRef && existingRef !== incomingRef;
   const sameDay = pfisSameCalendarDay(existingSource.extractedDate, incoming.datetime);
   const hasTime = pfisIsPrecision(existingSource.datePrecision) && pfisIsPrecision(incoming.datePrecision);
   const existingDate = pfisParseDateValue(existingSource.extractedDate);
@@ -1101,6 +1317,21 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   const existingType = pfisNormalizeAccountType(existing.accountType);
   const incomingType = pfisNormalizeAccountType(incoming.accountType);
   const accountTypeConflict = !!existingType && !!incomingType && existingType !== incomingType;
+  const sameResolvedAccount = !!pfisString(existing.account) && !!pfisString(incoming.account) &&
+    pfisString(existing.account).toLowerCase() === pfisString(incoming.account).toLowerCase();
+
+  // Bank emails often replace a real merchant with "Unspecified". Only accept
+  // that missing-merchant cross-channel pair when the canonical bank, amount,
+  // resolved account and exact source clock time all agree.
+  const genericExactTimePair = sameAmount && sameDay && sameResolvedAccount && hasTime &&
+    !!existingDate && !!incomingDate && existingDate.getTime() === incomingDate.getTime() &&
+    (!pfisIsMatchableMerchant(existingMerchant) || !pfisIsMatchableMerchant(incomingMerchantKey));
+  if (genericExactTimePair && referenceConflict) {
+    return { kind: 'CONFLICT', reason: 'same_bank_account_amount_time_reference_conflict' };
+  }
+  if (genericExactTimePair && !accountConflict && !accountTypeConflict) {
+    return { kind: 'MATCH', reason: 'exact_time_amount_bank_resolved_account_generic_merchant' };
+  }
 
   // A same-bank, same-day, same-reference, same-amount pair is a strong
   // cross-channel identity even when the email gateway is delayed by more than
@@ -1332,40 +1563,22 @@ function pfisInvalidateSourceCache() {
 // -----------------------------------------------------------------------------
 
 function pfisAppendTransaction(transaction, auditSummary) {
-  // Check if the engine marked this as a duplicate candidate
+  // Potential duplicates stay in the live ledger and review queue. Only an
+  // explicit human CONFIRM_DUPLICATE decision may send a row to the archive.
   let isDuplicate = transaction && (
-    transaction.validationFlag === 'DUPLICATE_CANDIDATE' ||
     transaction.validationFlag === 'DUPLICATE_REJECTED' ||
     transaction.reviewStatus === 'Rejected - Duplicate'
   );
 
   const txSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
 
-  // Secondary safeguard: Check if Hash, Canonical Key, or Ref No already exists in Transaction Log
-  if (!isDuplicate && txSheet.getLastRow() > 1) {
-    const incomingHash = pfisString(transaction.sourceHash);
-    const incomingCanonKey = pfisString(transaction.canonicalKey);
-    const incomingRefNo = pfisString(transaction.refNo);
-
-    // Read Columns Q (17: Ref No), AG (33: Hash), and AH (34: Canon Key)
-    const data = txSheet.getRange(2, 1, txSheet.getLastRow() - 1, 34).getValues();
-    for (let i = 0; i < data.length; i++) {
-      const rowRef = pfisString(data[i][16]);
-      const rowHash = pfisString(data[i][32]);
-      const rowCanon = pfisString(data[i][33]);
-
-      if ((incomingHash && rowHash === incomingHash) ||
-        (incomingCanonKey && rowCanon === incomingCanonKey) ||
-        (incomingRefNo && incomingRefNo !== 'NA' && rowRef === incomingRefNo)) {
-        isDuplicate = true;
-        break;
-      }
-    }
-  }
+  // Exact source replay is handled by Source Log hash idempotency and event matching.
+  // A hash, a generated canonical key, or a shared reference number by itself is
+  // not enough evidence to auto-reject a financial transaction.
 
   // Route to 'Rejected & Archive Log' if duplicate, otherwise 'Transaction Log'
   const targetSheet = isDuplicate
-    ? pfisGetSpreadsheet().getSheetByName('Rejected & Archive Log')
+    ? pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive)
     : txSheet;
 
   if (!targetSheet) {
@@ -1376,7 +1589,7 @@ function pfisAppendTransaction(transaction, auditSummary) {
     transaction.needsReview = false;
     transaction.reviewStatus = 'Rejected - Duplicate';
     transaction.validationFlag = 'DUPLICATE_REJECTED';
-    transaction.reviewReason = 'Auto-rejected duplicate detected during ingestion';
+    transaction.reviewReason = 'Explicitly confirmed duplicate before archive append';
     transaction.reviewedBy = 'SYSTEM_DEDUPLICATION';
     transaction.reviewedAt = new Date();
   }
@@ -1394,7 +1607,38 @@ function pfisAppendTransaction(transaction, auditSummary) {
     : ('Created transaction ' + pfisString(transaction.transactionId)));
 
   pfisWriteLegacyTransactionAux(targetRow, transaction, summaryText, targetSheet);
+  pfisWriteOptionalBudgetPeriods(targetRow, transaction, targetSheet);
   return targetRow;
+}
+
+/**
+ * Optional derived period columns are header-driven for backward compatibility.
+ * Income Month = actual transaction month. Budget Month = transaction month plus
+ * the explicitly configured Rules!W offset; there is no day-of-month heuristic.
+ */
+function pfisWriteOptionalBudgetPeriods(rowNumber, transaction, targetSheet) {
+  const sheet = targetSheet || pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn < 1) return;
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0].map(pfisHeaderToken);
+  const date = pfisParseDateValue(transaction && transaction.dateTime);
+  if (!date) return;
+  const year = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy'));
+  const month = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'M'));
+  const budgetOffset = isFinite(Number(transaction.budgetMonthOffset)) ? Math.trunc(Number(transaction.budgetMonthOffset)) : 0;
+  function monthStart(offset) {
+    const index = year * 12 + (month - 1) + offset;
+    const y = Math.floor(index / 12);
+    const m = index - y * 12 + 1;
+    return pfisCreateIndiaDate(y, m, 1, 12, 0, 0);
+  }
+  const incomeMonthCol = headers.indexOf('incomemonth') + 1;
+  const budgetMonthCol = headers.indexOf('budgetmonth') + 1;
+  const isIncome = pfisNormalizeType(transaction && transaction.type) === 'income';
+  if (incomeMonthCol > 0) {
+    sheet.getRange(rowNumber, incomeMonthCol).setValue(isIncome ? monthStart(0) : '');
+  }
+  if (budgetMonthCol > 0) sheet.getRange(rowNumber, budgetMonthCol).setValue(monthStart(budgetOffset));
 }
 
 function pfisAppendSourceRow(source) {
@@ -1583,7 +1827,7 @@ function pfisGetTransaction(transactionId, includeEvidence) {
 
   // If not in active Transaction Log, check Rejected & Archive Log
   if (rowNumber < 2) {
-    const archiveSheet = pfisGetSpreadsheet().getSheetByName('Rejected & Archive Log');
+    const archiveSheet = pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive);
     if (archiveSheet) {
       rowNumber = pfisFindRowByValue(archiveSheet, 1, transactionId);
       if (rowNumber >= 2) sheet = archiveSheet;
@@ -1666,7 +1910,11 @@ function pfisSourceRowsForTransaction(transactionId) {
 
 function pfisGetPendingReview(limitInput) {
   const limit = pfisClampLimit(limitInput, 50);
-  const txns = pfisReadTransactions().filter(function (txn) { return pfisTruthy(txn.needsReview); }).map(function (txn) {
+  const txns = pfisReadTransactions().filter(function (txn) {
+    const flag = pfisString(txn.validationFlag).toUpperCase();
+    return pfisTruthy(txn.needsReview) || pfisString(txn.reviewStatus).toUpperCase() === 'PENDING' ||
+      ['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT', 'NEEDS_REVIEW'].indexOf(flag) >= 0;
+  }).map(function (txn) {
     const verification = pfisGetVerificationState(txn.transactionId, txn.validationFlag);
     return {
       kind: 'transaction', transactionId: txn.transactionId, dateTime: txn.dateTime, amount: txn.amount,
@@ -1691,23 +1939,17 @@ function pfisGetNeedsEnrichment(limitInput) {
   const limit = pfisClampLimit(limitInput, 50);
   const pending = pfisReadTransactions().map(function (txn) {
     const enrichment = pfisGetEnrichmentState(txn.category, txn.userNotes, undefined, txn.merchant);
-    if (!enrichment.requiresPurpose && !enrichment.requiresCategoryClassification) return null;
+    if (!enrichment.requiresCategoryClassification) return null;
     const item = {
       transactionId: txn.transactionId, dateTime: txn.dateTime, amount: txn.amount,
       merchant: txn.merchant, category: txn.category, userNotes: txn.userNotes, type: txn.type,
       requiresPurpose: enrichment.requiresPurpose,
       requiresCategoryClassification: enrichment.requiresCategoryClassification,
       verificationStatus: pfisGetVerificationState(txn.transactionId, txn.validationFlag).status,
-      // Stable keys preserve compatibility with the existing iOS Shortcut.
-      // Empty means no trustworthy history exists; it is not an invented default.
+      // Retained as compatibility fields; purpose is optional and never queued.
       purposeSuggestion: '',
       purposeExamples: []
     };
-    if (enrichment.requiresPurpose) {
-      const examples = pfisFindPurposeExamples(txn.transactionId, txn.merchant, txn.type, 3);
-      item.purposeExamples = examples;
-      item.purposeSuggestion = examples.length ? examples[0].purpose : '';
-    }
     return item;
   }).filter(Boolean);
   return pending.slice(0, limit);
@@ -1720,16 +1962,125 @@ function pfisGetNeedsEnrichment(limitInput) {
  * Required POST JSON: {action:"resolveexception", transactionId:"...",
  * resolution:"CONFIRM_DISTINCT", reason:"...", actor:"user"}.
  */
+function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor, requestId) {
+  const duplicateRow = pfisFindTransactionRow(transactionId);
+  const primaryRow = pfisFindTransactionRow(duplicateOf);
+  if (duplicateRow < 2 || primaryRow < 2 || transactionId === duplicateOf) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'DUPLICATE_TARGET_INVALID',
+      message: 'Both the duplicate candidate and its primary transaction must exist as separate active ledger rows.',
+      transactionId: transactionId, duplicateOf: duplicateOf, requestId: requestId };
+  }
+  const txSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const archiveSheet = pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive);
+  if (!archiveSheet || archiveSheet.getLastColumn() < PFIS_TX_FIELDS.length) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_SHEET_INVALID',
+      message: 'Rejected & Archive Log is missing or does not contain the canonical A:AC schema. No rows were changed.',
+      transactionId: transactionId, requestId: requestId };
+  }
+  const observedArchiveHeaders = archiveSheet.getRange(1, 1, 1, PFIS_TX_FIELDS.length).getDisplayValues()[0];
+  const invalidArchiveHeaders = PFIS_TX_HEADERS.filter(function (header, index) {
+    return pfisHeaderToken(observedArchiveHeaders[index]) !== pfisHeaderToken(header);
+  });
+  if (invalidArchiveHeaders.length) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_SCHEMA_MISMATCH',
+      message: 'Rejected & Archive Log core headers do not match Transaction Log. No rows were changed.',
+      transactionId: transactionId, requestId: requestId };
+  }
+  const primary = pfisObjectFromRow(
+    txSheet.getRange(primaryRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  if (['DUPLICATE_CANDIDATE', 'DUPLICATE_REJECTED', 'SOURCE_CONFLICT'].indexOf(pfisString(primary.validationFlag).toUpperCase()) >= 0) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'PRIMARY_NOT_CANONICAL',
+      message: 'duplicateOf must identify a surviving canonical transaction, not another duplicate candidate or rejected row.',
+      transactionId: transactionId, duplicateOf: duplicateOf, requestId: requestId };
+  }
+  const rowWidth = Math.max(txSheet.getLastColumn(), PFIS_TX_FIELDS.length);
+  const originalValues = txSheet.getRange(duplicateRow, 1, 1, rowWidth).getValues()[0];
+  const record = pfisObjectFromRow(originalValues.slice(0, PFIS_TX_FIELDS.length), PFIS_TX_FIELDS);
+  if (pfisString(record.validationFlag).toUpperCase() !== 'DUPLICATE_CANDIDATE') {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'NOT_DUPLICATE_CANDIDATE',
+      message: 'Only a transaction explicitly flagged DUPLICATE_CANDIDATE can be archived this way.',
+      transactionId: transactionId, requestId: requestId };
+  }
+  const now = new Date();
+  record.needsReview = false;
+  record.reviewStatus = 'Rejected - Duplicate';
+  record.reviewReason = 'confirmed_duplicate_of:' + duplicateOf + ' | ' + reason;
+  record.reviewedBy = actor;
+  record.reviewedAt = now;
+  record.validationFlag = 'DUPLICATE_REJECTED';
+  record.lastUpdatedAt = now;
+
+  // Copy the complete row, including Budget Month, Income Month and any future
+  // auxiliary fields; recomputing from the core A:AC schema would lose metadata.
+  const archiveWidth = Math.max(archiveSheet.getLastColumn(), rowWidth);
+  if (archiveSheet.getMaxColumns() < archiveWidth) {
+    archiveSheet.insertColumnsAfter(archiveSheet.getMaxColumns(), archiveWidth - archiveSheet.getMaxColumns());
+  }
+  // Extend archive headers only where the ledger has a header and the archive
+  // column is unlabeled (e.g. Budget Month / Income Month).
+  const ledgerHeaders = txSheet.getRange(1, 1, 1, rowWidth).getDisplayValues()[0];
+  const archiveHeaders = archiveSheet.getRange(1, 1, 1, archiveWidth).getDisplayValues()[0];
+  for (let col = PFIS_TX_FIELDS.length; col < rowWidth; col++) {
+    if (!pfisString(archiveHeaders[col]) && pfisString(ledgerHeaders[col])) {
+      archiveSheet.getRange(1, col + 1).setValue(ledgerHeaders[col]);
+    }
+  }
+  const archivedValues = new Array(archiveWidth).fill('');
+  originalValues.forEach(function (value, index) { archivedValues[index] = value; });
+  pfisRowFromObject(record, PFIS_TX_FIELDS).forEach(function (value, index) { archivedValues[index] = value; });
+  let archiveRow = pfisFindRowByValue(archiveSheet, 1, transactionId);
+  if (archiveRow < 2) archiveRow = pfisGetNextAvailableRow(archiveSheet, 1);
+  archiveSheet.getRange(archiveRow, 1, 1, archiveWidth).setValues([archivedValues]);
+  pfisWriteLegacyTransactionAux(archiveRow, record,
+    'Human-confirmed duplicate of ' + duplicateOf + ': ' + reason, archiveSheet);
+
+  // Re-point all source evidence to the surviving canonical transaction. The
+  // detailed Change Log is written before the destructive active-row clear.
+  const sourceSheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
+  const sourceRows = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length);
+  sourceRows.forEach(function (row, i) {
+    const source = pfisObjectFromRow(row, PFIS_SOURCE_FIELDS);
+    if (pfisString(source.linkedTxnId) !== transactionId) return;
+    const sourceRow = i + 2;
+    sourceSheet.getRange(sourceRow, 16).setValue(duplicateOf);
+    sourceSheet.getRange(sourceRow, 9).setValue('DUPLICATE_SUPPRESSED');
+    sourceSheet.getRange(sourceRow, 19).setValue(true);
+    sourceSheet.getRange(sourceRow, 20).setValue(
+      'Human-confirmed duplicate archived as ' + transactionId + '; linked to surviving transaction ' + duplicateOf +
+      '. Reason: ' + reason);
+  });
+
+  pfisAppendChangeOnceBatch([
+    { eventKey: 'duplicate-archived:' + transactionId, change: {
+      transactionId: transactionId, targetTable: PFIS_SHEETS.archive, actor: actor,
+      field: 'Archive Status', oldValue: 'DUPLICATE_CANDIDATE', newValue: 'DUPLICATE_REJECTED',
+      reason: 'Human-confirmed duplicate of ' + duplicateOf + ': ' + reason, requestId: requestId
+    }},
+    { eventKey: 'duplicate-survivor:' + transactionId + ':' + duplicateOf, change: {
+      transactionId: duplicateOf, targetTable: PFIS_SHEETS.transactions, actor: actor,
+      field: 'Duplicate Evidence Linked', oldValue: '', newValue: transactionId,
+      reason: 'Duplicate transaction ' + transactionId + ' archived; its source evidence was linked to this surviving transaction.', requestId: requestId
+    }}
+  ]);
+
+  // If archive, source relink, or audit fails, the active row remains reviewable.
+  txSheet.getRange(duplicateRow, 1, 1, rowWidth).clearContent();
+  pfisInvalidateTransactionCache();
+  pfisInvalidateSourceCache();
+  return { success: true, status: 'DUPLICATE_ARCHIVED', transactionId: transactionId,
+    duplicateOf: duplicateOf, archiveRow: archiveRow, requestId: requestId };
+}
+
 function pfisResolveTransactionException(params, requestId) {
   const transactionId = pfisString(params.transactionId || params.txnId);
   const resolution = pfisString(params.resolution).toUpperCase().replace(/[ -]+/g, '_');
   const reason = pfisCleanText(params.reason);
   if (!transactionId) return { success: false, status: 'UPDATE_REJECTED', error: 'BAD_REQUEST', message: 'transactionId is required.', requestId: requestId };
-  if (resolution !== 'CONFIRM_DISTINCT') {
+  if (['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE'].indexOf(resolution) < 0) {
     return {
       success: false, status: 'UPDATE_REJECTED', error: 'UNSUPPORTED_RESOLUTION',
-      message: 'Only CONFIRM_DISTINCT is supported. Duplicate deletion/merging is intentionally not automated because it can change reported cash flow.',
-      transactionId: transactionId, allowedResolutions: ['CONFIRM_DISTINCT'], requestId: requestId
+      message: 'Use CONFIRM_DISTINCT to retain a real transaction or CONFIRM_DUPLICATE with duplicateOf to archive a confirmed duplicate.',
+      transactionId: transactionId, allowedResolutions: ['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE'], requestId: requestId
     };
   }
   if (!reason || reason.length < 8) {
@@ -1738,6 +2089,15 @@ function pfisResolveTransactionException(params, requestId) {
       message: 'Provide a specific human review reason of at least 8 characters; no fields were changed.', transactionId: transactionId, requestId: requestId
     };
   }
+  if (resolution === 'CONFIRM_DUPLICATE') {
+    const duplicateOf = pfisString(params.duplicateOf);
+    if (!duplicateOf) return {
+      success: false, status: 'UPDATE_REJECTED', error: 'DUPLICATE_OF_REQUIRED',
+      message: 'duplicateOf must contain the surviving canonical transaction ID.', transactionId: transactionId, requestId: requestId
+    };
+    return pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, pfisString(params.actor) || 'user', requestId);
+  }
+
   const rowNumber = pfisFindTransactionRow(transactionId);
   if (rowNumber < 2) return {
     success: false, status: 'NOT_FOUND', error: 'NOT_FOUND',
@@ -1828,26 +2188,30 @@ function pfisUpdateTransaction(params, requestId) {
   // where purpose is saved but an explicitly supplied category is blank/invalid.
   if (has('category')) {
     const category = pfisString(params.category);
-    if (!category) {
-      return {
-        success: false, status: 'UPDATE_REJECTED', error: 'EMPTY_CATEGORY',
-        message: 'category was supplied but empty; no fields were changed.', transactionId: transactionId, requestId: requestId
-      };
-    }
     if (!categories.length) {
       return {
         success: false, status: 'UPDATE_REJECTED', error: 'NO_ACTIVE_CATEGORIES',
         message: 'No active categories exist in the Categories sheet; no fields were changed.', transactionId: transactionId, requestId: requestId
       };
     }
-    if (categories.indexOf(category) < 0) {
-      return {
-        success: false, status: 'UPDATE_REJECTED', error: 'INVALID_CATEGORY',
-        message: 'category must exactly match an active Categories sheet value.', transactionId: transactionId,
-        allowedCategories: categories, requestId: requestId
+    if (!category) {
+      const fallback = categories.indexOf('Miscellaneous') >= 0 ? 'Miscellaneous' : '';
+      if (!fallback) return {
+        success: false, status: 'UPDATE_REJECTED', error: 'NO_MISCELLANEOUS_CATEGORY',
+        message: 'Empty category received, but Miscellaneous is not an active category.',
+        transactionId: transactionId, allowedCategories: categories, requestId: requestId
       };
+      patch.category = fallback;
+    } else {
+      if (categories.indexOf(category) < 0) {
+        return {
+          success: false, status: 'UPDATE_REJECTED', error: 'INVALID_CATEGORY',
+          message: 'category must exactly match an active Categories sheet value.', transactionId: transactionId,
+          allowedCategories: categories, requestId: requestId
+        };
+      }
+      patch.category = category;
     }
-    patch.category = category;
   }
 
   let purposeKey = '';
@@ -1856,13 +2220,8 @@ function pfisUpdateTransaction(params, requestId) {
   else if (has('notes')) purposeKey = 'notes';
   if (purposeKey) {
     const purpose = pfisString(params[purposeKey]);
-    if (!purpose) {
-      return {
-        success: false, status: 'UPDATE_REJECTED', error: 'EMPTY_PURPOSE',
-        message: 'purpose was supplied but empty; no fields were changed.', transactionId: transactionId, requestId: requestId
-      };
-    }
-    if (!pfisIsMeaningfulPurpose(purpose, has('merchant') ? params.merchant : current.merchant)) {
+    // Blank purpose is valid. It is optional enrichment, not an API failure.
+    if (purpose && !pfisIsMeaningfulPurpose(purpose, has('merchant') ? params.merchant : current.merchant)) {
       return {
         success: false, status: 'UPDATE_REJECTED', error: 'UNINFORMATIVE_PURPOSE',
         message: 'purpose is a placeholder or repeats the merchant name. Provide the actual reason for the payment; no fields were changed.',
@@ -1989,8 +2348,11 @@ function pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, con
     ['type', pfisNormalizeType(ruleResult.typeOverride || parsed.type)],
     ['account', pfisCleanText(ruleResult.accountOverride || configResult.account)],
     ['cardName', pfisCleanText(ruleResult.cardNameOverride || configResult.cardName)],
-    ['category', activeCategories.indexOf(pfisCleanText(ruleResult.category)) >= 0 ? pfisCleanText(ruleResult.category) : ''],
-    ['userNotes', pfisGetTrustedPurposeFromRule(ruleResult, ruleResult.merchantOverride || parsed.merchant)]
+    ['category', activeCategories.indexOf(pfisCleanText(ruleResult.category)) >= 0
+      ? pfisCleanText(ruleResult.category)
+      : (activeCategories.indexOf('Miscellaneous') >= 0 ? 'Miscellaneous' : '')],
+    ['userNotes', pfisGetTrustedPurposeFromRule(
+      ruleResult, ruleResult.merchantOverride || parsed.merchant, parsed.datetime)]
   ];
   fieldsToFill.forEach(function (item) {
     const col = PFIS_TX_FIELDS.indexOf(item[0]) + 1;
@@ -2292,6 +2654,9 @@ function pfisEvaluateRules(parsed, rawEvidence) {
     // Auto Review, Rule Engine and free-form Notes remain informational until
     // their business meaning is explicitly defined; they never bypass validation.
     autoReview: pfisTruthy(rule.autoReview),
+    purposeTrigger: pfisString(rule.purposeTrigger).toUpperCase(),
+    calendarScope: pfisString(rule.calendarScope).toUpperCase(),
+    budgetMonthOffset: isFinite(Number(rule.budgetMonthOffset)) ? Math.trunc(Number(rule.budgetMonthOffset)) : 0,
     ruleEngine: pfisCleanText(rule.ruleEngine),
     notesMetadata: notesMetadata
   };
@@ -2347,7 +2712,7 @@ function pfisEmptyRuleResult() {
     ruleApplied: '', ruleType: '', category: '', merchantOverride: '', notes: '',
     isRecurring: false, typeOverride: '', accountOverride: '', cardNameOverride: '',
     instrumentOverride: '', confidence: null, autoReview: false, autoPurpose: false,
-    ruleEngine: '', notesMetadata: ''
+    purposeTrigger: '', calendarScope: '', ruleEngine: '', notesMetadata: ''
   };
 }
 
@@ -2387,6 +2752,36 @@ function pfisGetRuleRows() {
     ? sheet.getRange(2, PFIS_RULE_AUTO_PURPOSE_COLUMN, baseRows.length, 1).getValues()
     : [];
 
+  // U: Purpose Trigger and V: Calendar Scope are independent optional extensions.
+  // They are opt-in and do not alter existing A:T workbooks.
+  const purposeTriggerHeader = sheet.getLastColumn() >= PFIS_RULE_PURPOSE_TRIGGER_COLUMN
+    ? pfisString(sheet.getRange(1, PFIS_RULE_PURPOSE_TRIGGER_COLUMN).getDisplayValue()) : '';
+  const usePurposeTrigger = pfisHeaderToken(purposeTriggerHeader) === pfisHeaderToken(PFIS_RULE_PURPOSE_TRIGGER_HEADER);
+  const purposeTriggerValues = usePurposeTrigger && baseRows.length
+    ? sheet.getRange(2, PFIS_RULE_PURPOSE_TRIGGER_COLUMN, baseRows.length, 1).getDisplayValues()
+    : [];
+
+  const calendarScopeHeader = sheet.getLastColumn() >= PFIS_RULE_CALENDAR_SCOPE_COLUMN
+    ? pfisString(sheet.getRange(1, PFIS_RULE_CALENDAR_SCOPE_COLUMN).getDisplayValue()) : '';
+  const useCalendarScope = pfisHeaderToken(calendarScopeHeader) === pfisHeaderToken(PFIS_RULE_CALENDAR_SCOPE_HEADER);
+  const calendarScopeValues = useCalendarScope && baseRows.length
+    ? sheet.getRange(2, PFIS_RULE_CALENDAR_SCOPE_COLUMN, baseRows.length, 1).getDisplayValues()
+    : [];
+
+  const budgetOffsetHeader = sheet.getLastColumn() >= 23
+    ? pfisString(sheet.getRange(1, 23).getDisplayValue()) : '';
+  const useBudgetOffset = pfisHeaderToken(budgetOffsetHeader) === 'budgetmonthoffset';
+  const budgetOffsetValues = useBudgetOffset && baseRows.length
+    ? sheet.getRange(2, 23, baseRows.length, 1).getValues()
+    : [];
+
+  if (purposeTriggerHeader && !usePurposeTrigger) {
+    console.warn('Rules!U ignored because its header is not exactly "Purpose Trigger".');
+  }
+  if (calendarScopeHeader && !useCalendarScope) {
+    console.warn('Rules!V ignored because its header is not exactly "Calendar Scope".');
+  }
+
   const mappedRows = baseRows.map(function (row, i) {
     const obj = pfisObjectFromRow(row, PFIS_RULE_FIELDS);
     if (useOptional) {
@@ -2395,6 +2790,10 @@ function pfisGetRuleRows() {
       PFIS_RULE_OPTIONAL_FIELDS.forEach(function (field) { obj[field] = ''; });
     }
     obj.autoPurpose = useAutoPurpose ? pfisTruthy(autoPurposeValues[i][0]) : false;
+    obj.purposeTrigger = usePurposeTrigger ? pfisString(purposeTriggerValues[i][0]).toUpperCase() : '';
+    obj.calendarScope = useCalendarScope ? pfisString(calendarScopeValues[i][0]).toUpperCase() : '';
+    const budgetOffset = useBudgetOffset ? Number(budgetOffsetValues[i][0]) : 0;
+    obj.budgetMonthOffset = isFinite(budgetOffset) ? Math.trunc(budgetOffset) : 0;
     obj.rowNumber = i + 2;
     return obj;
   });
@@ -2559,6 +2958,16 @@ function pfisApplyNotesTemplate(template, dateValue, monthOffset) {
 // -----------------------------------------------------------------------------
 // Date/amount/input normalization
 // -----------------------------------------------------------------------------
+
+function pfisNormalizeSourceDatePrecision(parsed, evidenceText) {
+  if (!parsed || !(parsed.datetime instanceof Date) || parsed.datePrecision !== 'DATETIME') return parsed;
+  const time = Utilities.formatDate(parsed.datetime, PFIS_TIME_ZONE, 'HH:mm:ss');
+  const raw = String(evidenceText || '');
+  const hasClockTime = /\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(raw) ||
+    /\b\d{1,2}\s*(?:AM|PM)\b/i.test(raw);
+  if (time === '00:00:00' && !hasClockTime) parsed.datePrecision = 'DATE_ONLY';
+  return parsed;
+}
 
 function pfisParseTxnString(raw) {
   if (typeof raw !== 'string') return null;
@@ -3455,8 +3864,9 @@ function pfisGetDataQuality(params, requestId) {
     verified: 0, smsOnly: 0, emailOnly: 0, unresolvedSourceConflicts: 0
   };
   data.transactions.forEach(function (tx) {
-    if (pfisTruthy(tx.needsReview)) result.needsReview++;
     const flag = pfisString(tx.validationFlag).toUpperCase();
+    if (pfisTruthy(tx.needsReview) || pfisString(tx.reviewStatus).toUpperCase() === 'PENDING' ||
+        ['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT', 'NEEDS_REVIEW'].indexOf(flag) >= 0) result.needsReview++;
     if (flag === 'DUPLICATE_CANDIDATE') result.duplicateCandidates++;
     if (flag === 'SOURCE_CONFLICT') result.sourceConflicts++;
     if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(tx.merchant))) result.missingMerchant++;
@@ -3857,14 +4267,11 @@ function pfisBuildUpdateResponse(transaction, requestId, status, changedFields) 
 function pfisGetEnrichmentState(category, notes, categoryList, merchant) {
   const categories = Array.isArray(categoryList) ? categoryList : pfisGetCategoryList();
   const categoryValue = pfisCleanText(category);
-  // A purpose must be meaningful: blanks, generic placeholders, and a value that
-  // merely repeats the merchant name are treated as missing enrichment.
-  const purposeIsMeaningful = pfisIsMeaningfulPurpose(notes, merchant);
-  // This flag tells Shortcuts to classify with its selected AI model; it is not
-  // a request for the user to select the category manually.
+  // Purpose is optional. It remains visible in data-quality metrics but never
+  // blocks capture, approval, review completion or reporting.
   return {
     requiresCategoryClassification: !categoryValue || categories.indexOf(categoryValue) < 0,
-    requiresPurpose: !purposeIsMeaningful
+    requiresPurpose: false
   };
 }
 

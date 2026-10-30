@@ -145,7 +145,7 @@ The optional Holiday Calendar has four headers:
 
 `Date` · `Calendar Scope` · `Is Working Day` · `Description`
 
-The engine treats Monday–Friday as working days by default and Saturday/Sunday as non-working days. A verified scoped override can change that assumption for a company calendar such as HCL; `ALL` can be used for a general override.
+The engine treats Monday–Friday as working days by default and Saturday/Sunday as non-working days. A verified scoped override can change that assumption for a company calendar such as Example Employer; `ALL` can be used for a general override.
 
 Only enter verified holidays or exceptional working days. The calendar must reflect the employer's actual practice, not a guessed public-holiday list.
 
@@ -153,19 +153,19 @@ Only enter verified holidays or exceptional working days. The calendar must refl
 
 A salary received on the last working day of October is October income, even when it is intended to fund November.
 
-| HCL rule setting | Example value |
+| Example Employer rule setting | Example value |
 |---|---|
 | Match Type | MERCHANT |
-| Merchant Contains | HCL |
+| Merchant Contains | Example Employer |
 | Category | Income |
-| Merchant Override | HCLTech |
-| Notes Template | Salary from HCL for {{monthLabel}} |
+| Merchant Override | Employer Payroll |
+| Notes Template | Salary from Example Employer for {{monthLabel}} |
 | Month Offset (H) | 0 |
 | Is Recurring | TRUE |
 | Type Override | income |
 | Auto Purpose (T) | FALSE |
 | Purpose Trigger (U) | LAST_WORKING_DAY_OF_MONTH |
-| Calendar Scope (V) | HCL |
+| Calendar Scope (V) | Example Employer |
 | Budget Month Offset (W) | 1 |
 
 The result is deliberately split:
@@ -173,7 +173,7 @@ The result is deliberately split:
 | Concept | October salary example |
 |---|---|
 | Transaction Date | 30-Oct-2026 |
-| Purpose | Salary from HCL for Oct-26 |
+| Purpose | Salary from Example Employer for Oct-26 |
 | Income Month | Oct-26 |
 | Budget Month | Nov-26 |
 

@@ -4435,20 +4435,38 @@ function pfisMarkTransactionForClientReview(transactionId, sourceId, requestId) 
     ? 'NEEDS_REVIEW' : flag;
   const now = new Date();
 
-  sheet.getRange(rowNumber, 15).setValue(true);
-  sheet.getRange(rowNumber, 20).setValue('Pending');
-  sheet.getRange(rowNumber, 21).setValue(reviewReason);
-  sheet.getRange(rowNumber, 22).setValue('');
-  sheet.getRange(rowNumber, 23).setValue('');
-  sheet.getRange(rowNumber, 27).setValue(nextFlag);
-  sheet.getRange(rowNumber, 29).setValue(now);
+  const updatedRow = sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0];
+  updatedRow[14] = true;             // O: Needs Review
+  updatedRow[19] = 'Pending';        // T: Review Status
+  updatedRow[20] = reviewReason;     // U: Review Reason
+  updatedRow[21] = '';               // V: Reviewed By
+  updatedRow[22] = '';               // W: Reviewed At
+  updatedRow[26] = nextFlag;         // AA: Validation Flag
+  updatedRow[28] = now;              // AC: Last Updated At
+  // Persist the review state in one row write so the core flags cannot be
+  // left partially updated by a sequence of independent cell writes.
+  sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).setValues([updatedRow]);
 
-  pfisAppendChangeOnce('client-review-request:' + (sourceId || requestId) + ':' + transactionId, {
-    transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: 'system_capture',
-    field: 'Client Review Requested', oldValue: String(clientReviewAlreadyPending), newValue: 'true',
-    reason: 'The capture client explicitly deferred interactive review. Existing review reasons and higher-priority validation flags were preserved.',
-    requestId: requestId
-  });
+  const auditEvents = [
+    { field: 'Needs Review', oldValue: String(pfisTruthy(current.needsReview)), newValue: 'true' },
+    { field: 'Review Status', oldValue: pfisString(current.reviewStatus), newValue: 'Pending' },
+    { field: 'Review Reason', oldValue: pfisString(current.reviewReason), newValue: reviewReason },
+    { field: 'Reviewed By', oldValue: pfisString(current.reviewedBy), newValue: '' },
+    { field: 'Reviewed At', oldValue: pfisString(current.reviewedAt), newValue: '' },
+    { field: 'Validation Flag', oldValue: flag, newValue: nextFlag },
+    { field: 'Client Review Requested', oldValue: String(clientReviewAlreadyPending), newValue: 'true' }
+  ];
+  pfisAppendChangeOnceBatch(auditEvents.map(function (event) {
+    return {
+      eventKey: 'client-review-request:' + (sourceId || requestId) + ':' + transactionId + ':' + event.field,
+      change: {
+        transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: 'system_capture',
+        field: event.field, oldValue: event.oldValue, newValue: event.newValue,
+        reason: 'The capture client explicitly deferred interactive review. Existing review reasons and higher-priority validation flags were preserved.',
+        requestId: requestId
+      }
+    };
+  }));
   pfisInvalidateTransactionCache();
   pfisWriteLegacyTransactionAux(rowNumber,
     pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS),
@@ -4495,17 +4513,25 @@ function pfisAcknowledgeClientReview(transactionId, reason, actor, requestId) {
   }
 
   const now = new Date();
-  const updates = [
-    [15, false], [20, 'Approved'], [21, ''], [22, actor], [23, now], [27, 'VALID'], [29, now]
-  ];
-  updates.forEach(function (item) { sheet.getRange(rowNumber, item[0]).setValue(item[1]); });
+  const updatedRow = sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0];
+  updatedRow[14] = false;            // O: Needs Review
+  updatedRow[19] = 'Approved';       // T: Review Status
+  updatedRow[20] = '';               // U: Review Reason
+  updatedRow[21] = actor;            // V: Reviewed By
+  updatedRow[22] = now;              // W: Reviewed At
+  updatedRow[26] = 'VALID';          // AA: Validation Flag
+  updatedRow[28] = now;              // AC: Last Updated At
+  // Keep all financial and source facts untouched; update only the review
+  // lifecycle fields in one contiguous row write.
+  sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).setValues([updatedRow]);
+
   pfisAppendChangeOnceBatch([
-    { field: 'Needs Review', oldValue: 'true', newValue: 'false' },
-    { field: 'Review Status', oldValue: 'Pending', newValue: 'Approved' },
-    { field: 'Review Reason', oldValue: 'client_requested_review', newValue: '' },
+    { field: 'Needs Review', oldValue: String(pfisTruthy(current.needsReview)), newValue: 'false' },
+    { field: 'Review Status', oldValue: pfisString(current.reviewStatus), newValue: 'Approved' },
+    { field: 'Review Reason', oldValue: pfisString(current.reviewReason), newValue: '' },
     { field: 'Reviewed By', oldValue: pfisString(current.reviewedBy), newValue: actor },
     { field: 'Reviewed At', oldValue: pfisString(current.reviewedAt), newValue: now.toISOString() },
-    { field: 'Validation Flag', oldValue: 'NEEDS_REVIEW', newValue: 'VALID' }
+    { field: 'Validation Flag', oldValue: pfisString(current.validationFlag).toUpperCase(), newValue: 'VALID' }
   ].map(function (event) {
     return {
       eventKey: 'client-review-ack:' + transactionId + ':' + requestId + ':' + event.field,

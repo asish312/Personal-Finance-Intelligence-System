@@ -534,7 +534,7 @@ function pfisIngestSource(params, requestId, options) {
   }
 
   const paymentEventMatch = pfisPerfMeasure('card_payment_event_matching', function () {
-    return pfisFindCardPaymentEventMatch(parsed, evidenceText);
+    return pfisFindCardPaymentEventMatch(parsed, evidenceText, sourceType);
   });
   if (paymentEventMatch.status === 'MATCHED') {
     return pfisLinkPaymentEventSource(paymentEventMatch, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult);
@@ -1180,10 +1180,13 @@ function pfisFindCrossChannelMatch(incoming, sourceType, merchant) {
  * issuer. Treat them as corroborating evidence for one settlement only when
  * amount, IST calendar date and issuer agree, and the match is unique.
  */
-function pfisFindCardPaymentEventMatch(incoming, rawEvidence) {
+function pfisFindCardPaymentEventMatch(incoming, rawEvidence, sourceType) {
   if (pfisNormalizeType(incoming.resolvedType || incoming.type) !== 'card_payment') {
     return { status: 'NO_MATCH' };
   }
+  const normalizedSourceType = pfisNormalizeSourceType(sourceType);
+  if (!normalizedSourceType) return { status: 'NO_MATCH' };
+  const otherSourceType = normalizedSourceType === 'SMS' ? 'EMAIL' : 'SMS';
   const incomingIssuer = pfisGetPaymentIssuerKey(rawEvidence, incoming.bank, incoming.merchant, incoming.cardName);
   if (!incomingIssuer) return { status: 'NO_MATCH' };
   const txRows = pfisReadTransactions();
@@ -1194,6 +1197,14 @@ function pfisFindCardPaymentEventMatch(incoming, rawEvidence) {
     if (!pfisSameMoney(existing.amount, incoming.amount)) return;
     if (!pfisSameCalendarDay(existing.dateTime, incoming.datetime)) return;
     const linkedSources = sourceIndex[existing.transactionId] || [];
+    const existingSourceTypes = pfisUnique(linkedSources.map(function (s) { return pfisNormalizeSourceType(s.sourceType); }));
+    // This matcher handles issuer/payment-rail confirmation pairs and repeated
+    // same-channel issuer messages. Existing source evidence is mandatory.
+    if (!existingSourceTypes.length) return;
+    const hasCrossChannelEvidence = existingSourceTypes.indexOf(otherSourceType) >= 0;
+    const isSameChannelIssuerReplay = existingSourceTypes.indexOf(normalizedSourceType) >= 0 &&
+      existingSourceTypes.indexOf(otherSourceType) < 0;
+    if (!hasCrossChannelEvidence && !isSameChannelIssuerReplay) return;
     const existingEvidence = linkedSources.map(function (s) { return s.rawBody || ''; }).join('\n');
     const existingIssuer = pfisGetPaymentIssuerKey(existingEvidence, existing.bank, existing.merchant, existing.cardName);
     if (existingIssuer !== incomingIssuer) return;
@@ -1201,15 +1212,20 @@ function pfisFindCardPaymentEventMatch(incoming, rawEvidence) {
     const accountB = pfisString(incoming.account).toLowerCase();
     const bothCreditCardAccounts = pfisNormalizeAccountType(existing.accountType) === 'creditcard' &&
       pfisNormalizeAccountType(incoming.accountType) === 'creditcard';
-    // References from the wallet/payment rail and issuer are different namespaces.
-    // Compare only when both records are explicit issuer-card account notifications.
+    // References from a wallet/payment rail and issuer are separate namespaces.
+    // Same-channel issuer messages must not contradict two supplied references.
     const existingRef = pfisNormalizeReference(existing.refNo);
     const incomingRef = pfisNormalizeReference(incoming.refNo);
-    if (bothCreditCardAccounts && existingRef && incomingRef && existingRef !== incomingRef) return;
+    if (isSameChannelIssuerReplay && existingRef && incomingRef && existingRef !== incomingRef) return;
     if (bothCreditCardAccounts && accountA && accountB && accountA !== accountB) return;
     if (bothCreditCardAccounts && existing.cardName && incoming.cardName &&
         pfisNormalizeMerchant(existing.cardName) !== pfisNormalizeMerchant(incoming.cardName)) return;
-    candidates.push({ transactionId: existing.transactionId, reason: 'same_card_payment_issuer_amount_day' });
+    candidates.push({
+      transactionId: existing.transactionId,
+      reason: isSameChannelIssuerReplay
+        ? 'same_channel_card_payment_issuer_amount_day'
+        : 'cross_channel_card_payment_issuer_amount_day'
+    });
   });
   const unique = pfisUniqueBy(candidates, 'transactionId');
   if (unique.length === 1) {

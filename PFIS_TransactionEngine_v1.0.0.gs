@@ -1,5 +1,5 @@
 /**
- * Personal Finance Intelligence System (PFIS) — Transaction Engine v1.0.0
+ * Personal Finance Intelligence System (PFIS) — Transaction Engine v1.1.0
  * First documented project release. Includes timezone-safe period bounds, parsed-date sorting/reconciliation,
  * reference-led cross-channel matching, exact same-channel duplicate suppression, card-payment
  * internal-transfer support, configurable amount-rule evidence, logically blank-safe row allocation,
@@ -50,9 +50,9 @@
  * Time zone: Asia/Kolkata
  */
 
-const ENGINE_VERSION = 'v1.0.0';
+const ENGINE_VERSION = 'v1.1.0';
 const SCHEMA_VERSION = 'v1.0.0';
-const PARSER_VERSION = 'v1.0.0';
+const PARSER_VERSION = 'v1.1.0';
 const PFIS_TIME_ZONE = 'Asia/Kolkata';
 const PFIS_MAX_READ_LIMIT = 100;
 const PFIS_MATCH_WINDOW_MS = 5 * 60 * 1000;
@@ -133,6 +133,11 @@ const PFIS_RULE_OPTIONAL_HEADERS = Object.freeze([
 ]);
 const PFIS_RULE_AUTO_PURPOSE_COLUMN = 20; // T
 const PFIS_RULE_AUTO_PURPOSE_HEADER = 'Auto Purpose';
+const PFIS_RULE_PURPOSE_TRIGGER_COLUMN = 21; // U
+const PFIS_RULE_PURPOSE_TRIGGER_HEADER = 'Purpose Trigger';
+const PFIS_RULE_CALENDAR_SCOPE_COLUMN = 22; // V
+const PFIS_RULE_CALENDAR_SCOPE_HEADER = 'Calendar Scope';
+const PFIS_HOLIDAY_CALENDAR_SHEET = 'Holiday Calendar';
 const PFIS_AUX_TX_COLUMNS = Object.freeze({ flowDirection: 38, auditTrail: 39 });
 const PFIS_AUDIT_TRAIL_MAX_CHARS = 1800;
 
@@ -175,6 +180,7 @@ var PFIS_RUNTIME_TRANSACTION_CACHE = null;
 var PFIS_RUNTIME_CATEGORY_CACHE = null;
 var PFIS_RUNTIME_RULE_CACHE = null;
 var PFIS_RUNTIME_CONFIG_CACHE = null;
+var PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
 var PFIS_PERF_CONTEXT = null;
 
 // -----------------------------------------------------------------------------
@@ -247,6 +253,7 @@ function pfisRouteRequest(input, method) {
   PFIS_RUNTIME_CATEGORY_CACHE = null;
   PFIS_RUNTIME_RULE_CACHE = null;
   PFIS_RUNTIME_CONFIG_CACHE = null;
+  PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
 
   try {
     pfisPerfMeasure('authorization', function () { return pfisAuthorize(params); });
@@ -506,8 +513,14 @@ function pfisIngestSource(params, requestId, options) {
   }
   parsed.rawEvidence = evidenceText;
   parsed.accountIdentifier = pfisExtractAccountIdentifier(evidenceText);
+  // An internal midnight value is not a real timestamp unless the original
+  // notification contains a clock time. Downgrade it before matching/logging.
+  pfisNormalizeSourceDatePrecision(parsed, evidenceText);
   const ruleResult = pfisPerfMeasure('rules_evaluation', function () { return pfisEvaluateRules(parsed, evidenceText); });
   const configResult = pfisPerfMeasure('config_resolution', function () { return pfisResolveConfig(parsed, evidenceText); });
+  parsed.account = pfisCleanText(ruleResult.accountOverride || configResult.account);
+  parsed.cardName = pfisCleanText(ruleResult.cardNameOverride || configResult.cardName);
+  parsed.resolvedType = pfisNormalizeType(ruleResult.typeOverride || parsed.type);
   const canonicalMerchant = pfisCleanText(ruleResult.merchantOverride || parsed.merchant);
   parsed.canonicalMerchant = canonicalMerchant;
 
@@ -595,25 +608,97 @@ function pfisIngestSource(params, requestId, options) {
  * TRUE and the matched rule supplies a meaningful purpose. Recurrence alone is
  * not permission to infer the purpose of an individual payment.
  */
-function pfisGetTrustedPurposeFromRule(ruleResult, merchant) {
-  if (!ruleResult || !pfisTruthy(ruleResult.autoPurpose)) return '';
+function pfisGetTrustedPurposeFromRule(ruleResult, merchant, transactionDate) {
+  if (!ruleResult) return '';
+  const trigger = pfisString(ruleResult.purposeTrigger).toUpperCase();
+  const triggerSatisfied = trigger === 'LAST_WORKING_DAY_OF_MONTH' &&
+    pfisIsLastWorkingDayOfMonth(transactionDate, ruleResult.calendarScope);
+  if (!pfisTruthy(ruleResult.autoPurpose) && !triggerSatisfied) return '';
   const purpose = pfisCleanText(ruleResult.notes);
   return pfisIsMeaningfulPurpose(purpose, merchant) ? purpose : '';
+}
+
+/**
+ * Tests the transaction's own calendar date, never the request-arrival/current date.
+ * Saturday/Sunday are non-working by default. Optional Holiday Calendar rows can
+ * override dates per scope (e.g. HCL) or globally (ALL).
+ *
+ * Holiday Calendar headers: Date | Calendar Scope | Is Working Day | Description
+ */
+function pfisGetHolidayCalendarOverrides() {
+  if (PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE !== null) return PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE;
+  const overrides = Object.create(null);
+  const sheet = pfisGetSpreadsheet().getSheetByName(PFIS_HOLIDAY_CALENDAR_SHEET);
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 3) {
+    PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = overrides;
+    return overrides;
+  }
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0].map(pfisHeaderToken);
+  const dateIndex = headers.indexOf('date');
+  const scopeIndex = headers.indexOf('calendarscope');
+  const workingIndex = headers.indexOf('isworkingday');
+  if (dateIndex < 0 || workingIndex < 0) {
+    console.warn('Holiday Calendar ignored: Date and Is Working Day headers are required.');
+    PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = overrides;
+    return overrides;
+  }
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  rows.forEach(function (row) {
+    const date = pfisParseDateValue(row[dateIndex]);
+    if (!date) return;
+    const dateKey = Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy-MM-dd');
+    const scope = scopeIndex >= 0 ? (pfisString(row[scopeIndex]).toUpperCase() || 'ALL') : 'ALL';
+    overrides[dateKey + '|' + scope] = pfisTruthy(row[workingIndex]);
+  });
+  PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = overrides;
+  return overrides;
+}
+
+function pfisIsCalendarWorkingDay(dateValue, calendarScope) {
+  const date = pfisParseDateValue(dateValue);
+  if (!date) return false;
+  const dateKey = Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy-MM-dd');
+  const scope = pfisString(calendarScope).toUpperCase() || 'ALL';
+  const overrides = pfisGetHolidayCalendarOverrides();
+  const scopedKey = dateKey + '|' + scope;
+  const allKey = dateKey + '|ALL';
+  if (Object.prototype.hasOwnProperty.call(overrides, scopedKey)) return overrides[scopedKey];
+  if (Object.prototype.hasOwnProperty.call(overrides, allKey)) return overrides[allKey];
+  const isoDay = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'u'));
+  return isoDay >= 1 && isoDay <= 5;
+}
+
+function pfisIsLastWorkingDayOfMonth(dateValue, calendarScope) {
+  const date = pfisParseDateValue(dateValue);
+  if (!date || !pfisIsCalendarWorkingDay(date, calendarScope)) return false;
+  const year = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy'));
+  const month = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'M'));
+  const day = Number(Utilities.formatDate(date, PFIS_TIME_ZONE, 'd'));
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  for (let nextDay = day + 1; nextDay <= daysInMonth; nextDay++) {
+    const candidate = pfisCreateIndiaDate(year, month, nextDay, 12, 0, 0);
+    if (pfisIsCalendarWorkingDay(candidate, calendarScope)) return false;
+  }
+  return true;
 }
 
 function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceId, sourceHash,
   ruleResult, configResult, reviewReason, duplicate) {
   const now = new Date();
   const type = pfisNormalizeType(ruleResult.typeOverride || parsed.type);
-  const category = pfisGetCategoryList().indexOf(ruleResult.category) >= 0 ? ruleResult.category : '';
+  const categories = pfisGetCategoryList();
+  const configuredCategory = pfisCleanText(ruleResult.category);
+  const category = categories.indexOf(configuredCategory) >= 0
+    ? configuredCategory
+    : (categories.indexOf('Miscellaneous') >= 0 ? 'Miscellaneous' : '');
   // Only a matched rule with Auto Purpose=TRUE may prefill User Notes.
   // Recurrence alone does not establish a purpose; otherwise keep it blank.
   // Frontend/model enrichment is saved only through the explicit update action.
-  const userNotes = pfisGetTrustedPurposeFromRule(ruleResult, ruleResult.merchantOverride || parsed.merchant);
-  // Keep review state consistent with enrichment: a new row missing category or
-  // purpose is retained immediately, but is not treated as complete/approved.
-  // A duplicate/conflict/type/merchant problem takes precedence over enrichment.
-  const enrichmentMissing = !category || !pfisIsMeaningfulPurpose(userNotes, ruleResult.merchantOverride || parsed.merchant);
+  const userNotes = pfisGetTrustedPurposeFromRule(
+    ruleResult, ruleResult.merchantOverride || parsed.merchant, parsed.datetime);
+  // Purpose is optional. Only an unresolved category is an enrichment gap;
+  // an active Miscellaneous fallback is a valid, auditable category.
+  const enrichmentMissing = !category;
   const accountOverrideResolvesConfig = !!pfisCleanText(ruleResult.accountOverride);
   const configReviewReason = configResult && configResult.ambiguous ? 'config_mapping_ambiguous' :
     (configResult && configResult.unresolved && !accountOverrideResolvesConfig ? 'config_mapping_unresolved' : '');
@@ -1989,8 +2074,11 @@ function pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, con
     ['type', pfisNormalizeType(ruleResult.typeOverride || parsed.type)],
     ['account', pfisCleanText(ruleResult.accountOverride || configResult.account)],
     ['cardName', pfisCleanText(ruleResult.cardNameOverride || configResult.cardName)],
-    ['category', activeCategories.indexOf(pfisCleanText(ruleResult.category)) >= 0 ? pfisCleanText(ruleResult.category) : ''],
-    ['userNotes', pfisGetTrustedPurposeFromRule(ruleResult, ruleResult.merchantOverride || parsed.merchant)]
+    ['category', activeCategories.indexOf(pfisCleanText(ruleResult.category)) >= 0
+      ? pfisCleanText(ruleResult.category)
+      : (activeCategories.indexOf('Miscellaneous') >= 0 ? 'Miscellaneous' : '')],
+    ['userNotes', pfisGetTrustedPurposeFromRule(
+      ruleResult, ruleResult.merchantOverride || parsed.merchant, parsed.datetime)]
   ];
   fieldsToFill.forEach(function (item) {
     const col = PFIS_TX_FIELDS.indexOf(item[0]) + 1;
@@ -2292,6 +2380,8 @@ function pfisEvaluateRules(parsed, rawEvidence) {
     // Auto Review, Rule Engine and free-form Notes remain informational until
     // their business meaning is explicitly defined; they never bypass validation.
     autoReview: pfisTruthy(rule.autoReview),
+    purposeTrigger: pfisString(rule.purposeTrigger).toUpperCase(),
+    calendarScope: pfisString(rule.calendarScope).toUpperCase(),
     ruleEngine: pfisCleanText(rule.ruleEngine),
     notesMetadata: notesMetadata
   };
@@ -2347,7 +2437,7 @@ function pfisEmptyRuleResult() {
     ruleApplied: '', ruleType: '', category: '', merchantOverride: '', notes: '',
     isRecurring: false, typeOverride: '', accountOverride: '', cardNameOverride: '',
     instrumentOverride: '', confidence: null, autoReview: false, autoPurpose: false,
-    ruleEngine: '', notesMetadata: ''
+    purposeTrigger: '', calendarScope: '', ruleEngine: '', notesMetadata: ''
   };
 }
 
@@ -2387,6 +2477,29 @@ function pfisGetRuleRows() {
     ? sheet.getRange(2, PFIS_RULE_AUTO_PURPOSE_COLUMN, baseRows.length, 1).getValues()
     : [];
 
+  // U: Purpose Trigger and V: Calendar Scope are independent optional extensions.
+  // They are opt-in and do not alter existing A:T workbooks.
+  const purposeTriggerHeader = sheet.getLastColumn() >= PFIS_RULE_PURPOSE_TRIGGER_COLUMN
+    ? pfisString(sheet.getRange(1, PFIS_RULE_PURPOSE_TRIGGER_COLUMN).getDisplayValue()) : '';
+  const usePurposeTrigger = pfisHeaderToken(purposeTriggerHeader) === pfisHeaderToken(PFIS_RULE_PURPOSE_TRIGGER_HEADER);
+  const purposeTriggerValues = usePurposeTrigger && baseRows.length
+    ? sheet.getRange(2, PFIS_RULE_PURPOSE_TRIGGER_COLUMN, baseRows.length, 1).getDisplayValues()
+    : [];
+
+  const calendarScopeHeader = sheet.getLastColumn() >= PFIS_RULE_CALENDAR_SCOPE_COLUMN
+    ? pfisString(sheet.getRange(1, PFIS_RULE_CALENDAR_SCOPE_COLUMN).getDisplayValue()) : '';
+  const useCalendarScope = pfisHeaderToken(calendarScopeHeader) === pfisHeaderToken(PFIS_RULE_CALENDAR_SCOPE_HEADER);
+  const calendarScopeValues = useCalendarScope && baseRows.length
+    ? sheet.getRange(2, PFIS_RULE_CALENDAR_SCOPE_COLUMN, baseRows.length, 1).getDisplayValues()
+    : [];
+
+  if (purposeTriggerHeader && !usePurposeTrigger) {
+    console.warn('Rules!U ignored because its header is not exactly "Purpose Trigger".');
+  }
+  if (calendarScopeHeader && !useCalendarScope) {
+    console.warn('Rules!V ignored because its header is not exactly "Calendar Scope".');
+  }
+
   const mappedRows = baseRows.map(function (row, i) {
     const obj = pfisObjectFromRow(row, PFIS_RULE_FIELDS);
     if (useOptional) {
@@ -2395,6 +2508,8 @@ function pfisGetRuleRows() {
       PFIS_RULE_OPTIONAL_FIELDS.forEach(function (field) { obj[field] = ''; });
     }
     obj.autoPurpose = useAutoPurpose ? pfisTruthy(autoPurposeValues[i][0]) : false;
+    obj.purposeTrigger = usePurposeTrigger ? pfisString(purposeTriggerValues[i][0]).toUpperCase() : '';
+    obj.calendarScope = useCalendarScope ? pfisString(calendarScopeValues[i][0]).toUpperCase() : '';
     obj.rowNumber = i + 2;
     return obj;
   });
@@ -2559,6 +2674,16 @@ function pfisApplyNotesTemplate(template, dateValue, monthOffset) {
 // -----------------------------------------------------------------------------
 // Date/amount/input normalization
 // -----------------------------------------------------------------------------
+
+function pfisNormalizeSourceDatePrecision(parsed, evidenceText) {
+  if (!parsed || !(parsed.datetime instanceof Date) || parsed.datePrecision !== 'DATETIME') return parsed;
+  const time = Utilities.formatDate(parsed.datetime, PFIS_TIME_ZONE, 'HH:mm:ss');
+  const raw = String(evidenceText || '');
+  const hasClockTime = /\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(raw) ||
+    /\b\d{1,2}\s*(?:AM|PM)\b/i.test(raw);
+  if (time === '00:00:00' && !hasClockTime) parsed.datePrecision = 'DATE_ONLY';
+  return parsed;
+}
 
 function pfisParseTxnString(raw) {
   if (typeof raw !== 'string') return null;

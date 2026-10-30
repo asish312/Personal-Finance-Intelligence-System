@@ -1,5 +1,5 @@
 /**
- * PFIS Transaction Engine v1.0.0 — bounded preflight / regression harness
+ * PFIS Transaction Engine v1.1.0 — bounded preflight / regression harness
  *
  * INSTALLATION
  * 1. Add this file to the SAME Apps Script project as the updated PFIS Transaction Engine source file.
@@ -153,6 +153,16 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       return 'yyyy-MM-dd accepted and marked DATE_ONLY; zero time is internal storage only, not source precision';
     }, startedAt);
 
+    pfisPreflightRunCase_(report, 'Midnight timestamps are downgraded when raw source has no clock time', function () {
+      var dateOnly = { datetime: pfisCreateIndiaDate(2026, 10, 30, 0, 0, 0), datePrecision: 'DATETIME' };
+      pfisNormalizeSourceDatePrecision(dateOnly, 'Transaction date 30-10-2026');
+      pfisPreflightAssert_(dateOnly.datePrecision === 'DATE_ONLY', 'A synthetic midnight was retained as DATETIME.');
+      var actualTime = { datetime: pfisCreateIndiaDate(2026, 10, 30, 6, 45, 43), datePrecision: 'DATETIME' };
+      pfisNormalizeSourceDatePrecision(actualTime, 'Date & Time: 30-10-26, 06:45:43 IST');
+      pfisPreflightAssert_(actualTime.datePrecision === 'DATETIME', 'An explicit source clock time was downgraded.');
+      return 'No-clock midnight => DATE_ONLY; real source clock time remains DATETIME';
+    }, startedAt);
+
     pfisPreflightRunCase_(report, 'Invalid calendar date rejection', function () {
       pfisPreflightAssert_(pfisParseInputDate('31/02/2026 10:00:00') === null, '31 February should be rejected.');
       return 'Invalid date rejected';
@@ -303,13 +313,13 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       pfisPreflightAssert_(result.typeOverride === '' && result.accountOverride === '' && result.cardNameOverride === '',
         'Amount-specific type/account/card override leaked into fallback.');
       var state = pfisGetEnrichmentState(result.category, '', ['Food & Dining', 'Transport', 'Bills & subscription'], 'Test Merchant');
-      pfisPreflightAssert_(state.requiresCategoryClassification === false && state.requiresPurpose === true,
-        'Fallback must satisfy category while still requiring purpose.');
+      pfisPreflightAssert_(state.requiresCategoryClassification === false && state.requiresPurpose === false,
+        'Missing purpose must not be a required enrichment field.');
       pfisPreflightAssert_(pfisRecommendNextAction('ACCEPTED', {
-        category: result.category, userNotes: '', merchant: 'Test Merchant', needsReview: true,
-        reviewReason: 'enrichment_required'
-      }, state) === 'ASK_PURPOSE', 'A known category with missing purpose must route to ASK_PURPOSE.');
-      return 'Amount mismatch retained category and canonical merchant only; purpose remains required';
+        category: result.category, userNotes: '', merchant: 'Test Merchant', needsReview: false,
+        reviewReason: ''
+      }, state) === 'SHOW_RECEIPT', 'A known category with blank purpose must not open a purpose prompt.');
+      return 'Amount mismatch retained category; blank purpose is optional and does not block receipt';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Conflicting merchant category evidence fails closed', function () {
@@ -706,7 +716,8 @@ function pfisPreflightSetupWorkbook_(spreadsheet) {
   var first = spreadsheet.getSheets()[0];
   first.setName(PFIS_SHEETS.transactions);
 
-  var txHeaders = PFIS_TX_HEADERS.concat(PFIS_LEGACY_TX_HEADERS).concat(['Flow Direction', 'Audit Trail']);
+  var txHeaders = PFIS_TX_HEADERS.concat(PFIS_LEGACY_TX_HEADERS)
+    .concat(['Flow Direction', 'Audit Trail', 'Budget Month', 'Income Month']);
   var sourceHeaders = PFIS_SOURCE_HEADERS.slice();
   var changeHeaders = PFIS_CHANGE_HEADERS.slice();
   var ruleHeaders = PFIS_RULE_HEADERS.concat(PFIS_RULE_OPTIONAL_HEADERS);
@@ -718,12 +729,19 @@ function pfisPreflightSetupWorkbook_(spreadsheet) {
   pfisPreflightWriteHeaders_(spreadsheet.insertSheet(PFIS_SHEETS.changes), changeHeaders);
   var rulesSheet = spreadsheet.insertSheet(PFIS_SHEETS.rules);
   pfisPreflightWriteHeaders_(rulesSheet, ruleHeaders);
-  // Auto Purpose is a separate optional T column, not part of the N:S extension.
+  // T:W are independent optional rule extensions.
   rulesSheet.getRange(1, PFIS_RULE_AUTO_PURPOSE_COLUMN).setValue(PFIS_RULE_AUTO_PURPOSE_HEADER);
+  rulesSheet.getRange(1, PFIS_RULE_PURPOSE_TRIGGER_COLUMN, 1, 3).setValues([[
+    PFIS_RULE_PURPOSE_TRIGGER_HEADER, PFIS_RULE_CALENDAR_SCOPE_HEADER, 'Budget Month Offset'
+  ]]);
   var configSheet = spreadsheet.insertSheet(PFIS_SHEETS.config);
   pfisPreflightWriteHeaders_(configSheet, configHeaders);
   var categoriesSheet = spreadsheet.insertSheet(PFIS_SHEETS.categories);
   pfisPreflightWriteHeaders_(categoriesSheet, categoryHeaders);
+  var archiveSheet = spreadsheet.insertSheet('Rejected & Archive Log');
+  pfisPreflightWriteHeaders_(archiveSheet, txHeaders);
+  var holidaySheet = spreadsheet.insertSheet(PFIS_HOLIDAY_CALENDAR_SHEET);
+  pfisPreflightWriteHeaders_(holidaySheet, ['Date', 'Calendar Scope', 'Is Working Day', 'Description']);
 
   // One deterministic, explicitly synthetic Rule row. N:S match the optional extension contract.
   rulesSheet.getRange(2, 1, 1, ruleHeaders.length).setValues([[
@@ -738,10 +756,11 @@ function pfisPreflightSetupWorkbook_(spreadsheet) {
     'Axis Bank', 'Savings Account', '', '', 'AXIS_SAVINGS', '', 'UPI', false, 1, 'Test Merchant'
   ]]);
 
-  categoriesSheet.getRange(2, 1, 3, 2).setValues([
+  categoriesSheet.getRange(2, 1, 4, 2).setValues([
     ['Food & Dining', true],
     ['Transport', true],
-    ['Bills & subscription', true]
+    ['Bills & subscription', true],
+    ['Miscellaneous', true]
   ]);
   SpreadsheetApp.flush();
 }

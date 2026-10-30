@@ -518,6 +518,33 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         return 'Wallet and ICICI issuer confirmations retained as source evidence linked to one card-payment ledger event';
       }, startedAt);
 
+      pfisPreflightRunCase_(report, 'Same-channel issuer receipt links when one reference is absent', function () {
+        var before = pfisPreflightCountNonblankKeys_(txSheet, 1);
+        var firstTxn = '03/10/2026|-1500.00|SBI Card|Credit Card|Credit Card|card_payment|SBI Credit Card Payment|SBI Card|NA|NA';
+        var firstText = 'SBI Card SMS: We have received your payment of INR 1500.00 via UPI towards your credit card on 03/10/2026.';
+        var first = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: firstTxn, originalText: firstText,
+          sender: 'PFIS TEST SBI SMS', requestId: 'PFIS-TEST-SBI-CARD-FIRST'
+        }), 'POST');
+        pfisPreflightAssert_(first && first.success && first.status === 'ACCEPTED',
+          'First SBI card payment notification failed: ' + JSON.stringify(first));
+        var secondTxn = '03/10/2026|-1500.00|SBI Card|Credit Card|Credit Card|card_payment|SBI Credit Card Payment|SBI Card|SBIRECEIPT1500|NA';
+        var secondText = 'SBI Card SMS: Payment of INR 1500.00 has been credited to your SBI Card account on 03/10/2026. Reference SBIRECEIPT1500.';
+        var second = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: secondTxn, originalText: secondText,
+          sender: 'PFIS TEST SBI SMS', requestId: 'PFIS-TEST-SBI-CARD-SECOND'
+        }), 'POST');
+        pfisPreflightAssert_(second && second.success && second.status === 'RECONCILED',
+          'Same-channel card issuer messages did not reconcile: ' + JSON.stringify(second));
+        pfisPreflightAssert_(second.transactionId === first.transactionId,
+          'Same-channel issuer receipt did not link to the first payment event.');
+        pfisPreflightAssert_(second.transactionInserted === false,
+          'Same-channel issuer acknowledgement created another canonical row.');
+        pfisPreflightAssert_(pfisPreflightCountNonblankKeys_(txSheet, 1) === before + 1,
+          'Expected one canonical row for two same-channel issuer notifications.');
+        return 'Same issuer + card account + amount + date + unique candidate linked when only one reference was provided';
+      }, startedAt);
+
       pfisPreflightRunCase_(report, 'Exact SMS replay is idempotent', function () {
         var before = pfisPreflightCountNonblankKeys_(txSheet, 1);
         var sourcesBefore = pfisPreflightCountPrefixedKeys_(sourceSheet, 1, 'SRC-');
@@ -797,7 +824,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         return 'Error written to Source Log and Change Log; no transaction inserted; retry lookup remains available';
       }, startedAt);
 
-      pfisPreflightRunCase_(report, 'Purpose suggestion is returned to Shortcut and enrichment queue', function () {
+      pfisPreflightRunCase_(report, 'Blank purpose is optional and is not queued', function () {
         var suggestionTxnString = '02/10/2026 10:00:00|-126.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRPREFILL126|';
         var suggestionBody = 'PFIS synthetic purchase for purpose-prefill test: INR 126 at Test Merchant on 02/10/2026 10:00:00. Ref UTRPREFILL126.';
         var response = pfisRouteRequest(pfisPreflightParams_(testToken, {

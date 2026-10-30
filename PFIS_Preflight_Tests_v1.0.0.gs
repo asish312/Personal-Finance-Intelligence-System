@@ -300,15 +300,15 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       return 'Rules!T controls explicit purpose autofill; amount-mismatch fallback inherits category only';
     }, startedAt);
 
-    pfisPreflightRunCase_(report, 'HCL salary purpose is triggered by the transaction date last working day', function () {
+    pfisPreflightRunCase_(report, 'Example Employer salary purpose is triggered by the transaction date last working day', function () {
       var before = rulesSheet.getRange(2, 7, 1, 17).getValues()[0];
       var transactionDate = pfisCreateIndiaDate(2026, 10, 30, 2, 34, 29);
       try {
-        rulesSheet.getRange(2, 7).setValue('Salary from HCL for {{monthLabel}}');
+        rulesSheet.getRange(2, 7).setValue('Salary from Example Employer for {{monthLabel}}');
         rulesSheet.getRange(2, 8).setValue(0);
         rulesSheet.getRange(2, PFIS_RULE_AUTO_PURPOSE_COLUMN).setValue(false);
         rulesSheet.getRange(2, PFIS_RULE_PURPOSE_TRIGGER_COLUMN, 1, 3)
-          .setValues([['LAST_WORKING_DAY_OF_MONTH', 'HCL', 1]]);
+          .setValues([['LAST_WORKING_DAY_OF_MONTH', 'EMPLOYER_DEMO', 1]]);
         PFIS_RUNTIME_RULE_CACHE = null;
         var parsed = {
           datetime: transactionDate, datePrecision: 'DATETIME', amount: -125,
@@ -316,21 +316,21 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           type: 'expense', merchant: 'Test Merchant', counterparty: 'Test Merchant',
           refNo: 'UTRHCLSALARYTEST', balanceAfter: ''
         };
-        var result = pfisEvaluateRules(parsed, 'HCL payroll notification at Test Merchant on 30/10/2026 02:34:29.');
+        var result = pfisEvaluateRules(parsed, 'Example Employer payroll notification at Test Merchant on 30/10/2026 02:34:29.');
         pfisPreflightAssert_(result.autoPurpose === false, 'The test must prove the working-day trigger works with Auto Purpose FALSE.');
-        pfisPreflightAssert_(result.notes === 'Salary from HCL for Oct-26', 'Salary description used the wrong month: ' + result.notes);
-        pfisPreflightAssert_(result.budgetMonthOffset === 1, 'HCL salary should allocate to next month.');
-        pfisPreflightAssert_(pfisGetTrustedPurposeFromRule(result, 'Test Merchant', transactionDate) === 'Salary from HCL for Oct-26',
+        pfisPreflightAssert_(result.notes === 'Salary from Example Employer for Oct-26', 'Salary description used the wrong month: ' + result.notes);
+        pfisPreflightAssert_(result.budgetMonthOffset === 1, 'Example Employer salary should allocate to next month.');
+        pfisPreflightAssert_(pfisGetTrustedPurposeFromRule(result, 'Test Merchant', transactionDate) === 'Salary from Example Employer for Oct-26',
           'Last-working-day trigger did not authorize the salary purpose.');
-        pfisPreflightAssert_(!pfisIsLastWorkingDayOfMonth(pfisCreateIndiaDate(2026, 10, 29, 12, 0, 0), 'HCL'),
+        pfisPreflightAssert_(!pfisIsLastWorkingDayOfMonth(pfisCreateIndiaDate(2026, 10, 29, 12, 0, 0), 'EMPLOYER_DEMO'),
           '29 October should not be last working day while 30 October is a weekday.');
         holidaySheet.getRange(2, 1, 1, 4).setValues([[
-          pfisCreateIndiaDate(2026, 10, 30, 12, 0, 0), 'HCL', false, 'Synthetic HCL holiday override'
+          pfisCreateIndiaDate(2026, 10, 30, 12, 0, 0), 'EMPLOYER_DEMO', false, 'Synthetic Example Employer holiday override'
         ]]);
         PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
-        pfisPreflightAssert_(!pfisIsLastWorkingDayOfMonth(transactionDate, 'HCL'),
-          'The HCL-specific holiday override should make 30 October non-working.');
-        pfisPreflightAssert_(pfisIsLastWorkingDayOfMonth(pfisCreateIndiaDate(2026, 10, 29, 12, 0, 0), 'HCL'),
+        pfisPreflightAssert_(!pfisIsLastWorkingDayOfMonth(transactionDate, 'EMPLOYER_DEMO'),
+          'The employer-specific holiday override should make 30 October non-working.');
+        pfisPreflightAssert_(pfisIsLastWorkingDayOfMonth(pfisCreateIndiaDate(2026, 10, 29, 12, 0, 0), 'EMPLOYER_DEMO'),
           '29 October should become the last working day after the holiday override.');
         holidaySheet.getRange(2, 1, 1, 4).clearContent();
         PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
@@ -341,7 +341,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         PFIS_RUNTIME_RULE_CACHE = null;
         PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
       }
-      return 'Transaction date controls earned-month purpose; HCL working-day calendar controls trigger; Budget Month +1 allocates to November';
+      return 'Transaction date controls earned-month purpose; Example Employer working-day calendar controls trigger; Budget Month +1 allocates to November';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Blank purpose and missing category are non-blocking', function () {

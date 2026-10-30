@@ -2429,7 +2429,7 @@ function PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS() {
           const source = sourceById[sourceId];
           return !!source &&
             source.transactionId === transactionId &&
-            ['SUPERSEDED', 'PARSE_FAILED', 'CONFLICT'].indexOf(source.status) < 0;
+            ['ACCEPTED', 'RECONCILED'].indexOf(source.status) >= 0;
         })) {
           return block('Evidence Source ID must be active, non-conflicting evidence linked to the specified canonical transaction.');
         }

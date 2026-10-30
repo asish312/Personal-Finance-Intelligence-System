@@ -269,6 +269,40 @@ The objective is not to automate every judgement. It is to automate repeatable w
 
 ---
 
+## Daily Purpose enrichment: where Gemini fits
+
+Purpose is optional at transaction capture time. Apps Script does not ask for it, and a blank Purpose does not block a valid receipt. A trusted rule can still populate Purpose immediately through Auto Purpose or a configured working-day trigger.
+
+For eligible transactions where Purpose remains blank, Gemini can run a separate daily Task:
+
+```mermaid
+flowchart TD
+  A["Transaction Log: recent blank Purpose"] --> C["Gemini daily Task"]
+  B["Source Log: linked bank evidence"] --> C
+  C --> D["Purpose Review Queue: SUGGESTED"]
+  D --> E{"Human checks original evidence"}
+  E -->|"Reject / unclear"| F["REJECTED / NEEDS_MORE_EVIDENCE"]
+  E -->|"Approve"| G["APPROVED + reviewer + date"]
+  G --> H["PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS()"]
+  H --> I["Transaction Log: Purpose updated"]
+  I --> J["Change Log: audited update"]
+```
+
+Gemini writes suggestions to **Purpose Review Queue**, never directly to Transaction Log. It should suggest only a short factual description directly supported by the original notification, include the linked Source ID, and skip ambiguous merchants or weak evidence. It must not invent a personal reason for a payment or overwrite an existing Purpose.
+
+A human reviewer checks the Source Log evidence and changes the queue status to APPROVED with Reviewed By and Reviewed At populated. The engine's `PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS()` function verifies the transaction/source link, confirms Purpose is still blank, blocks unresolved duplicate/source-conflict rows, then applies the update through the normal audited update pipeline. An optional Apps Script time-driven trigger can run this function periodically; it applies approved suggestions only and never approves them.
+
+**Gemini is not an Apps Script runtime dependency.** This is an owner-configured Gemini Task using connected Google Sheets. Its availability depends on account/plan/settings. Google currently documents scheduled Tasks, Google Sheets actions, and review/confirmation for edits to shared spreadsheets. A scheduled task is therefore not guaranteed to be a fully unattended write in every account/workbook setup. Check the connected-app permissions and confirm the Task can append to Purpose Review Queue before relying on it.
+
+Purpose behaviour, queue headers, daily schedule prompt and approval flow are documented in:
+- [Daily Gemini Purpose Enrichment](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Gemini_Purpose_Enrichment_v1.0.0.md)
+- [End-to-End Operating Guide](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Operating_Guide_v1.0.0.md)
+- [Gemini Spreadsheet Implementation Guide](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Gemini_Spreadsheet_Implementation_v1.0.0.md)
+
+More about Gemini Tasks: [Schedules](https://support.google.com/gemini/answer/17094710) · [Workspace actions, including Sheets](https://support.google.com/gemini/answer/17094507) · [Connect Google Workspace](https://support.google.com/gemini/answer/15229592)
+
+---
+
 ## Under the hood
 
 The production engine is a Google Apps Script Web App. iOS Shortcuts is the source collection/enrichment client, Google Sheets stores the canonical records and configuration, and the engine provides ingestion, reconciliation, read operations and controlled updates.
@@ -306,7 +340,7 @@ flowchart TD
 | Config | Bank/account/card/instrument resolution |
 | Categories | Active classification vocabulary |
 
-Additional views such as Recent Transactions, Monthly Summary, Dashboard, Dashboard_Calc, Insights & Data Quality, Reports, Data Dictionary, PFIS System Guide, Card Reconciliation Log, Rejected & Archive Log, Holiday Calendar and Savings Sweep Log belong to the wider workbook/reporting layer.
+Additional views such as Recent Transactions, Monthly Summary, Dashboard, Dashboard_Calc, Insights & Data Quality, Reports, Data Dictionary, PFIS System Guide, Card Reconciliation Log, Rejected & Archive Log, Holiday Calendar, Purpose Review Queue and Savings Sweep Log belong to the wider workbook/reporting layer.
 
 ### API actions
 
@@ -318,10 +352,19 @@ The `getdataquality` metrics are nested under `response.data`. Its `missingPurpo
 
 The write actions include `ingest`, `update`, `reprocesssource` and `resolveexception`. Duplicate resolution supports `CONFIRM_DISTINCT` or `CONFIRM_DUPLICATE` with a surviving `duplicateOf` ID and a human reason.
 
-### Source files and implementation references
+### Source files and operating documentation
 
+**Production and integration**
 - [Production Transaction Engine](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_TransactionEngine_v1.0.0.gs)
 - [Preflight regression harness](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Preflight_Tests_v1.0.0.gs)
+- [iOS Shortcut implementation](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Shortcut_Implementation_v1.0.0.txt)
+- [Extraction and category prompts](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Prompts_Final_v1.0.0_Prompts.txt)
+
+**How to operate and configure**
+- [End-to-End Operating Guide](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Operating_Guide_v1.0.0.md)
+- [Daily Gemini Purpose Enrichment](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Gemini_Purpose_Enrichment_v1.0.0.md)
+- [Gemini Spreadsheet Implementation Guide](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Gemini_Spreadsheet_Implementation_v1.0.0.md)
+- [Current maintainer notes](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/REVIEW_NOTES.md)
 - [All README illustrations](https://github.com/asish312/Personal-Finance-Intelligence-System/tree/main/docs/images)
 
 ### Technical contract
@@ -338,7 +381,7 @@ The required Script Property is `SPREADSHEET_ID`. `WEB_APP_SECRET` is optional; 
 
 **PFIS production engine: v1.0.0** · Google Apps Script + Google Sheets.
 
-The engine owns deterministic transaction processing and its supported API contracts. The workbook owns dashboard formulas, reporting presentation, budget planning and savings-sweep reconciliation. iOS Shortcuts owns source capture and any client-side enrichment. A visual mockup in this README is not proof that a corresponding live chart or workbook workflow has already been deployed.
+The engine owns deterministic transaction processing and its supported API contracts. The workbook owns dashboard formulas, reporting presentation, budget planning, Purpose Review Queue and savings-sweep reconciliation. iOS Shortcuts owns source capture and transaction extraction/category fallback. Gemini Tasks can provide scheduled Purpose suggestions to the separate review queue, while Gemini in Sheets can assist with workbook authoring; neither is called by the Apps Script runtime. A visual mockup in this README is not proof that a corresponding live chart or workbook workflow has already been deployed.
 
 ---
 

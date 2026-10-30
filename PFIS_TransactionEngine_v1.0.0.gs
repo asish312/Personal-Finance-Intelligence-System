@@ -532,6 +532,16 @@ function pfisIngestSource(params, requestId, options) {
     return pfisRecordSourceConflict(crossMatch, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult);
   }
 
+  const paymentEventMatch = pfisPerfMeasure('card_payment_event_matching', function () {
+    return pfisFindCardPaymentEventMatch(parsed, evidenceText);
+  });
+  if (paymentEventMatch.status === 'MATCHED') {
+    return pfisLinkPaymentEventSource(paymentEventMatch, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult);
+  }
+  if (paymentEventMatch.status === 'CONFLICT') {
+    return pfisRecordSourceConflict(paymentEventMatch, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult);
+  }
+
   const duplicate = pfisPerfMeasure('same_channel_duplicate_matching', function () { return pfisFindSameChannelDuplicate(parsed, sourceType, canonicalMerchant); });
   // A high-confidence same-channel duplicate must not create a second canonical
   // Transaction Log row. Keep the incoming message in Source Log, link it to the
@@ -1162,6 +1172,90 @@ function pfisFindCrossChannelMatch(incoming, sourceType, merchant) {
   return { status: 'NO_MATCH', timePrecisionCandidate: timeCandidates.length === 1, timePrecisionCandidateIds: timeCandidates };
 }
 
+/**
+ * Card payment notifications may come from the wallet/payment rail and from the
+ * issuer. Treat them as corroborating evidence for one settlement only when
+ * amount, IST calendar date and issuer agree, and the match is unique.
+ */
+function pfisFindCardPaymentEventMatch(incoming, rawEvidence) {
+  if (pfisNormalizeType(incoming.resolvedType || incoming.type) !== 'card_payment') {
+    return { status: 'NO_MATCH' };
+  }
+  const incomingIssuer = pfisGetPaymentIssuerKey(rawEvidence, incoming.bank, incoming.merchant, incoming.cardName);
+  if (!incomingIssuer) return { status: 'NO_MATCH' };
+  const txRows = pfisReadTransactions();
+  const sourceIndex = pfisBuildSourceIndex();
+  const candidates = [];
+  txRows.forEach(function (existing) {
+    if (pfisNormalizeType(existing.type) !== 'card_payment') return;
+    if (!pfisSameMoney(existing.amount, incoming.amount)) return;
+    if (!pfisSameCalendarDay(existing.dateTime, incoming.datetime)) return;
+    const linkedSources = sourceIndex[existing.transactionId] || [];
+    const existingEvidence = linkedSources.map(function (s) { return s.rawBody || ''; }).join('\n');
+    const existingIssuer = pfisGetPaymentIssuerKey(existingEvidence, existing.bank, existing.merchant, existing.cardName);
+    if (existingIssuer !== incomingIssuer) return;
+    const accountA = pfisString(existing.account).toLowerCase();
+    const accountB = pfisString(incoming.account).toLowerCase();
+    const bothCreditCardAccounts = pfisNormalizeAccountType(existing.accountType) === 'creditcard' &&
+      pfisNormalizeAccountType(incoming.accountType) === 'creditcard';
+    if (bothCreditCardAccounts && accountA && accountB && accountA !== accountB) return;
+    candidates.push({ transactionId: existing.transactionId, reason: 'same_card_payment_issuer_amount_day' });
+  });
+  const unique = pfisUniqueBy(candidates, 'transactionId');
+  if (unique.length === 1) {
+    return { status: 'MATCHED', transactionId: unique[0].transactionId, reason: unique[0].reason };
+  }
+  if (unique.length > 1) {
+    return { status: 'CONFLICT', reason: 'ambiguous_card_payment_event_match',
+      candidateTransactionIds: unique.map(function (x) { return x.transactionId; }) };
+  }
+  return { status: 'NO_MATCH' };
+}
+
+function pfisGetPaymentIssuerKey(rawEvidence, bank, merchant, cardName) {
+  const haystack = pfisNormalizeMerchant([rawEvidence, bank, merchant, cardName].filter(Boolean).join(' '));
+  if (!haystack) return '';
+  if (haystack.indexOf('state bank of india') >= 0 || /\bsbi\b/.test(haystack) || haystack.indexOf('sbicard') >= 0) return 'sbi';
+  if (haystack.indexOf('icici') >= 0) return 'icici';
+  if (haystack.indexOf('axis') >= 0) return 'axis';
+  if (haystack.indexOf('hdfc') >= 0) return 'hdfc';
+  if (haystack.indexOf('kotak') >= 0) return 'kotak';
+  if (haystack.indexOf('yes bank') >= 0) return 'yesbank';
+  return '';
+}
+
+function pfisLinkPaymentEventSource(match, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult) {
+  const sourceId = pfisMakeId('SRC-');
+  const transactionId = pfisString(match.transactionId);
+  const sourceRowNumber = pfisAppendSourceRow({
+    sourceId: sourceId, receivedAt: new Date(), sourceType: sourceType,
+    sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
+    sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PROCESSING_RECONCILE',
+    extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
+    accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
+    extractedReferenceNo: parsed.refNo, linkedTxnId: transactionId, ingestedAt: new Date(),
+    processingError: '', archivedFlag: false,
+    notes: JSON.stringify({ phase: 'PAYMENT_EVENT_RECONCILE', reason: match.reason, transactionId: transactionId }),
+    requestId: requestId, batchId: pfisString(params.batchId)
+  });
+  pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, configResult, requestId);
+  pfisAppendChangeOnce('payment-event-source-linked:' + sourceId, {
+    transactionId: transactionId, targetTable: PFIS_SHEETS.sources, actor: 'system_payment_event',
+    field: 'Payment Event Evidence Linked', oldValue: '', newValue: transactionId,
+    reason: 'Matching card-payment issuer, amount and calendar date linked this notification to the existing canonical settlement.', requestId: requestId
+  });
+  pfisFinalizeSource(sourceRowNumber, 'RECONCILED',
+    'Linked as supporting evidence for the same card-payment event: ' + match.reason, '');
+  const transaction = pfisGetTransaction(transactionId, false);
+  const response = pfisBuildIngestResponse(transaction, requestId, sourceType, 'RECONCILED', sourceId);
+  response.transactionInserted = false;
+  response.sourceRecorded = true;
+  response.paymentEventLinked = true;
+  response.duplicateOf = transactionId;
+  response.message = 'This notification was linked to an existing card-payment event. No second ledger transaction was inserted.';
+  return response;
+}
+
 function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMerchant) {
   const sameBank = pfisNormalizeBank(existing.bank) === pfisNormalizeBank(incoming.bank);
   if (!sameBank) return { kind: 'NO_MATCH' };
@@ -1187,6 +1281,18 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   const existingType = pfisNormalizeAccountType(existing.accountType);
   const incomingType = pfisNormalizeAccountType(incoming.accountType);
   const accountTypeConflict = !!existingType && !!incomingType && existingType !== incomingType;
+  const sameResolvedAccount = !!pfisString(existing.account) && !!pfisString(incoming.account) &&
+    pfisString(existing.account).toLowerCase() === pfisString(incoming.account).toLowerCase();
+
+  // Bank emails often replace a real merchant with "Unspecified". Only accept
+  // that missing-merchant cross-channel pair when the canonical bank, amount,
+  // resolved account and exact source clock time all agree.
+  if (sameAmount && sameDay && sameResolvedAccount && hasTime && !!existingDate && !!incomingDate &&
+      existingDate.getTime() === incomingDate.getTime() &&
+      (!pfisIsMatchableMerchant(existingMerchant) || !pfisIsMatchableMerchant(incomingMerchantKey)) &&
+      !accountConflict && !accountTypeConflict) {
+    return { kind: 'MATCH', reason: 'exact_time_amount_bank_resolved_account_generic_merchant' };
+  }
 
   // A same-bank, same-day, same-reference, same-amount pair is a strong
   // cross-channel identity even when the email gateway is delayed by more than

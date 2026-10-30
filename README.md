@@ -1,373 +1,356 @@
 <div align="center">
 
-# ✨ Personal Finance Intelligence System
+# PFIS · Personal Finance Intelligence System
 
-### Capture clearly. Reconcile confidently. Understand your money.
+### From a bank alert to a financial story you can understand.
 
-**A privacy-conscious personal finance workflow built with Google Apps Script, Google Sheets and evidence-led transaction processing.**
+**Capture → Reconcile → Classify → Analyse → Plan**
 
-<p>
-  <img src="https://img.shields.io/badge/Project-PFIS-2563eb?style=for-the-badge" alt="Project PFIS"/>
-  <img src="https://img.shields.io/badge/Version-v1.0.0-0f9d8a?style=for-the-badge" alt="Version 1.0.0"/>
-  <img src="https://img.shields.io/badge/Runtime-Google%20Apps%20Script-16a34a?style=for-the-badge" alt="Google Apps Script"/>
-  <img src="https://img.shields.io/badge/Analytics-Synthetic%20Demo%20Only-7c3aed?style=for-the-badge" alt="Synthetic demo analytics"/>
-</p>
+A personal finance workflow that turns scattered bank notifications into a traceable ledger, meaningful financial analytics and a clearer monthly plan.
 
-<sub>All values, names, transaction IDs, charts and dashboard figures shown in this README are fictional examples. They are not copied from any live workbook, bank account or personal financial record.</sub>
+[Explore the story](#one-transaction-a-complete-journey) · [Understand configuration](#configuration-the-four-layers-that-make-pfis-work) · [Explore analytics](#the-analytics-what-each-view-helps-you-understand) · [See the engine](#under-the-hood)
+
+**Version 1.0.0** · Google Apps Script · Google Sheets
+
+<sub>Illustrations use invented values and identifiers. No live workbook figures, bank details or personal transactions are displayed.</sub>
 
 </div>
 
 ---
 
-## 📊 See the experience
+## The idea in one view
 
-The visuals below are **illustrative product mockups** made specifically for this README. They show the type of financial insights and controls the PFIS workbook is designed to present. They are not live screenshots or a claim that every visual component is automatically maintained by the Apps Script engine.
+PFIS is built around a simple question:
 
-<p align="center">
-  <img src="docs/images/pfis-demo-dashboard.svg" alt="PFIS illustrative analytics dashboard using synthetic financial data" width="100%"/>
-</p>
+**Can a financial record explain where it came from, what it means, how it was checked and how it affects the monthly plan?**
 
-<p align="center">
-  <img src="docs/images/pfis-demo-budget-sweep.svg" alt="PFIS illustrative zero-based budget and savings sweep using synthetic figures" width="100%"/>
-</p>
+Instead of treating every SMS or email as a separate transaction, PFIS preserves the original notification, interprets it using configuration, checks whether it describes an existing event, and either links it to the canonical record, creates a new record or keeps the uncertainty visible for review.
 
 <p align="center">
-  <img src="docs/images/pfis-demo-transaction-controls.svg" alt="PFIS illustrative source reconciliation and transaction review dashboard using fictional IDs" width="100%"/>
+  <a href="https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/docs/images/pfis-configuration-journey.svg"><img src="https://raw.githubusercontent.com/asish312/Personal-Finance-Intelligence-System/main/docs/images/pfis-configuration-journey.svg" alt="PFIS configuration map showing Categories, Config, Rules and Holiday Calendar" width="100%"/></a>
 </p>
 
-> **Demo-data guarantee:** Every displayed figure is invented for demonstration. No actual transaction amount, account balance, merchant, card detail, transaction ID or personal record from the production spreadsheet is reproduced here.
+<sub align="center">The configuration model — four layers, each with a distinct responsibility · Fictional demonstration values only.</sub>
 
-## 🧭 What is PFIS?
+## One transaction, a complete journey
 
-The **Personal Finance Intelligence System (PFIS)** is a personal-finance workflow that turns bank notifications into a structured, auditable transaction ledger.
+Imagine a fictional bank notification:
 
-It is designed around a simple principle:
+> **DEMO BANK:** INR 845.50 debited at Harbor Coffee. Reference DEMO-UTR-1001.
 
-**A transaction should be traceable to its evidence, classified with care, and explainable later.**
+Here is what PFIS does with it.
 
-PFIS receives bank SMS and email alerts, validates parser output, preserves original source evidence, resolves rules and account mappings, reconciles matching notifications, and records changes in an audit history. The accompanying Google Sheets workbook provides the financial summaries, dashboards, review views and planning tools.
+| Stage | What happens | Why it matters |
+|---|---|---|
+| **1 · Capture** | An iOS Shortcut passes the SMS/email content to the Apps Script Web App. | The original alert is retained as evidence. |
+| **2 · Interpret** | The parser extracts date, signed amount, bank, account type, merchant, transaction type and reference. | Raw notification text becomes structured information. |
+| **3 · Configure** | Categories, Config and Rules resolve the category, account and any trusted purpose template. | Classification is consistent rather than dependent on ad-hoc guesses. |
+| **4 · Reconcile** | PFIS checks source replay, matching SMS/email evidence and possible payment-event relationships. | Two alerts about one event need not become two expenses. |
+| **5 · Record** | A new canonical transaction is written, or evidence is linked to an existing one. Uncertain cases stay reviewable. | The ledger remains explainable and auditable. |
+| **6 · Understand** | The transaction contributes to cash-flow, category, merchant and data-quality analysis. | A single event becomes part of a broader financial picture. |
 
-### What it is designed to do
+A simplified example of the resulting record:
 
-| Capability | What it provides |
+| Transaction ID | Date | Merchant | Amount | Category | Source coverage |
+|---|---|---|---:|---|---|
+| DEMO-TX-001 | 14 Oct 2026 | Harbor Coffee | −₹845.50 | Food & Dining | SMS + Email |
+
+<sub>DEMO-TX-001 and all sample values above are invented for documentation.</sub>
+
+### What happens when another alert arrives?
+
+- If the same source is replayed, PFIS recognises the replay and does not insert another canonical transaction.
+- If a matching email describes the same bank event, PFIS can link the second source to the existing transaction.
+- If a wallet and card issuer each confirm the same eligible card-payment event, their evidence can be associated with one payment event when issuer, amount, date and identity checks agree.
+- If two transactions merely look similar, or their account/reference evidence conflicts, PFIS keeps the case for review rather than silently merging it.
+
+This is the central design choice: **preserve evidence first; automate only when the match is sufficiently strong.**
+
+---
+
+## Configuration: the four layers that make PFIS work
+
+A new user does not need to configure every transaction individually. PFIS uses four small configuration layers to make repeated decisions consistently.
+
+### 1. Categories — define the language of your finances
+
+The Categories sheet is the approved vocabulary for classifying transactions.
+
+Examples:
+
+| Category | Typical use |
 |---|---|
-| 📥 **Transaction capture** | Accepts structured SMS/email parser output through an Apps Script Web App |
-| 🧾 **Canonical ledger** | Maintains one structured Transaction Log |
-| 🔎 **Evidence preservation** | Retains source messages, IDs, hashes and processing outcomes |
-| 🔁 **Duplicate protection** | Handles exact source replays and high-confidence transaction matches |
-| 🧩 **Rule-based classification** | Applies merchant, amount and combined rules |
-| 🏦 **Account resolution** | Uses bank/account/card configuration and available identifiers |
-| 🧑‍⚖️ **Review controls** | Keeps conflicts and uncertain matches reviewable |
-| 📝 **Audit history** | Records supported changes in an append-only Change Log |
-| 📈 **Financial analytics** | Supports cash-flow, category, merchant, recurring and data-quality analysis |
-| 💰 **Budget planning** | Separates the month income is received from the month it is allocated to |
+| Income | Salary and other genuine inflows |
+| Housing & Utilities | Rent, electricity and household bills |
+| Food & Dining | Groceries, restaurants and cafes |
+| Transport | Fuel, public transport and travel |
+| Shopping | Retail and personal purchases |
+| Investments | SIPs and investment contributions |
+| Debt Service | Loan and debt obligations |
+| Miscellaneous | Safe fallback when no category can be resolved |
 
-## 🏗️ How the system fits together
+Keep categories mutually understandable and avoid creating multiple labels for the same kind of activity. The engine validates against active categories and uses **Miscellaneous** as the fallback when it is active and a category is missing or unmapped.
+
+### 2. Config — identify the account behind the alert
+
+Config answers: **Which bank account or card generated this notification?**
+
+The core fields are:
+
+| Field | What to enter |
+|---|---|
+| Bank | Normalised bank/provider name |
+| Account Type | Savings, current, credit card, wallet, etc. |
+| Account/Card Suffix | Only the identifying suffix available in the alert |
+| Merchant Contains | Optional evidence used when the notification is merchant-specific |
+| Account | A friendly internal account label |
+| Card Name | A friendly card label, where relevant |
+| Instrument | UPI, card, net banking, etc. |
+| Is Internal | TRUE only for transfers between accounts genuinely owned by the user |
+| Priority | Tie-breaker after evidence specificity |
+| Text Pattern (optional J) | Additional text evidence, when needed |
+
+Use friendly labels such as `MAIN_SAVINGS` or `TRAVEL_CARD`. Never store full account/card numbers in documentation or examples. A priority value must not be used to guess which card was charged when the source does not identify it.
+
+### 3. Rules — teach PFIS how to classify repeated patterns
+
+Rules answer: **When this evidence appears, what should PFIS do?**
+
+Supported match types:
+
+| Match type | When to use it |
+|---|---|
+| `MERCHANT` | A stable merchant or sender pattern identifies the activity. |
+| `AMOUNT` | A distinctive amount is useful, but should be combined with safe merchant evidence where possible. |
+| `AMOUNT+MERCHANT` | Both amount and merchant pattern must agree. |
+
+A rule can set the category, merchant override, notes template, recurring flag, type, account/card overrides and priority. More-specific rules should win; equally ranked rules that disagree remain ambiguous.
+
+The established Rules layout is:
+
+| Columns | Purpose |
+|---|---|
+| A:M | Core match and classification fields |
+| N:S | Optional rule metadata and confidence fields |
+| T · Auto Purpose | Allows a meaningful configured purpose to be written when explicitly TRUE |
+| U · Purpose Trigger | Conditional purpose trigger |
+| V · Calendar Scope | Calendar used by a working-day trigger |
+| W · Budget Month Offset | Month to which the transaction is allocated |
+
+**Purpose is optional.** A blank Purpose/User Notes value does not block transaction capture or approval. A configured purpose can be written by `Auto Purpose=TRUE`, or by a supported rule trigger. Recurrence by itself is not permission to invent a transaction's purpose.
+
+### 4. Holiday Calendar — make working-day rules explicit
+
+The optional Holiday Calendar has four headers:
+
+`Date` · `Calendar Scope` · `Is Working Day` · `Description`
+
+The engine treats Monday–Friday as working days by default and Saturday/Sunday as non-working days. A verified scoped override can change that assumption for a company calendar such as HCL; `ALL` can be used for a general override.
+
+Only enter verified holidays or exceptional working days. The calendar must reflect the employer's actual practice, not a guessed public-holiday list.
+
+### Example: salary received at month end
+
+A salary received on the last working day of October is October income, even when it is intended to fund November.
+
+| HCL rule setting | Example value |
+|---|---|
+| Match Type | MERCHANT |
+| Merchant Contains | HCL |
+| Category | Income |
+| Merchant Override | HCLTech |
+| Notes Template | Salary from HCL for {{monthLabel}} |
+| Month Offset (H) | 0 |
+| Is Recurring | TRUE |
+| Type Override | income |
+| Auto Purpose (T) | FALSE |
+| Purpose Trigger (U) | LAST_WORKING_DAY_OF_MONTH |
+| Calendar Scope (V) | HCL |
+| Budget Month Offset (W) | 1 |
+
+The result is deliberately split:
+
+| Concept | October salary example |
+|---|---|
+| Transaction Date | 30-Oct-2026 |
+| Purpose | Salary from HCL for Oct-26 |
+| Income Month | Oct-26 |
+| Budget Month | Nov-26 |
+
+**Month Offset and Budget Month Offset are not the same setting.** The first controls the month label in the purpose template. The second controls the budget period.
+
+---
+
+## The analytics: what each view helps you understand
+
+PFIS analytics are not just attractive charts. Each view should answer a different financial question. The dashboards below are illustrative product mockups using fictional data; they demonstrate analytical layouts, not live workbook results.
+
+### 1. Is income keeping pace with spending?
+
+This view compares incoming money with operating outflows, shows net cash movement and highlights savings rate over time.
+
+<p align="center">
+  <a href="https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/docs/images/pfis-demo-financial-performance.svg"><img src="https://raw.githubusercontent.com/asish312/Personal-Finance-Intelligence-System/main/docs/images/pfis-demo-financial-performance.svg" alt="Synthetic PFIS financial performance dashboard with monthly cash flow, allocations and savings rate charts" width="100%"/></a>
+</p>
+
+<sub align="center">Four complementary views: income versus outflow, budget allocation, net cash movement and savings rate · Fictional demonstration values only.</sub>
+
+**Questions it helps answer:** Is spending rising faster than income? Is the monthly surplus improving? How much of allocated income is retained?
+
+### 2. Where does the money go?
+
+Category analysis shows the largest spending groups. Merchant concentration identifies repeated high-value destinations. Timing analysis shows when outflows occur, while recurring trends separate predictable commitments from variable spending.
+
+<p align="center">
+  <a href="https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/docs/images/pfis-demo-spending-patterns.svg"><img src="https://raw.githubusercontent.com/asish312/Personal-Finance-Intelligence-System/main/docs/images/pfis-demo-spending-patterns.svg" alt="Synthetic PFIS spending analytics with category bars, merchant concentration, weekday heatmap and recurring trend charts" width="100%"/></a>
+</p>
+
+<sub align="center">Category mix, leading merchants, weekday activity and recurring commitments · Fictional demonstration values only.</sub>
+
+**Questions it helps answer:** Which categories dominate? Which merchants account for repeated outflows? Are commitments becoming heavier? Do spending patterns change by weekday?
+
+### 3. Is the data trustworthy enough to act on?
+
+This view separates source notifications from unique transactions, shows how evidence is reconciled and makes unresolved cases visible. Missing Purpose is measured separately because it is optional; it is not treated as a mandatory review defect.
+
+<p align="center">
+  <a href="https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/docs/images/pfis-demo-data-quality.svg"><img src="https://raw.githubusercontent.com/asish312/Personal-Finance-Intelligence-System/main/docs/images/pfis-demo-data-quality.svg" alt="Synthetic PFIS data quality dashboard with processing funnel, source mix, review queue and quality metrics" width="100%"/></a>
+</p>
+
+<sub align="center">Evidence funnel, SMS/email coverage, review composition and data-quality signals · Fictional demonstration values only.</sub>
+
+**Questions it helps answer:** How many alerts became canonical records? How much evidence is cross-verified? What needs human attention? Are missing descriptions being confused with financial integrity problems?
+
+### 4. Did the planned savings actually reach savings?
+
+Zero-based budgeting gives the month's allocated income a job. A planned sweep is not actual savings until the debit from the source account and credit to the savings account are both verified and reconciled.
+
+<p align="center">
+  <a href="https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/docs/images/pfis-demo-budget-sweep.svg"><img src="https://raw.githubusercontent.com/asish312/Personal-Finance-Intelligence-System/main/docs/images/pfis-demo-budget-sweep.svg" alt="Synthetic PFIS budget and savings sweep dashboard with source debit and destination savings credit matching" width="100%"/></a>
+</p>
+
+<sub align="center">Budget allocation, planned sweep and verified two-leg transfer reconciliation · Fictional demonstration values only.</sub>
+
+**Questions it helps answer:** How much was planned for savings? What was actually transferred? Is a sweep still pending or does it reconcile? What remains unallocated?
+
+The Apps Script does not initiate bank transfers. The budget and Savings Sweep Log are workbook-side planning and reconciliation concepts; they must be configured in the spreadsheet.
+
+### Analytics available from the engine
+
+| Analysis | What it measures |
+|---|---|
+| Financial overview | Income, expenses, refunds, investments, card payments, transfers and net cash flow |
+| Category breakdown | Gross expenses, refunds, net consumption and transaction count by category |
+| Merchant analysis | Gross spend, refunds, net consumption and transaction count by merchant |
+| Recurring commitments | Transactions marked recurring and an estimated annualised amount |
+| Cash flow | Income, outflows, refunds, internal transfers excluded and net cash flow |
+| Spending behaviour | Expense count and gross spend by weekday |
+| Anomalies | Duplicate candidates, source conflicts, unusually high expenses and collision candidates |
+| Data quality | Review count, evidence verification, missing merchant/category/purpose, date precision and source coverage |
+
+Cash-flow and consumption are intentionally different views. Card payments can be cash outflows while the underlying card purchases are the consumption events. Internal transfers are excluded from net cash flow when correctly configured. Do not add both a card purchase and its bill settlement as two consumption expenses.
+
+---
+
+## What makes PFIS different
+
+| Design choice | Why it matters |
+|---|---|
+| **Evidence before inference** | Original alerts are retained so a ledger record can be traced back to its source. |
+| **One canonical ledger** | SMS and email are evidence channels, not separate financial books. |
+| **Conservative reconciliation** | Strong matches are linked; ambiguous matches remain visible for review. |
+| **Optional purpose** | An unavailable description does not stop a valid transaction from being recorded. |
+| **Working-day-aware salary rules** | Salary purpose can reflect the earned month while budget allocation funds the following month. |
+| **Separate cash flow and consumption** | Transfers and card settlements are not automatically treated as everyday spending. |
+| **Auditable corrections** | Supported updates and confirmed duplicate decisions leave a history. |
+| **Honest data quality** | Missing optional descriptions, date-only evidence and genuine integrity exceptions are measured separately. |
+
+The objective is not to automate every judgement. It is to automate repeatable work while preserving uncertainty where a financial decision would otherwise be guessed.
+
+---
+
+## Under the hood
+
+The production engine is a Google Apps Script Web App. iOS Shortcuts is the source collection/enrichment client, Google Sheets stores the canonical records and configuration, and the engine provides ingestion, reconciliation, read operations and controlled updates.
+
+### System flow
 
 ```mermaid
 flowchart TD
-    A["Bank SMS"] --> C["iOS Shortcut / Parser"]
-    B["Bank Email"] --> C
-    C --> D["Apps Script Web App"]
-    D --> E["Validation & Normalisation"]
-    E --> F["Rules + Account Configuration"]
-    F --> G{"Evidence match?"}
-    G -->|"Exact replay / strong match"| H["Link source evidence"]
-    G -->|"New transaction"| I["Canonical Transaction Log"]
-    G -->|"Ambiguous / conflicting"| J["Review queue"]
-    H --> K["Source Log"]
-    I --> K
-    J --> K
-    I --> L["Change Log / Audit"]
-    I --> M["Google Sheets Analytics"]
-    K --> M
-    L --> M
+  A["Bank SMS"] --> C["iOS Shortcut / Parser"]
+  B["Bank Email"] --> C
+  C --> D["Apps Script Web App"]
+  D --> E["Validate and normalise"]
+  E --> F["Categories + Config + Rules"]
+  F --> G{"Evidence outcome"}
+  G -->|"Strong match"| H["Link source to existing record"]
+  G -->|"New event"| I["Transaction Log"]
+  G -->|"Uncertain"| J["Review candidate"]
+  H --> K["Source Log"]
+  I --> K
+  J --> K
+  I --> L["Change Log"]
+  K --> M["Analytics and workbook views"]
+  L --> M
+  I --> M
 ```
 
-The transaction engine is responsible for deterministic ingestion, reconciliation, validation and audit behaviour. Dashboard formulas, reporting layouts, charts and other workbook presentation layers are maintained separately and must be validated independently.
+### Core workbook records
 
-## 🗂️ Workbook architecture
-
-The Apps Script engine requires six core sheets:
-
-| Sheet | Responsibility |
+| Sheet | Role |
 |---|---|
-| `Transaction Log` | Canonical transaction ledger; one row per accepted transaction |
-| `Source Log` | Original SMS/email evidence, hashes, parse status and transaction links |
-| `Change Log` | Detailed audit history for supported system and user changes |
-| `Rules` | Transaction classification, purpose triggers and budget allocation rules |
-| `Config` | Bank, account, card, instrument and internal-transfer mappings |
-| `Categories` | Active categories used for validation and fallback classification |
+| Transaction Log | Canonical financial records; core schema A:AC |
+| Source Log | Original SMS/email evidence, parsing outcomes, hashes and links |
+| Change Log | Detailed audit history |
+| Rules | Classification and purpose/budget rules |
+| Config | Bank/account/card/instrument resolution |
+| Categories | Active classification vocabulary |
 
-The workbook may also contain supporting sheets such as `Recent Transactions`, `Monthly Summary`, `Dashboard`, `Dashboard_Calc`, `Insights & Data Quality`, `Reports`, `Data Dictionary`, `PFIS System Guide`, `Card Reconciliation Log`, `Rejected & Archive Log`, `Holiday Calendar` and `Savings Sweep Log`.
+Additional views such as Recent Transactions, Monthly Summary, Dashboard, Dashboard_Calc, Insights & Data Quality, Reports, Data Dictionary, PFIS System Guide, Card Reconciliation Log, Rejected & Archive Log, Holiday Calendar and Savings Sweep Log belong to the wider workbook/reporting layer.
 
-These supporting tabs are workbook/reporting layers; the engine does not generate all their formulas, visuals or planning workflows.
+### API actions
 
-### Schema compatibility
+All write operations use HTTP POST with JSON. The main read actions are:
 
-- The canonical Transaction Log schema occupies **A:AC**.
-- Legacy auxiliary fields occupy **AD:AM** when their documented headers are present.
-- Optional reporting periods are stored in **AN: Budget Month** and **AO: Income Month** when those headers exist.
-- The Rules core schema is **A:M**.
-- Optional rule extensions include **N:S**, **T: Auto Purpose**, **U: Purpose Trigger**, **V: Calendar Scope**, and **W: Budget Month Offset**.
-- Config's core fields are **A:I**; `Text Pattern` is an optional J-column extension.
-- The optional `Holiday Calendar` uses the headers `Date`, `Calendar Scope`, `Is Working Day`, and `Description`.
+`health`, `validate`, `gettransaction`, `getpendingreview`, `getneedsenrichment`, `searchtransactions`, `getfinancialoverview`, `getcategorybreakdown`, `getmerchantanalysis`, `getrecurringcommitments`, `getcashflow`, `getspendingbehavior`, `getanomalies`, `getdataquality`.
 
-**Do not reorder the core columns or rename required headers without updating and validating the engine.** The engine reads the canonical fields by established physical positions; optional period fields are located by header name.
+The `getdataquality` metrics are nested under `response.data`. Its `missingPurpose` metric is separate from `needsReview`.
 
-## 🔄 Ingestion contract
+The write actions include `ingest`, `update`, `reprocesssource` and `resolveexception`. Duplicate resolution supports `CONFIRM_DISTINCT` or `CONFIRM_DUPLICATE` with a surviving `duplicateOf` ID and a human reason.
 
-All write operations use **HTTP POST with a JSON body**. A typical synthetic request looks like this:
+### Source files and implementation references
 
-```json
-{
-  "action": "ingest",
-  "sourceType": "SMS",
-  "txnString": "14/10/2026 09:15:00|-845.50|Demo Bank|Savings Account|UPI|expense|Harbor Coffee|Harbor Coffee|DEMO-UTR-1001|NA",
-  "originalText": "DEMO ALERT: INR 845.50 debited at Harbor Coffee on 14/10/2026 at 09:15. Reference DEMO-UTR-1001."
-}
-```
+- [Production Transaction Engine](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_TransactionEngine_v1.0.0.gs)
+- [Preflight regression harness](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Preflight_Tests_v1.0.0.gs)
+- [iOS Shortcut implementation reference](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Shortcut_Implementation_v1.0.0.txt)
+- [Prompt reference](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Prompts_Final_v1.0.0_Prompts.txt)
+- [Engineering review notes](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/REVIEW_NOTES.md)
+- [All README illustrations](https://github.com/asish312/Personal-Finance-Intelligence-System/tree/main/docs/images)
 
-For email, set `"sourceType": "EMAIL"` and pass `sender` and `subject` when available. Do not URL-encode the raw body before sending JSON. Do not omit `txnString`.
+### Technical contract
 
-The `txnString` has ten logical pipe-delimited fields:
+The ten-field `txnString` is:
 
-| Position | Field | Meaning |
-|---:|---|---|
-| 1 | `datetime` | Transaction date/time; date-only values retain lower precision |
-| 2 | `signed_amount` | Outflows negative; inflows positive |
-| 3 | `bank` | Bank/provider name |
-| 4 | `account_type` | Savings, current, credit card, wallet, etc.; may be blank if unknown |
-| 5 | `instrument` | Source-provided payment instrument |
-| 6 | `type` | `expense`, `income`, `card_payment`, `investment`, `transfer` or `refund` |
-| 7 | `merchant_name` | Merchant or transaction description |
-| 8 | `counterparty` | Recipient, sender or counterparty |
-| 9 | `ref_no` | UTR/reference when available |
-| 10 | `balance_after` | Actual post-transaction account balance, if supplied |
+`datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after`
 
-For backwards compatibility, the parser accepts one known formatting defect: an extra leading empty pipe field. It does not guess how to repair missing or shifted middle fields. Placeholder values such as `NA` / `N/A` in optional fields are normalized to blank.
+Expenses/outflows are negative; income/inflows are positive. Date-only evidence retains lower precision. The engine uses `Asia/Kolkata` for transaction-date and period logic. A supplied balance must be an actual post-transaction account balance, never a credit limit or available balance.
 
-A successful HTTP response does not necessarily mean a new ledger row was inserted. Always inspect `status`, `transactionId`, `sourceId` and `requestId`.
+The required Script Property is `SPREADSHEET_ID`. `WEB_APP_SECRET` is optional; when configured, requests must carry the matching token as required by the endpoint.
 
-## 🛡️ Evidence, replay and duplicate policy
+### Version and responsibility boundaries
 
-PFIS distinguishes between a repeated source message, a second notification about the same event, and a transaction that merely looks similar.
+**PFIS production engine: v1.0.0** · Google Apps Script + Google Sheets.
 
-| Situation | Expected behaviour |
-|---|---|
-| Exact source replay | Return the existing result; do not insert another canonical transaction |
-| Strong SMS/email match | Link the second source to the existing canonical transaction |
-| Generic merchant alert | Use supporting bank, amount, account and time evidence; do not rely on a generic merchant name alone |
-| Card-payment confirmation | Reconcile eligible wallet/payment-rail and issuer notifications as one payment event when issuer, amount, date and identity evidence agree |
-| Similar same-channel alert | Keep as a review candidate when the match is uncertain |
-| Conflicting amount, reference or account identity | Preserve the conflict for review; do not silently merge |
-| Confirmed duplicate | Archive only after an explicit human decision |
-
-A date-only value is not proof of an exact time match. A timestamp, amount or shared reference alone is not sufficient to justify destructive merging.
-
-### Human resolution
-
-The `resolveexception` action supports:
-
-- `CONFIRM_DISTINCT` — retain the transaction after human confirmation.
-- `CONFIRM_DUPLICATE` — archive a confirmed duplicate using `duplicateOf` to identify the surviving canonical transaction.
-
-A specific reason is required. The confirmed-duplicate path preserves the archived transaction, re-links associated source evidence to the survivor, and records audit history. Historical transactions are not automatically deleted or merged by new duplicate-prevention logic.
-
-## 🧠 Rules, purpose and salary allocation
-
-Rules support these match types:
-
-- `MERCHANT`
-- `AMOUNT`
-- `AMOUNT+MERCHANT`
-
-More-specific rules should win. Lower numeric priority breaks ties where the evidence is otherwise safe. Equally ranked rules that disagree remain ambiguous rather than being guessed.
-
-### Purpose is optional
-
-A blank Purpose / User Notes value is valid. It does not block ingestion, approval, normal reporting or the required enrichment queue.
-
-- A meaningful configured purpose may be written when `Auto Purpose=TRUE`.
-- A rule may also use an explicitly configured `Purpose Trigger`.
-- Recurrence alone is not permission to invent the purpose of a transaction.
-- Missing Purpose can still be measured as a data-quality attribute.
-- If a category is blank or unmapped, the engine uses the active `Miscellaneous` category when available.
-
-### Separate earned month from budget month
-
-Salary descriptions and budget allocation use separate offsets:
-
-| Rule field | What it controls |
-|---|---|
-| `Month Offset` (H) | Month label in the configured Notes Template |
-| `Purpose Trigger` (U) | Condition for triggering rule-generated purpose |
-| `Calendar Scope` (V) | Working-day calendar to evaluate |
-| `Budget Month Offset` (W) | Budget period assigned to the transaction |
-
-For a month-end salary example:
-
-- `Month Offset=0` keeps the salary purpose tied to the transaction's actual month.
-- `Purpose Trigger=LAST_WORKING_DAY_OF_MONTH` checks the transaction date.
-- `Budget Month Offset=1` assigns that income to the next budget month.
-
-The working-day helper treats Monday–Friday as working by default. Optional `Holiday Calendar` rows can override a date for a named scope such as `HCL` or for `ALL`. Only verified holiday/working-day values should be entered.
-
-The engine populates optional `Income Month` for income transactions and `Budget Month` for transactions when those headers exist. It does not create a forecast salary transaction.
-
-## 💸 Budgeting and savings sweep concepts
-
-The workbook's budget model separates actual cash flow from budget allocation:
-
-- **Actual cash flow** is based on the real transaction date.
-- **Income Month** is the month income is received.
-- **Budget Month** is the period the income is allocated to.
-- **Planned savings sweep** is an intention, not yet actual savings.
-- **Actual verified savings** requires a reconciled transfer from the source account to the destination savings account.
-
-A sweep should be treated as completed only when both the source debit and destination credit have been identified and reconciled. Internal transfers must not be counted as consumption expenses or fresh income.
-
-The dashboard visual above is a fictional example of how the distinction can be presented. **The Apps Script does not initiate bank transfers or move money.** The `Savings Sweep Log` and associated budget formulas are workbook-side planning/reconciliation features and must be configured and validated separately.
-
-## 📈 Analytics and data quality
-
-The engine exposes structured read operations that a dashboard or other client can use:
-
-| Action | Purpose |
-|---|---|
-| `health` / `ping` | Runtime and version health |
-| `validate` / `validateschema` | Workbook schema validation |
-| `gettransaction` / `gettransactiondetail` | Read a transaction |
-| `getpendingreview` | Pending transaction/source-conflict review items |
-| `getneedsenrichment` | Transactions requiring category classification |
-| `searchtransactions` | Search and filter the canonical ledger |
-| `getfinancialoverview` | Summary-level financial metrics |
-| `getcategorybreakdown` | Category analysis |
-| `getmerchantanalysis` | Merchant analysis |
-| `getrecurringcommitments` | Recurring commitments |
-| `getcashflow` | Cash-flow analysis |
-| `getspendingbehavior` | Spending behaviour metrics |
-| `getanomalies` | Anomaly candidates |
-| `getdataquality` | Data-quality counts and evidence status |
-
-The `getdataquality` response nests its metrics under `response.data`. Examples include:
-
-- `needsReview`
-- `duplicateCandidates`
-- `sourceConflicts`
-- `missingMerchant`
-- `missingCategory`
-- `missingPurpose`
-- `unknownType`
-- `dateOnly`
-- `suspectedInventedMidnightTimestamps`
-- `verified`, `smsOnly` and `emailOnly`
-
-**Missing Purpose is separate from Needs Review.** A transaction may have no Purpose and still be valid. Duplicate candidates, source conflicts, invalid transaction types and other integrity problems remain reviewable.
-
-The engine returns analytics data; the workbook is responsible for presenting it. Formula ranges, helper tabs, chart sources and dashboard refresh behaviour should be validated independently.
-
-## ⚙️ Config and account/card resolution
-
-The required Config fields A:I are:
-
-`Bank`, `Account Type`, `Account/Card Suffix`, `Merchant Contains`, `Account`, `Card Name`, `Instrument`, `Is Internal`, `Priority`.
-
-An optional J-column `Text Pattern` can provide additional identity evidence when supported by the workbook configuration.
-
-- Higher specificity should win; priority may break a safe tie.
-- A suffix-specific rule must not match when the source does not identify the configured suffix.
-- Source instrument takes precedence over rule override, which takes precedence over Config default.
-- Do not guess between different cards when the alert does not identify which card was used.
-- Mark `Is Internal` only for accounts genuinely owned by the user and only after testing how the reporting layer treats internal transfers.
-
-## 🧪 Testing and release checklist
-
-Before production ingestion or deployment:
-
-1. Run schema/config validation against the intended staging spreadsheet.
-2. Run `PFIS_RUN_ALL_PREFLIGHT_TESTS()` from the Apps Script editor.
-3. Confirm the synthetic test report and cleanup status.
-4. Test one representative SMS ingestion.
-5. Test its corresponding email, including a delayed email with a matching reference.
-6. Replay an identical source and confirm no second canonical transaction is inserted.
-7. Test a same-channel likely duplicate and confirm uncertain cases remain reviewable.
-8. Test a conflicting amount/reference/account and confirm it is preserved for review.
-9. Test a generic merchant notification and an eligible card-payment confirmation pair.
-10. Test a last-working-day purpose trigger, including a configured holiday override.
-11. Test blank Purpose and blank Category handling.
-12. Test a confirmed duplicate archive and verify source re-linking and Change Log entries.
-13. Check Transaction Log, Source Log and Change Log IDs, links and row placement.
-14. Validate workbook formulas, monthly summaries and dashboards separately.
-15. Deploy a new Web App version when applicable, then perform a controlled production smoke test.
-
-Local/mocked logic checks are not equivalent to running the complete test harness against Google Sheets and Apps Script services. Do not describe the system as production-certified until the actual staging run passes.
-
-## 🚀 Setup and deployment
-
-### Required Script Property
-
-- `SPREADSHEET_ID` — the Google Spreadsheet ID, taken from the URL between `/d/` and `/edit`.
-
-### Optional Script Property
-
-- `WEB_APP_SECRET` — when configured, requests must include the expected token in the JSON body.
-
-### Deployment notes
-
-1. Open the Apps Script project connected to the intended staging workbook.
-2. Add the transaction engine file and preflight test file to the same project.
-3. Configure script properties and verify the spreadsheet timezone/reporting setup.
-4. Run schema validation and the preflight suite.
-5. Inspect the execution report and test the end-to-end ingestion paths.
-6. Deploy a new Web App version when the deployed endpoint must use updated code.
-7. Promote to production only after staging is clean.
-
-Keep staging and production spreadsheets separate. Do not point destructive or synthetic test runs at a production ledger.
-
-## ⚡ Reliability and performance principles
-
-- Use POST JSON for write operations; never use GET for ingestion or updates.
-- Serialize writes with `LockService` to protect transaction IDs, duplicate checks and row allocation.
-- Allocate rows using logical key-column and full-row safety checks; a blank ID alone does not make a row reusable.
-- Cache Rules, Config, Categories, source and transaction reads within a request.
-- Preserve source evidence and detailed audit history.
-- Make retries idempotent wherever the source identity is known.
-- Do not let diagnostic logging mask the original processing error.
-- Do not clear Source Log or Change Log as routine cleanup.
-
-## 📚 Project files
-
-| File | Purpose |
-|---|---|
-| `PFIS_TransactionEngine_v1.0.0.gs` | Production Apps Script transaction engine |
-| `PFIS_Preflight_Tests_v1.0.0.gs` | Bounded synthetic regression/preflight harness |
-| `PFIS_Shortcut_Implementation_v1.0.0.txt` | iOS Shortcut implementation reference |
-| `PFIS_Prompts_Final_v1.0.0_Prompts.txt` | Prompt/reference material |
-| `REVIEW_NOTES.md` | Engineering review notes |
-| `docs/images/` | Synthetic README dashboard illustrations |
-
-## 🔐 Privacy and example-data policy
-
-This repository's README visuals and payload examples use fictional names, figures, identifiers and dates. They are not screenshots of the live financial workbook.
-
-Do not commit:
-- Real bank SMS/email contents
-- Account or card numbers
-- Personal transaction IDs
-- Real balances or financial statements
-- Secrets, access tokens or spreadsheet IDs
-
-Use synthetic fixtures for screenshots, documentation, examples and tests.
+The engine owns deterministic transaction processing and its supported API contracts. The workbook owns dashboard formulas, reporting presentation, budget planning and savings-sweep reconciliation. iOS Shortcuts owns source capture and any client-side enrichment. A visual mockup in this README is not proof that a corresponding live chart or workbook workflow has already been deployed.
 
 ---
 
 <div align="center">
 
-### Built for clarity, traceability and better financial decisions.
+### A clearer financial picture, built from explainable records.
 
-**PFIS · Personal Finance Intelligence System · v1.0.0**
+**Capture the event. Preserve the evidence. Understand the pattern.**
 
-<sub>Google Apps Script · Google Sheets · Evidence-led transaction intelligence</sub>
+<sub>PFIS · Personal Finance Intelligence System · v1.0.0</sub>
 
 </div>

@@ -892,9 +892,11 @@ function pfisStoreParseFailure(sourceType, evidenceText, params, requestId, mess
     requestId: requestId, batchId: pfisString(params.batchId)
   });
   if (ignoredNonFinancial) {
-    return { success: true, status: 'NON_FINANCIAL_IGNORED', recorded: false, transactionId: null,
+    return {
+      success: true, status: 'NON_FINANCIAL_IGNORED', recorded: false, transactionId: null,
       message: 'A clear OTP/verification-only alert was logged as non-financial; no ledger row was created.',
-      sourceId: pfisGetSourceIdAtRow(rowNumber), requestId: requestId };
+      sourceId: pfisGetSourceIdAtRow(rowNumber), requestId: requestId
+    };
   }
   return {
     success: false, status: 'PARSE_FAILED', error: 'PARSE_FAILED', message: message,
@@ -1106,8 +1108,10 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   // account/account-type contradictions still block auto-linking.
   if (sameRef && sameDay) {
     if (!sameAmount || accountConflict || accountTypeConflict) {
-      return { kind: 'CONFLICT', reason: !sameAmount ? 'same_reference_amount_conflict' :
-        (accountConflict ? 'account_identifier_conflict' : 'account_type_conflict') };
+      return {
+        kind: 'CONFLICT', reason: !sameAmount ? 'same_reference_amount_conflict' :
+          (accountConflict ? 'account_identifier_conflict' : 'account_type_conflict')
+      };
     }
     return { kind: 'MATCH', reason: 'exact_reference_amount_bank_day' };
   }
@@ -1328,13 +1332,68 @@ function pfisInvalidateSourceCache() {
 // -----------------------------------------------------------------------------
 
 function pfisAppendTransaction(transaction, auditSummary) {
-  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  // Check if the engine marked this as a duplicate candidate
+  let isDuplicate = transaction && (
+    transaction.validationFlag === 'DUPLICATE_CANDIDATE' ||
+    transaction.validationFlag === 'DUPLICATE_REJECTED' ||
+    transaction.reviewStatus === 'Rejected - Duplicate'
+  );
+
+  const txSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+
+  // Secondary safeguard: Check if Hash, Canonical Key, or Ref No already exists in Transaction Log
+  if (!isDuplicate && txSheet.getLastRow() > 1) {
+    const incomingHash = pfisString(transaction.sourceHash);
+    const incomingCanonKey = pfisString(transaction.canonicalKey);
+    const incomingRefNo = pfisString(transaction.refNo);
+
+    // Read Columns Q (17: Ref No), AG (33: Hash), and AH (34: Canon Key)
+    const data = txSheet.getRange(2, 1, txSheet.getLastRow() - 1, 34).getValues();
+    for (let i = 0; i < data.length; i++) {
+      const rowRef = pfisString(data[i][16]);
+      const rowHash = pfisString(data[i][32]);
+      const rowCanon = pfisString(data[i][33]);
+
+      if ((incomingHash && rowHash === incomingHash) ||
+        (incomingCanonKey && rowCanon === incomingCanonKey) ||
+        (incomingRefNo && incomingRefNo !== 'NA' && rowRef === incomingRefNo)) {
+        isDuplicate = true;
+        break;
+      }
+    }
+  }
+
+  // Route to 'Rejected & Archive Log' if duplicate, otherwise 'Transaction Log'
+  const targetSheet = isDuplicate
+    ? pfisGetSpreadsheet().getSheetByName('Rejected & Archive Log')
+    : txSheet;
+
+  if (!targetSheet) {
+    throw pfisError('SCHEMA_INVALID', 'Target sheet not found for transaction commit.');
+  }
+
+  if (isDuplicate) {
+    transaction.needsReview = false;
+    transaction.reviewStatus = 'Rejected - Duplicate';
+    transaction.validationFlag = 'DUPLICATE_REJECTED';
+    transaction.reviewReason = 'Auto-rejected duplicate detected during ingestion';
+    transaction.reviewedBy = 'SYSTEM_DEDUPLICATION';
+    transaction.reviewedAt = new Date();
+  }
+
   const row = pfisRowFromObject(transaction, PFIS_TX_FIELDS);
-  const targetRow = pfisGetNextAvailableRow(sheet, 1);
-  sheet.getRange(targetRow, 1, 1, PFIS_TX_FIELDS.length).setValues([row]);
-  pfisInvalidateTransactionCache();
-  pfisWriteLegacyTransactionAux(targetRow, transaction,
-    auditSummary || ('Created transaction ' + pfisString(transaction.transactionId)));
+  const targetRow = pfisGetNextAvailableRow(targetSheet, 1);
+  targetSheet.getRange(targetRow, 1, 1, PFIS_TX_FIELDS.length).setValues([row]);
+
+  if (!isDuplicate) {
+    pfisInvalidateTransactionCache();
+  }
+
+  const summaryText = auditSummary || (isDuplicate
+    ? ('Auto-archived duplicate ' + pfisString(transaction.transactionId))
+    : ('Created transaction ' + pfisString(transaction.transactionId)));
+
+  pfisWriteLegacyTransactionAux(targetRow, transaction, summaryText, targetSheet);
   return targetRow;
 }
 
@@ -1441,9 +1500,11 @@ function pfisGetSourceIdAtRow(rowNumber) {
 function pfisReplayResponse(source, requestId) {
   const status = pfisString(source.parseStatus).toUpperCase();
   if (status === 'NON_FINANCIAL_IGNORED') {
-    return { success: true, status: 'NON_FINANCIAL_IGNORED', recorded: false, transactionId: null,
+    return {
+      success: true, status: 'NON_FINANCIAL_IGNORED', recorded: false, transactionId: null,
       sourceId: source.sourceId, requestId: requestId,
-      message: 'Exact replay of a non-financial OTP/verification alert; no ledger transaction was created.' };
+      message: 'Exact replay of a non-financial OTP/verification alert; no ledger transaction was created.'
+    };
   }
   if (status === 'PARSE_FAILED') {
     return {
@@ -1517,9 +1578,19 @@ function pfisFindSourceById(sourceId) {
 
 function pfisGetTransaction(transactionId, includeEvidence) {
   if (!transactionId) return null;
-  const rowNumber = pfisFindTransactionRow(transactionId);
+  let sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  let rowNumber = pfisFindTransactionRow(transactionId);
+
+  // If not in active Transaction Log, check Rejected & Archive Log
+  if (rowNumber < 2) {
+    const archiveSheet = pfisGetSpreadsheet().getSheetByName('Rejected & Archive Log');
+    if (archiveSheet) {
+      rowNumber = pfisFindRowByValue(archiveSheet, 1, transactionId);
+      if (rowNumber >= 2) sheet = archiveSheet;
+    }
+  }
+
   if (rowNumber < 2) return null;
-  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
   const obj = pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
   const verification = pfisGetVerificationState(transactionId, obj.validationFlag);
   const categories = pfisGetCategoryList();
@@ -1655,24 +1726,32 @@ function pfisResolveTransactionException(params, requestId) {
   const reason = pfisCleanText(params.reason);
   if (!transactionId) return { success: false, status: 'UPDATE_REJECTED', error: 'BAD_REQUEST', message: 'transactionId is required.', requestId: requestId };
   if (resolution !== 'CONFIRM_DISTINCT') {
-    return { success: false, status: 'UPDATE_REJECTED', error: 'UNSUPPORTED_RESOLUTION',
+    return {
+      success: false, status: 'UPDATE_REJECTED', error: 'UNSUPPORTED_RESOLUTION',
       message: 'Only CONFIRM_DISTINCT is supported. Duplicate deletion/merging is intentionally not automated because it can change reported cash flow.',
-      transactionId: transactionId, allowedResolutions: ['CONFIRM_DISTINCT'], requestId: requestId };
+      transactionId: transactionId, allowedResolutions: ['CONFIRM_DISTINCT'], requestId: requestId
+    };
   }
   if (!reason || reason.length < 8) {
-    return { success: false, status: 'UPDATE_REJECTED', error: 'RESOLUTION_REASON_REQUIRED',
-      message: 'Provide a specific human review reason of at least 8 characters; no fields were changed.', transactionId: transactionId, requestId: requestId };
+    return {
+      success: false, status: 'UPDATE_REJECTED', error: 'RESOLUTION_REASON_REQUIRED',
+      message: 'Provide a specific human review reason of at least 8 characters; no fields were changed.', transactionId: transactionId, requestId: requestId
+    };
   }
   const rowNumber = pfisFindTransactionRow(transactionId);
-  if (rowNumber < 2) return { success: false, status: 'NOT_FOUND', error: 'NOT_FOUND',
-    message: 'Transaction not found: ' + transactionId, transactionId: transactionId, requestId: requestId };
+  if (rowNumber < 2) return {
+    success: false, status: 'NOT_FOUND', error: 'NOT_FOUND',
+    message: 'Transaction not found: ' + transactionId, transactionId: transactionId, requestId: requestId
+  };
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
   const current = pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
   const currentFlag = pfisString(current.validationFlag).toUpperCase();
   if (['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT'].indexOf(currentFlag) < 0) {
-    return { success: false, status: 'UPDATE_REJECTED', error: 'NO_RESOLVABLE_CONFLICT',
+    return {
+      success: false, status: 'UPDATE_REJECTED', error: 'NO_RESOLVABLE_CONFLICT',
       message: 'This transaction does not have a DUPLICATE_CANDIDATE or SOURCE_CONFLICT flag. No fields were changed.',
-      transactionId: transactionId, currentValidationFlag: currentFlag, requestId: requestId };
+      transactionId: transactionId, currentValidationFlag: currentFlag, requestId: requestId
+    };
   }
 
   const categories = pfisGetCategoryList();
@@ -1706,10 +1785,14 @@ function pfisResolveTransactionException(params, requestId) {
     { field: 'Reviewed By', oldValue: pfisString(current.reviewedBy), newValue: needsReview ? '' : actor },
     { field: 'Reviewed At', oldValue: pfisString(current.reviewedAt), newValue: needsReview ? '' : now.toISOString() }
   ].map(function (event) {
-    return { eventKey: 'exception-resolve:' + transactionId + ':' + requestId + ':' + event.field,
-      change: { transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: actor,
+    return {
+      eventKey: 'exception-resolve:' + transactionId + ':' + requestId + ':' + event.field,
+      change: {
+        transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: actor,
         field: event.field, oldValue: event.oldValue, newValue: event.newValue,
-        reason: auditReason, requestId: requestId } };
+        reason: auditReason, requestId: requestId
+      }
+    };
   }));
   pfisInvalidateTransactionCache();
   pfisWriteLegacyTransactionAux(rowNumber, pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS),
@@ -1837,10 +1920,12 @@ function pfisUpdateTransaction(params, requestId) {
     sheet.getRange(rowNumber, PFIS_TX_FIELDS.indexOf(field) + 1).setValue(newValue);
     updateAuditEvents.push({
       eventKey: 'update:' + transactionId + ':' + requestId + ':' + field,
-      change: { transactionId: transactionId, targetTable: PFIS_SHEETS.transactions,
+      change: {
+        transactionId: transactionId, targetTable: PFIS_SHEETS.transactions,
         actor: pfisString(params.actor) || 'user', field: field,
         oldValue: String(oldValue), newValue: String(newValue),
-        reason: pfisString(params.reason) || 'user_update', requestId: requestId }
+        reason: pfisString(params.reason) || 'user_update', requestId: requestId
+      }
     });
   });
   pfisAppendChangeOnceBatch(updateAuditEvents);
@@ -2879,8 +2964,10 @@ function pfisCleanupBlankTransactionCheckboxDefaults() {
     for (let start = 0; start < cellsToClear.length; start += 100) {
       sheet.getRangeList(cellsToClear.slice(start, start + 100)).clearContent();
     }
-    return { success: true, rowsChecked: values.length, cellsCleared: cellsCleared,
-      message: 'Only literal FALSE defaults on fully otherwise-empty rows were cleared. No keyed transaction rows were changed.' };
+    return {
+      success: true, rowsChecked: values.length, cellsCleared: cellsCleared,
+      message: 'Only literal FALSE defaults on fully otherwise-empty rows were cleared. No keyed transaction rows were changed.'
+    };
   } finally {
     lock.releaseLock();
   }
@@ -3528,8 +3615,8 @@ function pfisParseConfidence(value) {
  * A mismatch never blocks the canonical ledger write. Change Log remains the
  * authoritative detailed audit; AM is only a concise per-row summary.
  */
-function pfisWriteLegacyTransactionAux(rowNumber, transaction, auditEvent) {
-  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+function pfisWriteLegacyTransactionAux(rowNumber, transaction, auditEvent, targetSheet) {
+  const sheet = targetSheet || pfisGetRequiredSheet(PFIS_SHEETS.transactions);
   const legacy = PFIS_LEGACY_TX_COLUMNS;
   const firstCol = legacy.first; // AD
   if (sheet.getMaxColumns() < firstCol) return;
@@ -4226,5 +4313,3 @@ function pfisPad2(value) { return String(value).padStart(2, '0'); }
 function pfisUnique(values) { const seen = {}; return values.filter(function (value) { const key = pfisString(value); if (!key || seen[key]) return false; seen[key] = true; return true; }); }
 function pfisUniqueBy(values, key) { const seen = {}; return values.filter(function (value) { const token = pfisString(value[key]); if (!token || seen[token]) return false; seen[token] = true; return true; }); }
 function pfisParseProcessingMeta(value) { try { return JSON.parse(String(value || '{}')); } catch (error) { return {}; } }
-
- 

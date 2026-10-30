@@ -1275,9 +1275,11 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   const merchantUsable = pfisIsMatchableMerchant(existingMerchant) && pfisIsMatchableMerchant(incomingMerchantKey);
   const sameMerchant = merchantUsable && existingMerchant === incomingMerchantKey;
   const sameAmount = pfisSameMoney(existing.amount, incoming.amount);
-  const existingRef = pfisNormalizeReference(existing.refNo);
+  const existingRef = pfisNormalizeReference(existing.refNo) ||
+    pfisNormalizeReference(existingSource.extractedReferenceNo);
   const incomingRef = pfisNormalizeReference(incoming.refNo);
   const sameRef = !!existingRef && existingRef === incomingRef;
+  const referenceConflict = !!existingRef && !!incomingRef && existingRef !== incomingRef;
   const sameDay = pfisSameCalendarDay(existingSource.extractedDate, incoming.datetime);
   const hasTime = pfisIsPrecision(existingSource.datePrecision) && pfisIsPrecision(incoming.datePrecision);
   const existingDate = pfisParseDateValue(existingSource.extractedDate);
@@ -1297,10 +1299,13 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   // Bank emails often replace a real merchant with "Unspecified". Only accept
   // that missing-merchant cross-channel pair when the canonical bank, amount,
   // resolved account and exact source clock time all agree.
-  if (sameAmount && sameDay && sameResolvedAccount && hasTime && !!existingDate && !!incomingDate &&
-      existingDate.getTime() === incomingDate.getTime() &&
-      (!pfisIsMatchableMerchant(existingMerchant) || !pfisIsMatchableMerchant(incomingMerchantKey)) &&
-      !accountConflict && !accountTypeConflict) {
+  const genericExactTimePair = sameAmount && sameDay && sameResolvedAccount && hasTime &&
+    !!existingDate && !!incomingDate && existingDate.getTime() === incomingDate.getTime() &&
+    (!pfisIsMatchableMerchant(existingMerchant) || !pfisIsMatchableMerchant(incomingMerchantKey));
+  if (genericExactTimePair && referenceConflict) {
+    return { kind: 'CONFLICT', reason: 'same_bank_account_amount_time_reference_conflict' };
+  }
+  if (genericExactTimePair && !accountConflict && !accountTypeConflict) {
     return { kind: 'MATCH', reason: 'exact_time_amount_bank_resolved_account_generic_merchant' };
   }
 

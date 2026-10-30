@@ -1605,7 +1605,10 @@ function pfisWriteOptionalBudgetPeriods(rowNumber, transaction, targetSheet) {
   }
   const incomeMonthCol = headers.indexOf('incomemonth') + 1;
   const budgetMonthCol = headers.indexOf('budgetmonth') + 1;
-  if (incomeMonthCol > 0) sheet.getRange(rowNumber, incomeMonthCol).setValue(monthStart(0));
+  const isIncome = pfisNormalizeType(transaction && transaction.type) === 'income';
+  if (incomeMonthCol > 0) {
+    sheet.getRange(rowNumber, incomeMonthCol).setValue(isIncome ? monthStart(0) : '');
+  }
   if (budgetMonthCol > 0) sheet.getRange(rowNumber, budgetMonthCol).setValue(monthStart(budgetOffset));
 }
 

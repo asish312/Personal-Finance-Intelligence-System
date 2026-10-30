@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+<title id="title">How PFIS configuration works</title>
+<desc id="desc">A visual explanation of how Categories, Config, Rules and Holiday Calendar guide transaction classification and budget allocation. All examples are fictional.</desc>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0d172b"/><stop offset="1" stop-color="#20324f"/></linearGradient>
+<style>.ui{font-family:Inter,Segoe UI,Arial,sans-serif}.w{fill:#f6f8ff}.m{fill:#9eafc9}.card{fill:#172841;stroke:#304967;stroke-width:1.4}.h{font-size:22px;font-weight:750}.sm{font-size:15px}.tiny{font-size:12px}</style></defs>
+<rect width="1600" height="900" rx="30" fill="url(#bg)"/>
+<rect x="36" y="28" width="1528" height="112" rx="22" fill="#20395a"/>
+<g class="ui"><text x="72" y="76" fill="#78dfce" font-size="13" font-weight="800" letter-spacing="2">PFIS · CONFIGURATION</text><text x="72" y="111" class="w" font-size="30" font-weight="850">Four configuration layers. One consistent result.</text><text x="1524" y="84" text-anchor="end" class="m sm">Set up once · Apply on every alert</text></g>
+<!-- layers -->
+<rect class="card" x="36" y="174" width="715" height="258" rx="20"/><rect x="36" y="174" width="9" height="258" rx="5" fill="#2cc8b4"/>
+<g class="ui"><text x="72" y="218" class="w h">01 · Categories</text><text x="72" y="245" class="m sm">What kind of financial activity is this?</text>
+<g class="sm w"><rect x="72" y="277" width="174" height="42" rx="10" fill="#1d4552"/><text x="159" y="304" text-anchor="middle">Housing</text><rect x="259" y="277" width="174" height="42" rx="10" fill="#1e4165"/><text x="346" y="304" text-anchor="middle">Food &amp; Dining</text><rect x="446" y="277" width="174" height="42" rx="10" fill="#413760"/><text x="533" y="304" text-anchor="middle">Transport</text>
+<rect x="72" y="334" width="174" height="42" rx="10" fill="#62472a"/><text x="159" y="361" text-anchor="middle">Health</text><rect x="259" y="334" width="174" height="42" rx="10" fill="#315346"/><text x="346" y="361" text-anchor="middle">Investments</text><rect x="446" y="334" width="174" height="42" rx="10" fill="#39465f"/><text x="533" y="361" text-anchor="middle">Miscellaneous</text></g>
+<text x="72" y="405" class="m tiny">Keep the vocabulary small, active and meaningful.</text></g>
+<rect class="card" x="785" y="174" width="779" height="258" rx="20"/><rect x="785" y="174" width="9" height="258" rx="5" fill="#5c8dff"/>
+<g class="ui"><text x="821" y="218" class="w h">02 · Config</text><text x="821" y="245" class="m sm">Which account, card and instrument does the evidence identify?</text>
+<g class="m tiny"><text x="821" y="290">BANK</text><text x="1010" y="290">ACCOUNT TYPE</text><text x="1205" y="290">IDENTITY EVIDENCE</text><text x="1435" y="290">PRIORITY</text></g><path d="M821 302H1527" stroke="#354c6c"/>
+<g class="w sm"><text x="821" y="338">Demo Bank</text><text x="1010" y="338">Savings</text><text x="1205" y="338">Suffix 2468</text><text x="1435" y="338">1</text><text x="821" y="382">Demo Card</text><text x="1010" y="382">Credit Card</text><text x="1205" y="382">Suffix 1357</text><text x="1435" y="382">1</text></g>
+<text x="821" y="405" class="m tiny">Use non-sensitive account labels and suffixes, never full account numbers.</text></g>
+<rect class="card" x="36" y="458" width="1010" height="260" rx="20"/><rect x="36" y="458" width="9" height="260" rx="5" fill="#a58cf7"/>
+<g class="ui"><text x="72" y="502" class="w h">03 · Rules</text><text x="72" y="529" class="m sm">How should the transaction be classified and described?</text>
+<g class="m tiny"><text x="72" y="574">MATCH TYPE</text><text x="295" y="574">MERCHANT</text><text x="520" y="574">CATEGORY</text><text x="735" y="574">PURPOSE TEMPLATE</text></g>
+<path d="M72 586H1005" stroke="#354b69"/>
+<g class="w sm"><text x="72" y="620">MERCHANT</text><text x="295" y="620">Payroll alias</text><text x="520" y="620">Income</text><text x="735" y="620">Salary from Employer</text><text x="72" y="663">AMOUNT+MERCHANT</text><text x="295" y="663">Known payment</text><text x="520" y="663">Utilities</text><text x="735" y="663">Optional purpose</text></g>
+<text x="72" y="695" class="m tiny">More-specific rules should win; conflicting equally ranked rules should remain reviewable.</text></g>
+<rect class="card" x="1080" y="458" width="484" height="260" rx="20"/><rect x="1080" y="458" width="9" height="260" rx="5" fill="#f0b35d"/>
+<g class="ui"><text x="1116" y="502" class="w h">04 · Holiday Calendar</text><text x="1116" y="529" class="m sm">When does an employer's month end?</text>
+<rect x="1116" y="565" width="410" height="94" rx="12" fill="#243a56"/>
+<g class="m tiny"><text x="1140" y="592">DATE</text><text x="1260" y="592">SCOPE</text><text x="1384" y="592">WORKING?</text></g>
+<g class="w sm"><text x="1140" y="625">30 Oct</text><text x="1260" y="625">HCL</text><text x="1384" y="625" fill="#7fe0cc">TRUE</text></g>
+<text x="1116" y="687" class="m tiny">Weekend defaults + verified scoped overrides.</text></g>
+<!-- output -->
+<path d="M392 432V448M1160 432V448M544 718V756H800M1322 718V756H800" stroke="#6c85a7" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<path d="m385 440 7 8 7-8m751 0 7 8 7-8" stroke="#6c85a7" stroke-width="2.5" fill="none"/>
+<rect x="310" y="756" width="980" height="98" rx="18" fill="#14443e" stroke="#2ba68e" stroke-width="1.5"/>
+<g class="ui" text-anchor="middle"><text x="800" y="796" fill="#75e2cc" font-size="14" font-weight="800">CONFIGURATION OUTPUT</text><text x="800" y="829" class="w" font-size="22" font-weight="800">A consistent, explainable transaction record</text></g>
+<text x="1530" y="880" class="ui tiny" text-anchor="end" fill="#f1c17c" font-weight="800">ALL EXAMPLES ARE FICTIONAL</text>
+</svg>

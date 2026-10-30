@@ -435,7 +435,8 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       var rowNumber = pfisFindTransactionRow(response.transactionId);
       pfisPreflightAssert_(rowNumber === 2, 'The new transaction did not reuse the checkbox-only row 2; actual row ' + rowNumber + '.');
       pfisWriteOptionalBudgetPeriods(rowNumber, {
-        dateTime: pfisCreateIndiaDate(2026, 10, 30, 2, 34, 29), budgetMonthOffset: 1
+        dateTime: pfisCreateIndiaDate(2026, 10, 30, 2, 34, 29),
+        type: 'income', category: 'Income', budgetMonthOffset: 1
       }, txSheet);
       var incomeMonth = txSheet.getRange(rowNumber, 41).getValue();
       var budgetMonth = txSheet.getRange(rowNumber, 40).getValue();

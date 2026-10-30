@@ -448,6 +448,48 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
     }, startedAt);
 
     if (smsResponse && smsResponse.transactionId) {
+      pfisPreflightRunCase_(report, 'Gemini Purpose suggestions require explicit approval and are applied through Change Log', function () {
+        var queue = testSpreadsheet.getSheetByName(PFIS_PURPOSE_REVIEW_SHEET);
+        var purpose = 'Household grocery purchase';
+        var sourceId = pfisString(smsResponse.sourceId);
+        pfisPreflightAssert_(!!sourceId, 'SMS sourceId is required for evidence-linked Purpose approval.');
+        var proposedAt = new Date();
+        queue.appendRow([
+          'PFIS-TEST-PURPOSE-001', smsResponse.transactionId,
+          pfisCreateIndiaDate(2026, 10, 1, 10, 0, 0), 'Test Merchant', -125,
+          'Food & Dining', 'expense', purpose,
+          'Synthetic source alert explicitly describes a grocery purchase.',
+          sourceId, 0.92, 'SUGGESTED', proposedAt, '', '', '', ''
+        ]);
+        var suggestionRow = queue.getLastRow();
+        var before = pfisGetTransaction(smsResponse.transactionId, false);
+        pfisPreflightAssert_(before.userNotes === '', 'Test transaction should begin with blank Purpose.');
+        var notApproved = PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS();
+        pfisPreflightAssert_(notApproved.applied === 0, 'Gemini suggestion was applied without human approval.');
+        pfisPreflightAssert_(pfisGetTransaction(smsResponse.transactionId, false).userNotes === '',
+          'Purpose changed while suggestion status was SUGGESTED.');
+        queue.getRange(suggestionRow, 12).setValue('APPROVED');
+        queue.getRange(suggestionRow, 14).setValue('PFIS TEST REVIEWER');
+        queue.getRange(suggestionRow, 15).setValue(new Date());
+        var applied = PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS();
+        pfisPreflightAssert_(applied.applied === 1 && applied.failed === 0,
+          'Approved purpose suggestion was not applied: ' + JSON.stringify(applied));
+        var stored = pfisGetTransaction(smsResponse.transactionId, false);
+        pfisPreflightAssert_(stored.userNotes === purpose, 'Approved Purpose was not written to the canonical ledger.');
+        pfisPreflightAssert_(stored.needsReview === false, 'Purpose enrichment created a review blocker.');
+        var changeRows = pfisReadFixedRows(testSpreadsheet.getSheetByName(PFIS_SHEETS.changes), PFIS_CHANGE_FIELDS.length)
+          .map(function (row) { return pfisObjectFromRow(row, PFIS_CHANGE_FIELDS); });
+        pfisPreflightAssert_(changeRows.some(function (change) {
+          return change.transactionId === smsResponse.transactionId &&
+            change.field === 'userNotes' && change.newValue === purpose &&
+            change.actor === 'PFIS TEST REVIEWER';
+        }), 'Purpose update did not create the expected Change Log audit row.');
+        var secondRun = PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS();
+        pfisPreflightAssert_(secondRun.applied === 0, 'Already applied Purpose suggestion was processed again.');
+        pfisPreflightAssert_(pfisString(queue.getRange(suggestionRow, 12).getValue()) === 'APPLIED',
+          'Purpose Review Queue row was not marked APPLIED.');
+        return 'SUGGESTED did not write; human APPROVED applied Purpose via normal update/audit path; repeat run did not overwrite';
+      }, startedAt);
       // Simulate a legacy source row whose extracted date is stored as a DD/MM/YYYY text value.
       pfisPreflightRunCase_(report, 'Legacy non-ISO source date is preserved for reconciliation', function () {
         var sourceIdCell = sourceSheet.getRange(3, 1).getValue();
@@ -974,6 +1016,8 @@ function pfisPreflightSetupWorkbook_(spreadsheet) {
   pfisPreflightWriteHeaders_(archiveSheet, archiveHeaders);
   var holidaySheet = spreadsheet.insertSheet(PFIS_HOLIDAY_CALENDAR_SHEET);
   pfisPreflightWriteHeaders_(holidaySheet, ['Date', 'Calendar Scope', 'Is Working Day', 'Description']);
+  var purposeQueueSheet = spreadsheet.insertSheet(PFIS_PURPOSE_REVIEW_SHEET);
+  pfisPreflightWriteHeaders_(purposeQueueSheet, PFIS_PURPOSE_REVIEW_HEADERS);
 
   // One deterministic, explicitly synthetic Rule row. N:S match the optional extension contract.
   rulesSheet.getRange(2, 1, 1, ruleHeaders.length).setValues([[

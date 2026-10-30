@@ -165,7 +165,7 @@ A salary received on the last working day of October is October income, even whe
 | Type Override | income |
 | Auto Purpose (T) | FALSE |
 | Purpose Trigger (U) | LAST_WORKING_DAY_OF_MONTH |
-| Calendar Scope (V) | Example Employer |
+| Calendar Scope (V) | EMPLOYER_DEMO |
 | Budget Month Offset (W) | 1 |
 
 The result is deliberately split:
@@ -322,8 +322,6 @@ The write actions include `ingest`, `update`, `reprocesssource` and `resolveexce
 
 - [Production Transaction Engine](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_TransactionEngine_v1.0.0.gs)
 - [Preflight regression harness](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Preflight_Tests_v1.0.0.gs)
-- [iOS Shortcut implementation reference](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Shortcut_Implementation_v1.0.0.txt)
-- [Prompt reference](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/PFIS_Prompts_Final_v1.0.0_Prompts.txt)
 - [Engineering review notes](https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/REVIEW_NOTES.md)
 - [All README illustrations](https://github.com/asish312/Personal-Finance-Intelligence-System/tree/main/docs/images)
 

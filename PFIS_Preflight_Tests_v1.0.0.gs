@@ -334,13 +334,6 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           '29 October should become the last working day after the holiday override.');
         holidaySheet.getRange(2, 1, 1, 4).clearContent();
         PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
-        pfisWriteOptionalBudgetPeriods(2, { dateTime: transactionDate, budgetMonthOffset: 1 }, txSheet);
-        var incomeMonth = txSheet.getRange(2, 41).getValue();
-        var budgetMonth = txSheet.getRange(2, 40).getValue();
-        pfisPreflightAssert_(Utilities.formatDate(incomeMonth, PFIS_TIME_ZONE, 'yyyy-MM-dd') === '2026-10-01',
-          'Income Month must remain October.');
-        pfisPreflightAssert_(Utilities.formatDate(budgetMonth, PFIS_TIME_ZONE, 'yyyy-MM-dd') === '2026-11-01',
-          'Budget Month must be November for the October salary.');
       } finally {
         rulesSheet.getRange(2, 7, 1, 17).setValues([before]);
         rulesSheet.getRange(2, PFIS_RULE_AUTO_PURPOSE_COLUMN).setValue(false);
@@ -441,6 +434,15 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       pfisPreflightAssert_(response.transaction.ruleApplied === 'TEST-RULE', 'Configured rule ID was not applied.');
       var rowNumber = pfisFindTransactionRow(response.transactionId);
       pfisPreflightAssert_(rowNumber === 2, 'The new transaction did not reuse the checkbox-only row 2; actual row ' + rowNumber + '.');
+      pfisWriteOptionalBudgetPeriods(rowNumber, {
+        dateTime: pfisCreateIndiaDate(2026, 10, 30, 2, 34, 29), budgetMonthOffset: 1
+      }, txSheet);
+      var incomeMonth = txSheet.getRange(rowNumber, 41).getValue();
+      var budgetMonth = txSheet.getRange(rowNumber, 40).getValue();
+      pfisPreflightAssert_(Utilities.formatDate(incomeMonth, PFIS_TIME_ZONE, 'yyyy-MM-dd') === '2026-10-01',
+        'Income Month must be October.');
+      pfisPreflightAssert_(Utilities.formatDate(budgetMonth, PFIS_TIME_ZONE, 'yyyy-MM-dd') === '2026-11-01',
+        'Budget Month must be November for October income.');
       return response;
     }, startedAt);
 

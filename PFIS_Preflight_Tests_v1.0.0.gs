@@ -30,7 +30,7 @@ var PFIS_PREFLIGHT_TEMP_PREFIX = 'PFIS_AUTOTEST_TEMP_DO_NOT_USE_';
 function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
   var startedAt = Date.now();
   var report = {
-    suite: 'PFIS Transaction Engine v1.0.0 preflight',
+    suite: 'PFIS Transaction Engine v1.1.0 preflight',
     startedAt: new Date(startedAt).toISOString(),
     maxRuntimeMs: PFIS_PREFLIGHT_MAX_RUNTIME_MS,
     productionSpreadsheet: { status: 'NOT_CHECKED' },
@@ -264,6 +264,8 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
     var txSheet = testSpreadsheet.getSheetByName(PFIS_SHEETS.transactions);
     var sourceSheet = testSpreadsheet.getSheetByName(PFIS_SHEETS.sources);
     var rulesSheet = testSpreadsheet.getSheetByName(PFIS_SHEETS.rules);
+    var archiveSheet = testSpreadsheet.getSheetByName('Rejected & Archive Log');
+    var holidaySheet = testSpreadsheet.getSheetByName(PFIS_HOLIDAY_CALENDAR_SHEET);
 
     pfisPreflightRunCase_(report, 'Auto Purpose T header/value is read independently from N:S', function () {
       PFIS_RUNTIME_RULE_CACHE = null;
@@ -295,7 +297,76 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         rulesSheet.getRange(2, PFIS_RULE_AUTO_PURPOSE_COLUMN).setValue(false);
         PFIS_RUNTIME_RULE_CACHE = null;
       }
-      return 'Rules!T controls exact-rule purpose autofill; amount-mismatch fallback inherits category only';
+      return 'Rules!T controls explicit purpose autofill; amount-mismatch fallback inherits category only';
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'HCL salary purpose is triggered by the transaction date last working day', function () {
+      var before = rulesSheet.getRange(2, 7, 1, 17).getValues()[0];
+      var transactionDate = pfisCreateIndiaDate(2026, 10, 30, 2, 34, 29);
+      try {
+        rulesSheet.getRange(2, 7).setValue('Salary from HCL for {{monthLabel}}');
+        rulesSheet.getRange(2, 8).setValue(0);
+        rulesSheet.getRange(2, PFIS_RULE_AUTO_PURPOSE_COLUMN).setValue(false);
+        rulesSheet.getRange(2, PFIS_RULE_PURPOSE_TRIGGER_COLUMN, 1, 3)
+          .setValues([['LAST_WORKING_DAY_OF_MONTH', 'HCL', 1]]);
+        PFIS_RUNTIME_RULE_CACHE = null;
+        var parsed = {
+          datetime: transactionDate, datePrecision: 'DATETIME', amount: -125,
+          bank: 'Axis Bank', accountType: 'Savings Account', instrument: 'UPI',
+          type: 'expense', merchant: 'Test Merchant', counterparty: 'Test Merchant',
+          refNo: 'UTRHCLSALARYTEST', balanceAfter: ''
+        };
+        var result = pfisEvaluateRules(parsed, 'HCL payroll notification at Test Merchant on 30/10/2026 02:34:29.');
+        pfisPreflightAssert_(result.autoPurpose === false, 'The test must prove the working-day trigger works with Auto Purpose FALSE.');
+        pfisPreflightAssert_(result.notes === 'Salary from HCL for Oct-26', 'Salary description used the wrong month: ' + result.notes);
+        pfisPreflightAssert_(result.budgetMonthOffset === 1, 'HCL salary should allocate to next month.');
+        pfisPreflightAssert_(pfisGetTrustedPurposeFromRule(result, 'Test Merchant', transactionDate) === 'Salary from HCL for Oct-26',
+          'Last-working-day trigger did not authorize the salary purpose.');
+        pfisPreflightAssert_(!pfisIsLastWorkingDayOfMonth(pfisCreateIndiaDate(2026, 10, 29, 12, 0, 0), 'HCL'),
+          '29 October should not be last working day while 30 October is a weekday.');
+        holidaySheet.getRange(2, 1, 1, 4).setValues([[
+          pfisCreateIndiaDate(2026, 10, 30, 12, 0, 0), 'HCL', false, 'Synthetic HCL holiday override'
+        ]]);
+        PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
+        pfisPreflightAssert_(!pfisIsLastWorkingDayOfMonth(transactionDate, 'HCL'),
+          'The HCL-specific holiday override should make 30 October non-working.');
+        pfisPreflightAssert_(pfisIsLastWorkingDayOfMonth(pfisCreateIndiaDate(2026, 10, 29, 12, 0, 0), 'HCL'),
+          '29 October should become the last working day after the holiday override.');
+        holidaySheet.getRange(2, 1, 1, 4).clearContent();
+        PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
+        pfisWriteOptionalBudgetPeriods(2, { dateTime: transactionDate, budgetMonthOffset: 1 }, txSheet);
+        var incomeMonth = txSheet.getRange(2, 41).getValue();
+        var budgetMonth = txSheet.getRange(2, 40).getValue();
+        pfisPreflightAssert_(Utilities.formatDate(incomeMonth, PFIS_TIME_ZONE, 'yyyy-MM-dd') === '2026-10-01',
+          'Income Month must remain October.');
+        pfisPreflightAssert_(Utilities.formatDate(budgetMonth, PFIS_TIME_ZONE, 'yyyy-MM-dd') === '2026-11-01',
+          'Budget Month must be November for the October salary.');
+      } finally {
+        rulesSheet.getRange(2, 7, 1, 17).setValues([before]);
+        rulesSheet.getRange(2, PFIS_RULE_AUTO_PURPOSE_COLUMN).setValue(false);
+        holidaySheet.getRange(2, 1, 1, 4).clearContent();
+        PFIS_RUNTIME_RULE_CACHE = null;
+        PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = null;
+      }
+      return 'Transaction date controls earned-month purpose; HCL working-day calendar controls trigger; Budget Month +1 allocates to November';
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'Blank purpose and missing category are non-blocking', function () {
+      var parsed = {
+        datetime: pfisCreateIndiaDate(2026, 10, 5, 12, 0, 0), datePrecision: 'DATETIME',
+        amount: -80, bank: 'Axis Bank', accountType: 'Savings Account', instrument: 'UPI',
+        type: 'expense', merchant: 'Unknown Test Merchant', counterparty: 'Unknown Test Merchant',
+        refNo: 'UTRMISCOPTIONAL80', balanceAfter: ''
+      };
+      var config = { account: 'AXIS_SAVINGS', cardName: '', instrument: 'UPI',
+        isInternal: false, ambiguous: false, unresolved: false };
+      var tx = pfisBuildTransaction(parsed, {}, 'SMS', '202610-999', 'SRC-PREFLIGHT', 'HASH-PREFLIGHT',
+        pfisEmptyRuleResult(), config, '', null);
+      pfisPreflightAssert_(tx.category === 'Miscellaneous', 'Missing category did not fall back to Miscellaneous.');
+      pfisPreflightAssert_(tx.userNotes === '', 'A purpose was unexpectedly fabricated.');
+      pfisPreflightAssert_(tx.needsReview === false && tx.validationFlag === 'VALID',
+        'Blank purpose or Miscellaneous fallback incorrectly blocked transaction acceptance.');
+      return 'Missing category => Miscellaneous; blank Purpose => accepted transaction, not Needs Review';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Different amount reuses merchant category only', function () {

@@ -116,11 +116,30 @@ Keep Purpose short (normally 3–8 words), neutral, factual and useful in a repo
 
 The Evidence Summary should briefly explain which words in the source support the suggestion. Do not copy full SMS/email content or include account/card numbers, balances, OTPs, phone numbers or full reference numbers. Put the linked Source ID(s) in column J, comma-separated.
 
-## 6. Daily Gemini Task prompt
+## 6. Connect Gemini and create the daily schedule
 
-In Gemini, create a Task (not merely a one-off chat) and schedule it once daily, for example 8:30 AM Asia/Kolkata.
+The user must create this Task in their own Gemini account; the repository cannot create or enable it on their behalf.
 
-Use the following instruction as the Task's reusable prompt:
+1. Open gemini.google.com and sign in with the same Google account that can access the PFIS workbook.
+2. In Gemini settings, open Connected Apps and connect Google Workspace. Make sure Google Sheets access is available. Keep Activity / the required connected-app settings must be enabled.
+3. Confirm Gemini can find and read the PFIS workbook. Do not grant broader Drive access than needed.
+4. Start a new Task (Task mode, not a normal one-off Chat).
+5. Paste the daily prompt below and ask Gemini to schedule it every day at 8:30 AM Asia/Kolkata.
+6. Review the proposed schedule, time zone and connected sources. Save/confirm the schedule.
+7. Open the Task's work panel and confirm that the PFIS workbook and Google Sheets were actually used. Do a first manual run and verify the Purpose Review Queue before relying on recurrence.
+
+Current Google documentation says Gemini Tasks/schedules have account, plan, age, Keep Activity, Personal Intelligence and regional requirements. The currently documented Task workflow is not available to work/school accounts in the same way as personal accounts. Gemini capabilities and eligibility can change; verify the account shown in Gemini before configuring this workflow.
+
+Google documents that edits to shared spreadsheets require review/confirmation of Gemini's proposed changes. If Gemini asks for confirmation, the workflow is not fully unattended; do not assume the scheduled edit has been committed until the queue row is visible.
+
+Google references:
+- Tasks and schedules: https://support.google.com/gemini/answer/17094710
+- Workspace actions for Tasks, including Sheets: https://support.google.com/gemini/answer/17094507
+- Connect Google Workspace: https://support.google.com/gemini/answer/15229592
+
+## 7. Daily Gemini Task prompt
+
+In Gemini Task mode, use the following instruction as the Task's reusable prompt:
 
 ---
 You are the PFIS daily Purpose enrichment assistant.
@@ -181,7 +200,7 @@ At the end, report counts for:
 Never claim a suggestion was saved unless it is visible in Purpose Review Queue. If Google Sheets asks for confirmation before editing a shared spreadsheet, stop and request the required confirmation; do not claim the scheduled write completed.
 ---
 
-## 7. Human review
+## 8. Human review
 
 The reviewer must open the original linked Source Log message and the candidate queue row.
 
@@ -193,7 +212,7 @@ To approve:
 
 To decline, set REJECTED. For insufficient evidence, set NEEDS_MORE_EVIDENCE. Do not approve an item simply because Gemini generated it.
 
-## 8. Applying approved suggestions
+## 9. Applying approved suggestions
 
 The production engine now includes:
 
@@ -215,7 +234,7 @@ The helper does not call Gemini and does not create suggestions. Gemini writes p
 
 Run the function manually after approving rows, or create an Apps Script time-driven trigger for this function (for example every 15 minutes). The trigger only applies rows explicitly marked APPROVED with reviewer fields populated. It does not approve rows itself.
 
-## 9. Gemini Tasks availability and shared-sheet confirmation
+## 10. Gemini Tasks availability and shared-sheet confirmation
 
 Gemini Tasks and schedules depend on account type, plan, Keep Activity, region and connected-app permissions. Current Google help says scheduled Tasks require a personal Google Account, age 18+, an eligible Google AI plan, Keep Activity and Personal Intelligence; availability varies by region. Work/school account availability differs.
 
@@ -226,7 +245,7 @@ Official references:
 - What Gemini Tasks can do with Google Sheets: https://support.google.com/gemini/answer/17094507
 - Connect Google Workspace to Gemini: https://support.google.com/gemini/answer/15229592
 
-## 10. Security and failure handling
+## 11. Security and failure handling
 
 - Do not expose WEB_APP_SECRET to Gemini.
 - Do not copy complete bank notification text into the queue.

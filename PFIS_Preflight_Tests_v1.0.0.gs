@@ -1,5 +1,5 @@
 /**
- * PFIS Transaction Engine v1.0.0 — bounded preflight / regression harness
+ * PFIS Transaction Engine v1.0.1 — bounded preflight / regression harness
  *
  * INSTALLATION
  * 1. Add this file to the SAME Apps Script project as the updated PFIS Transaction Engine source file.
@@ -30,7 +30,7 @@ var PFIS_PREFLIGHT_TEMP_PREFIX = 'PFIS_AUTOTEST_TEMP_DO_NOT_USE_';
 function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
   var startedAt = Date.now();
   var report = {
-    suite: 'PFIS Transaction Engine v1.0.0 preflight',
+    suite: 'PFIS Transaction Engine v1.0.1 preflight',
     startedAt: new Date(startedAt).toISOString(),
     maxRuntimeMs: PFIS_PREFLIGHT_MAX_RUNTIME_MS,
     productionSpreadsheet: { status: 'NOT_CHECKED' },
@@ -448,6 +448,147 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
     }, startedAt);
 
     if (smsResponse && smsResponse.transactionId) {
+      pfisPreflightRunCase_(report, 'isReviewNeeded contract validates types, persists review, exposes queue and supports audited acknowledgement', function () {
+        var beforeTransactions = pfisPreflightCountNonblankKeys_(txSheet, 1);
+        var beforeSources = pfisPreflightCountPrefixedKeys_(sourceSheet, 1, 'SRC-');
+        var sampleTxn = '02/10/2026 13:00:00|-333.21|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRREVIEWFALSE333|NA';
+        var sampleBody = 'PFIS review flag false-path test: INR 333.21 at Test Merchant on 02/10/2026 13:00:00. Ref UTRREVIEWFALSE333.';
+
+        var invalidStringFlag = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: sampleTxn,
+          originalText: sampleBody, isReviewNeeded: 'true',
+          requestId: 'PFIS-TEST-REVIEW-INVALID-STRING'
+        }), 'POST');
+        pfisPreflightAssert_(invalidStringFlag.error === 'INVALID_REVIEW_FLAG',
+          'String "true" was not rejected as a non-boolean review flag: ' + JSON.stringify(invalidStringFlag));
+
+        var deprecatedDeviceFlag = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: sampleTxn,
+          originalText: sampleBody, deviceLocked: true,
+          requestId: 'PFIS-TEST-REVIEW-DEVICE-LOCKED'
+        }), 'POST');
+        pfisPreflightAssert_(deprecatedDeviceFlag.error === 'UNSUPPORTED_DEVICE_STATE_FIELD',
+          'Deprecated deviceLocked field was not rejected: ' + JSON.stringify(deprecatedDeviceFlag));
+
+        var flagOnRead = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'health', isReviewNeeded: true,
+          requestId: 'PFIS-TEST-REVIEW-FLAG-ON-READ'
+        }), 'POST');
+        pfisPreflightAssert_(flagOnRead.error === 'REVIEW_FLAG_NOT_ALLOWED_FOR_ACTION',
+          'Review flag was silently accepted on a read-only action: ' + JSON.stringify(flagOnRead));
+
+        pfisPreflightAssert_(pfisPreflightCountNonblankKeys_(txSheet, 1) === beforeTransactions,
+          'Invalid/deprecated contract requests wrote a transaction.');
+        pfisPreflightAssert_(pfisPreflightCountPrefixedKeys_(sourceSheet, 1, 'SRC-') === beforeSources,
+          'Invalid/deprecated contract requests wrote a source row.');
+
+        var falseResponse = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: sampleTxn,
+          originalText: sampleBody, isReviewNeeded: false,
+          requestId: 'PFIS-TEST-REVIEW-FALSE'
+        }), 'POST');
+        pfisPreflightAssert_(falseResponse && falseResponse.success === true && falseResponse.status === 'ACCEPTED',
+          'Explicit false request did not ingest normally: ' + JSON.stringify(falseResponse));
+        pfisPreflightAssert_(falseResponse.nextAction === 'SHOW_RECEIPT' &&
+          falseResponse.transaction.needsReview === false &&
+          falseResponse.transaction.reviewReason === '',
+          'isReviewNeeded=false unexpectedly created a review case.');
+
+        var reviewTxn = '02/10/2026 13:10:00|-334.22|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRREVIEWTRUE334|NA';
+        var reviewBody = 'PFIS review flag true-path test: INR 334.22 at Test Merchant on 02/10/2026 13:10:00. Ref UTRREVIEWTRUE334.';
+        var reviewResponse = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: reviewTxn,
+          originalText: reviewBody, isReviewNeeded: true,
+          requestId: 'PFIS-TEST-REVIEW-TRUE'
+        }), 'POST');
+        pfisPreflightAssert_(reviewResponse && reviewResponse.success === true && reviewResponse.status === 'ACCEPTED',
+          'Review-request transaction did not ingest: ' + JSON.stringify(reviewResponse));
+        pfisPreflightAssert_(reviewResponse.nextAction === 'REVIEW' &&
+          reviewResponse.needsReview === true &&
+          reviewResponse.reviewRequestStatus === 'APPLIED',
+          'Client request did not route to REVIEW: ' + JSON.stringify(reviewResponse));
+        pfisPreflightAssert_(reviewResponse.transaction.needsReview === true &&
+          reviewResponse.transaction.reviewStatus === 'Pending' &&
+          reviewResponse.transaction.reviewReason === 'client_requested_review' &&
+          reviewResponse.transaction.validationFlag === 'NEEDS_REVIEW',
+          'Transaction Log review state was not persisted consistently.');
+
+        var pending = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'getpendingreview', limit: 100,
+          requestId: 'PFIS-TEST-REVIEW-PENDING-QUEUE'
+        }), 'POST');
+        pfisPreflightAssert_((pending.data || []).some(function (item) {
+          return item.transactionId === reviewResponse.transactionId &&
+            item.reviewReason === 'client_requested_review';
+        }), 'Client-requested review was not visible in getpendingreview.');
+
+        var replayCounts = pfisPreflightCountNonblankKeys_(txSheet, 1);
+        var sourceCounts = pfisPreflightCountPrefixedKeys_(sourceSheet, 1, 'SRC-');
+        var replay = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: reviewTxn,
+          originalText: reviewBody, isReviewNeeded: true,
+          requestId: 'PFIS-TEST-REVIEW-TRUE-REPLAY'
+        }), 'POST');
+        pfisPreflightAssert_(replay && replay.success === true &&
+          replay.status === 'IDEMPOTENT_REPLAY' && replay.nextAction === 'REVIEW',
+          'Review intent did not survive exact replay: ' + JSON.stringify(replay));
+        pfisPreflightAssert_(pfisPreflightCountNonblankKeys_(txSheet, 1) === replayCounts &&
+          pfisPreflightCountPrefixedKeys_(sourceSheet, 1, 'SRC-') === sourceCounts,
+          'Exact replay inserted duplicate transaction/source rows.');
+
+        var acknowledged = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'resolveexception', transactionId: reviewResponse.transactionId,
+          resolution: 'ACKNOWLEDGE_REVIEW',
+          reason: 'Reviewer checked the original source and confirmed the transaction details.',
+          actor: 'PFIS TEST REVIEWER', requestId: 'PFIS-TEST-REVIEW-ACK'
+        }), 'POST');
+        pfisPreflightAssert_(acknowledged && acknowledged.success === true &&
+          acknowledged.status === 'REVIEW_ACKNOWLEDGED',
+          'Human acknowledgement failed: ' + JSON.stringify(acknowledged));
+        pfisPreflightAssert_(acknowledged.needsReview === false &&
+          acknowledged.transaction.reviewStatus === 'Approved' &&
+          acknowledged.transaction.reviewReason === '' &&
+          acknowledged.transaction.validationFlag === 'VALID',
+          'Review acknowledgement did not return the row to a clean approved state.');
+
+        var changeRows = pfisReadFixedRows(testSpreadsheet.getSheetByName(PFIS_SHEETS.changes), PFIS_CHANGE_FIELDS.length)
+          .map(function (row) { return pfisObjectFromRow(row, PFIS_CHANGE_FIELDS); });
+        pfisPreflightAssert_(changeRows.some(function (change) {
+          return change.transactionId === reviewResponse.transactionId &&
+            change.field === 'Review Status' && change.newValue === 'Approved' &&
+            change.actor === 'PFIS TEST REVIEWER';
+        }), 'Review acknowledgement was not captured in Change Log.');
+        pfisPreflightAssert_(PFIS_TX_FIELDS.length === 29,
+          'The client review contract must not add or shift the canonical A:AC schema.');
+        return 'Strict boolean enforced; false is non-blocking; true persisted as Pending and survived replay; human acknowledgement audited; A:AC unchanged';
+      }, startedAt);
+
+      pfisPreflightRunCase_(report, 'PARSE_FAILED source requested for review appears in the pending queue without a ledger row', function () {
+        var beforeTransactions = pfisPreflightCountNonblankKeys_(txSheet, 1);
+        var beforeSources = pfisPreflightCountPrefixedKeys_(sourceSheet, 1, 'SRC-');
+        var response = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: 'invalid-review-only-payload',
+          originalText: 'PFIS synthetic source-only review case with unparseable transaction facts.',
+          isReviewNeeded: true, sender: 'PFIS TEST SMS',
+          requestId: 'PFIS-TEST-REVIEW-PARSE-FAILED'
+        }), 'POST');
+        pfisPreflightAssert_(response && response.status === 'PARSE_FAILED' &&
+          response.reviewRequestStatus === 'SOURCE_ONLY' && !response.transactionId,
+          'Parse failure was incorrectly represented as a ledger transaction: ' + JSON.stringify(response));
+        pfisPreflightAssert_(pfisPreflightCountNonblankKeys_(txSheet, 1) === beforeTransactions,
+          'Unparseable alert created a canonical transaction.');
+        pfisPreflightAssert_(pfisPreflightCountPrefixedKeys_(sourceSheet, 1, 'SRC-') === beforeSources + 1,
+          'Unparseable alert was not retained as source evidence.');
+        var pending = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'getpendingreview', limit: 100,
+          requestId: 'PFIS-TEST-REVIEW-PARSE-QUEUE'
+        }), 'POST');
+        pfisPreflightAssert_((pending.data || []).some(function (item) {
+          return item.sourceId === response.sourceId && item.kind === 'source_parse_failure';
+        }), 'PARSE_FAILED source was not exposed in the pending review queue.');
+        return 'Unparseable alert remains source-only, never becomes a fake ledger row, and is visible in pending review';
+      }, startedAt);
+
       pfisPreflightRunCase_(report, 'Gemini Purpose suggestions require explicit approval and are applied through Change Log', function () {
         var queue = testSpreadsheet.getSheetByName(PFIS_PURPOSE_REVIEW_SHEET);
         var purpose = 'Household grocery purchase';

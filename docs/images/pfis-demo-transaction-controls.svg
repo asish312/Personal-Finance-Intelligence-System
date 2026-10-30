@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="800" viewBox="0 0 1440 800" role="img" aria-labelledby="title desc">
+<title id="title">PFIS demo transaction controls and audit dashboard</title>
+<desc id="desc">Illustrative transaction intake, source reconciliation and review queue with fictional counts and fake transaction IDs.</desc>
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#11172b"/><stop offset="1" stop-color="#26304e"/></linearGradient>
+ <linearGradient id="blue" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4878ff"/><stop offset="1" stop-color="#9b7cf6"/></linearGradient>
+ <style>.ui{font-family:Inter,Segoe UI,Arial,sans-serif}.white{fill:#f7f8ff}.muted{fill:#a0afca}.card{fill:#1a2742;stroke:#344667;stroke-width:1}.tiny{font-size:13px}.small{font-size:15px}.head{font-size:22px;font-weight:750}.num{font-size:28px;font-weight:800}</style>
+</defs>
+<rect width="1440" height="800" rx="28" fill="url(#bg)"/>
+<rect x="32" y="28" width="1376" height="112" rx="20" fill="url(#blue)"/>
+<g class="ui white"><text x="68" y="76" font-size="28" font-weight="800">TRANSACTION INTEGRITY</text><text x="68" y="105" font-size="15" opacity=".9">Evidence-led ingestion · reconciliation · review · audit</text><text x="1368" y="80" text-anchor="end" font-size="15" font-weight="750">DEMO CONTROL CENTER</text><text x="1368" y="105" text-anchor="end" font-size="13">Synthetic counts and fake IDs only</text></g>
+<g class="ui">
+<rect class="card" x="32" y="168" width="320" height="134" rx="18"/><rect class="card" x="372" y="168" width="320" height="134" rx="18"/><rect class="card" x="712" y="168" width="320" height="134" rx="18"/><rect class="card" x="1052" y="168" width="356" height="134" rx="18"/>
+<g class="muted small"><text x="62" y="207">SOURCE EVENTS PROCESSED</text><text x="402" y="207">CANONICAL TRANSACTIONS</text><text x="742" y="207">NEEDS HUMAN REVIEW</text><text x="1082" y="207">RECONCILED ALERT PAIRS</text></g>
+<g class="white num"><text x="62" y="254">142</text><text x="402" y="254">136</text><text x="742" y="254">4</text><text x="1082" y="254">18</text></g>
+<g class="tiny"><text x="62" y="278" fill="#64d9c7">SMS + email sources</text><text x="402" y="278" fill="#64d9c7">Unique ledger records</text><text x="742" y="278" fill="#ffc36d">Candidates and conflicts</text><text x="1082" y="278" fill="#91b5ff">Evidence linked to one event</text></g>
+<rect class="card" x="32" y="330" width="650" height="390" rx="20"/>
+<text x="66" y="374" class="white head">Evidence-to-ledger pipeline</text><text x="66" y="400" class="muted small">One underlying event can have multiple source notifications.</text>
+<rect x="66" y="435" width="220" height="82" rx="14" fill="#243f67" stroke="#4775bb"/>
+<rect x="428" y="435" width="220" height="82" rx="14" fill="#174b47" stroke="#2eaa91"/>
+<g class="ui"><text x="88" y="465" fill="#9fc5ff" font-size="13" font-weight="750">SOURCE A · SMS</text><text x="88" y="491" class="white" font-size="17" font-weight="700">DEMO-TX-021</text><text x="450" y="465" fill="#78dec7" font-size="13" font-weight="750">SOURCE B · EMAIL</text><text x="450" y="491" class="white" font-size="17" font-weight="700">DEMO-TX-022</text></g>
+<path d="M286 476H411m-10-8 10 8-10 8" stroke="#9cb9f4" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="242" y="552" width="264" height="90" rx="15" fill="#2c2856" stroke="#8871dc"/>
+<g class="ui"><text x="374" y="583" text-anchor="middle" fill="#cabdff" font-size="13" font-weight="750">CANONICAL EVENT</text><text x="374" y="612" text-anchor="middle" class="white" font-size="20" font-weight="800">DEMO-LEDGER-008</text><text x="374" y="630" text-anchor="middle" fill="#b8addf" font-size="12">Two sources · one ledger record</text></g>
+<path d="M176 517V537H300V548M538 517V537H448V548" stroke="#8f9fc1" stroke-width="2" fill="none" stroke-dasharray="5 5"/>
+<text x="66" y="684" fill="#f8c56a" font-size="13" font-weight="650">Illustrative example only — not a real transaction or account.</text>
+<rect class="card" x="704" y="330" width="704" height="390" rx="20"/>
+<text x="738" y="374" class="white head">Review &amp; anomaly queue</text><text x="738" y="400" class="muted small">A candidate is reviewed; it is not silently deleted.</text>
+<g class="ui tiny muted"><text x="738" y="448">DEMO TRANSACTION</text><text x="940" y="448">FINDING</text><text x="1190" y="448">STATE</text></g>
+<path d="M738 462H1372M738 520H1372M738 578H1372M738 636H1372" stroke="#354766" stroke-width="1"/>
+<g class="ui small white"><text x="738" y="497">DEMO-LEDGER-031</text><text x="940" y="497">Potential duplicate</text><text x="738" y="555">DEMO-LEDGER-032</text><text x="940" y="555">Source conflict</text><text x="738" y="613">DEMO-LEDGER-033</text><text x="940" y="613">Missing category</text><text x="738" y="671">DEMO-LEDGER-034</text><text x="940" y="671">Account mapping check</text></g>
+<g class="ui tiny" font-weight="750"><rect x="1184" y="476" width="150" height="27" rx="13" fill="#594323"/><text x="1259" y="494" text-anchor="middle" fill="#ffd18a">REVIEW REQUIRED</text><rect x="1184" y="534" width="150" height="27" rx="13" fill="#59343d"/><text x="1259" y="552" text-anchor="middle" fill="#ffb4bb">CONFLICT</text><rect x="1184" y="592" width="150" height="27" rx="13" fill="#34436a"/><text x="1259" y="610" text-anchor="middle" fill="#b7c9ff">ENRICHMENT</text><rect x="1184" y="650" width="150" height="27" rx="13" fill="#34436a"/><text x="1259" y="668" text-anchor="middle" fill="#b7c9ff">CHECK CONFIG</text></g>
+<text class="ui tiny" x="1370" y="760" text-anchor="end" fill="#f8c56a" font-weight="700">ALL COUNTS, IDS AND STATUSES ARE FICTIONAL DEMO DATA</text>
+</g>
+</svg>

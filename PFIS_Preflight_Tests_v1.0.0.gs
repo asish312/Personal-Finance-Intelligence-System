@@ -1,5 +1,5 @@
 /**
- * PFIS Transaction Engine v1.1.0 — bounded preflight / regression harness
+ * PFIS Transaction Engine v1.0.0 — bounded preflight / regression harness
  *
  * INSTALLATION
  * 1. Add this file to the SAME Apps Script project as the updated PFIS Transaction Engine source file.

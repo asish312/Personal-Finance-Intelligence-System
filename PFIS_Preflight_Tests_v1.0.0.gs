@@ -933,7 +933,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         'Skipped because the initial SMS insert failed; no further dependent writes were attempted.', 0);
     }
 
-    report.syntheticIntegration.status = report.tests.some(function (t) { return t.status === 'FAIL' && /^Synthetic|^Checkbox|^Partially|^End-to-end|^Legacy|^Delayed|^Exact|^Same-channel exact|^Replay of a suppressed|^Similar|^Cross-channel|^Confirmed|^Human|^Malformed|^Search|^Configured internal|^Blank checkbox cleanup|^Purpose suggestion|^End-to-end unmatched amount|^Auto Purpose T header|^Different amount reuses|^Conflicting merchant category/.test(t.name); })
+    report.syntheticIntegration.status = report.tests.some(function (t) { return t.status === 'FAIL' && /^Synthetic|^Checkbox|^Partially|^End-to-end|^Legacy|^Delayed|^Exact|^Same-channel exact|^Replay of a suppressed|^Similar|^Cross-channel|^Confirmed|^Human|^Malformed|^Search|^Configured internal|^Blank checkbox cleanup|^Gemini Purpose|^Purpose suggestion|^End-to-end unmatched amount|^Auto Purpose T header|^Different amount reuses|^Conflicting merchant category/.test(t.name); })
       ? 'FAILED' : 'COMPLETED';
 
   } catch (error) {

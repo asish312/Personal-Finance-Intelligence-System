@@ -69,7 +69,8 @@ const PFIS_SHEETS = Object.freeze({
   changes: 'Change Log',
   rules: 'Rules',
   config: 'Config',
-  categories: 'Categories'
+  categories: 'Categories',
+  archive: 'Rejected & Archive Log'
 });
 
 // The field arrays below ARE the physical schema. Runtime never maps using
@@ -656,9 +657,11 @@ function pfisGetHolidayCalendarOverrides() {
   rows.forEach(function (row) {
     const date = pfisParseDateValue(row[dateIndex]);
     if (!date) return;
+    const workingValue = row[workingIndex];
+    if (workingValue === '' || workingValue === null || workingValue === undefined) return;
     const dateKey = Utilities.formatDate(date, PFIS_TIME_ZONE, 'yyyy-MM-dd');
     const scope = scopeIndex >= 0 ? (pfisString(row[scopeIndex]).toUpperCase() || 'ALL') : 'ALL';
-    overrides[dateKey + '|' + scope] = pfisTruthy(row[workingIndex]);
+    overrides[dateKey + '|' + scope] = pfisTruthy(workingValue);
   });
   PFIS_RUNTIME_HOLIDAY_CALENDAR_CACHE = overrides;
   return overrides;
@@ -1194,13 +1197,15 @@ function pfisFindCardPaymentEventMatch(incoming, rawEvidence) {
     const existingEvidence = linkedSources.map(function (s) { return s.rawBody || ''; }).join('\n');
     const existingIssuer = pfisGetPaymentIssuerKey(existingEvidence, existing.bank, existing.merchant, existing.cardName);
     if (existingIssuer !== incomingIssuer) return;
-    const existingRef = pfisNormalizeReference(existing.refNo);
-    const incomingRef = pfisNormalizeReference(incoming.refNo);
-    if (existingRef && incomingRef && existingRef !== incomingRef) return;
     const accountA = pfisString(existing.account).toLowerCase();
     const accountB = pfisString(incoming.account).toLowerCase();
     const bothCreditCardAccounts = pfisNormalizeAccountType(existing.accountType) === 'creditcard' &&
       pfisNormalizeAccountType(incoming.accountType) === 'creditcard';
+    // References from the wallet/payment rail and issuer are different namespaces.
+    // Compare only when both records are explicit issuer-card account notifications.
+    const existingRef = pfisNormalizeReference(existing.refNo);
+    const incomingRef = pfisNormalizeReference(incoming.refNo);
+    if (bothCreditCardAccounts && existingRef && incomingRef && existingRef !== incomingRef) return;
     if (bothCreditCardAccounts && accountA && accountB && accountA !== accountB) return;
     if (bothCreditCardAccounts && existing.cardName && incoming.cardName &&
         pfisNormalizeMerchant(existing.cardName) !== pfisNormalizeMerchant(incoming.cardName)) return;
@@ -1544,7 +1549,7 @@ function pfisAppendTransaction(transaction, auditSummary) {
 
   // Route to 'Rejected & Archive Log' if duplicate, otherwise 'Transaction Log'
   const targetSheet = isDuplicate
-    ? pfisGetSpreadsheet().getSheetByName('Rejected & Archive Log')
+    ? pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive)
     : txSheet;
 
   if (!targetSheet) {
@@ -1934,14 +1939,22 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
       transactionId: transactionId, duplicateOf: duplicateOf, requestId: requestId };
   }
   const txSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
-  const archiveSheet = pfisGetSpreadsheet().getSheetByName('Rejected & Archive Log');
+  const archiveSheet = pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive);
   if (!archiveSheet || archiveSheet.getLastColumn() < PFIS_TX_FIELDS.length) {
     return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_SHEET_INVALID',
       message: 'Rejected & Archive Log is missing or does not contain the canonical A:AC schema. No rows were changed.',
       transactionId: transactionId, requestId: requestId };
   }
-  const record = pfisObjectFromRow(
-    txSheet.getRange(duplicateRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  const primary = pfisObjectFromRow(
+    txSheet.getRange(primaryRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  if (['DUPLICATE_CANDIDATE', 'DUPLICATE_REJECTED'].indexOf(pfisString(primary.validationFlag).toUpperCase()) >= 0) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'PRIMARY_NOT_CANONICAL',
+      message: 'duplicateOf must identify a surviving canonical transaction, not another duplicate candidate or rejected row.',
+      transactionId: transactionId, duplicateOf: duplicateOf, requestId: requestId };
+  }
+  const rowWidth = Math.max(txSheet.getLastColumn(), PFIS_TX_FIELDS.length);
+  const originalValues = txSheet.getRange(duplicateRow, 1, 1, rowWidth).getValues()[0];
+  const record = pfisObjectFromRow(originalValues.slice(0, PFIS_TX_FIELDS.length), PFIS_TX_FIELDS);
   if (pfisString(record.validationFlag).toUpperCase() !== 'DUPLICATE_CANDIDATE') {
     return { success: false, status: 'UPDATE_REJECTED', error: 'NOT_DUPLICATE_CANDIDATE',
       message: 'Only a transaction explicitly flagged DUPLICATE_CANDIDATE can be archived this way.',
@@ -1956,15 +1969,20 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
   record.validationFlag = 'DUPLICATE_REJECTED';
   record.lastUpdatedAt = now;
 
-  const archiveRow = pfisGetNextAvailableRow(archiveSheet, 1);
-  archiveSheet.getRange(archiveRow, 1, 1, PFIS_TX_FIELDS.length)
-    .setValues([pfisRowFromObject(record, PFIS_TX_FIELDS)]);
+  // Copy the complete row, including Budget Month, Income Month and any future
+  // auxiliary fields; recomputing from the core A:AC schema would lose metadata.
+  const archiveWidth = Math.max(archiveSheet.getLastColumn(), rowWidth);
+  const archivedValues = new Array(archiveWidth).fill('');
+  originalValues.forEach(function (value, index) { archivedValues[index] = value; });
+  pfisRowFromObject(record, PFIS_TX_FIELDS).forEach(function (value, index) { archivedValues[index] = value; });
+  let archiveRow = pfisFindRowByValue(archiveSheet, 1, transactionId);
+  if (archiveRow < 2) archiveRow = pfisGetNextAvailableRow(archiveSheet, 1);
+  archiveSheet.getRange(archiveRow, 1, 1, archiveWidth).setValues([archivedValues]);
   pfisWriteLegacyTransactionAux(archiveRow, record,
     'Human-confirmed duplicate of ' + duplicateOf + ': ' + reason, archiveSheet);
-  pfisWriteOptionalBudgetPeriods(archiveRow, record, archiveSheet);
 
-  // Re-point all source evidence to the surviving canonical transaction. Preserve
-  // the archived transaction snapshot and full explanation in Change Log.
+  // Re-point all source evidence to the surviving canonical transaction. The
+  // detailed Change Log is written before the destructive active-row clear.
   const sourceSheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
   const sourceRows = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length);
   sourceRows.forEach(function (row, i) {
@@ -1979,23 +1997,23 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
       '. Reason: ' + reason);
   });
 
-  // Clear the active row only after the archive copy and source relinking succeeded.
-  const lastColumn = Math.max(txSheet.getLastColumn(), PFIS_TX_FIELDS.length);
-  txSheet.getRange(duplicateRow, 1, 1, lastColumn).clearContent();
-  pfisInvalidateTransactionCache();
-  pfisInvalidateSourceCache();
   pfisAppendChangeOnceBatch([
-    { eventKey: 'duplicate-archived:' + transactionId + ':' + requestId, change: {
-      transactionId: transactionId, targetTable: 'Rejected & Archive Log', actor: actor,
+    { eventKey: 'duplicate-archived:' + transactionId, change: {
+      transactionId: transactionId, targetTable: PFIS_SHEETS.archive, actor: actor,
       field: 'Archive Status', oldValue: 'DUPLICATE_CANDIDATE', newValue: 'DUPLICATE_REJECTED',
       reason: 'Human-confirmed duplicate of ' + duplicateOf + ': ' + reason, requestId: requestId
     }},
-    { eventKey: 'duplicate-survivor:' + transactionId + ':' + duplicateOf + ':' + requestId, change: {
+    { eventKey: 'duplicate-survivor:' + transactionId + ':' + duplicateOf, change: {
       transactionId: duplicateOf, targetTable: PFIS_SHEETS.transactions, actor: actor,
       field: 'Duplicate Evidence Linked', oldValue: '', newValue: transactionId,
       reason: 'Duplicate transaction ' + transactionId + ' archived; its source evidence was linked to this surviving transaction.', requestId: requestId
     }}
   ]);
+
+  // If archive, source relink, or audit fails, the active row remains reviewable.
+  txSheet.getRange(duplicateRow, 1, 1, rowWidth).clearContent();
+  pfisInvalidateTransactionCache();
+  pfisInvalidateSourceCache();
   return { success: true, status: 'DUPLICATE_ARCHIVED', transactionId: transactionId,
     duplicateOf: duplicateOf, archiveRow: archiveRow, requestId: requestId };
 }

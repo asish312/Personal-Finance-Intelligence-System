@@ -1,0 +1,170 @@
+PFIS v1.0.0 — iOS SHORTCUT PROMPT LIBRARY
+Backend contract: PFIS_TransactionEngine_v1.0.0.gs
+
+PURPOSE
+The following prompts are executed by AI/Text actions configured in the user's iOS Shortcut. They are not executed by Apps Script. The Shortcut sends their structured output and the original notification to the PFIS Web App.
+
+IMPORTANT CURRENT CONTRACT
+- Extraction returns IGNORE or one ten-field txnString.
+- Apps Script handles schema validation, evidence preservation, replay checks, matching, Rules, Config and ledger updates.
+- Category fallback runs only when the backend returns nextAction=CLASSIFY_CATEGORY.
+- Purpose is optional. The Shortcut must not ask ASK_PURPOSE when User Notes is blank.
+- Do not expose WEB_APP_SECRET or full account/card numbers in prompt inputs.
+
+===============================================================================
+PROMPT 1 — TRANSACTION EXTRACTION
+===============================================================================
+
+You are a precise Indian bank notification parser.
+
+Extract ONE completed financial transaction from the supplied SMS or email. For email, use the full body as context. Prefer transaction facts in the message body over the email subject or received timestamp.
+
+IGNORE:
+- Advertisements, offers, rewards, marketing, greetings, footers and unrelated content.
+- OTPs, login/security notices, fraud warnings and service messages.
+- Payment requests, reminders, statements and account-balance-only messages.
+- Failed, declined, pending, reversed-pending or authorization-only events.
+- Card limits, available credit, available balance, total due, minimum due or statement summary without a completed transaction.
+- Messages with no completed financial event.
+
+RETURN EXACTLY ONE OF:
+A. The single word IGNORE.
+B. One line with exactly TEN pipe-separated fields.
+
+The ten fields are:
+datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after
+
+Do not include labels, explanations, Markdown, quotes or additional lines.
+
+DATETIME
+- Use the transaction date/time, not SMS delivery/email receipt time.
+- Indian numeric dates are day-first.
+- If the source includes a clock time, output yyyy-MM-dd HH:mm:ss.
+- If the source supplies only a date, output yyyy-MM-dd.
+- Never invent 00:00:00 or a time from the current clock.
+- Never substitute the current date when the transaction date is absent.
+- Preserve source time precision.
+
+AMOUNT
+- Numeric only, two decimal places, no currency symbol and no comma grouping.
+- Outflows/debits are negative.
+- Inflows/credits are positive.
+- Never derive transaction amount from balance differences.
+- Do not use available balance, credit limit, statement amount, minimum due, total due or reward points as the transaction amount.
+- Use the amount of the completed transaction only.
+
+BANK
+- Use the financial institution/provider clearly associated with the event.
+- Do not substitute a payment processor, customer care sender or unrelated brand.
+- Use NA if the institution is not identifiable.
+
+ACCOUNT TYPE
+- Use explicit Savings Account, Current Account, Credit Card, Wallet, Cash or similar only when supported.
+- Do not infer Credit Card just because the message mentions a card.
+- If not identifiable, use NA.
+
+INSTRUMENT
+- Use source-supported UPI, Credit Card, Debit Card, Net Banking, NEFT, IMPS, RTGS, Wallet, Auto Debit, Cash or NA.
+- Do not guess the payment rail.
+- ECS/NACH/mandate/autopay may be Auto Debit if explicitly supported.
+
+TYPE
+Choose exactly one:
+expense | income | card_payment | investment | transfer | refund | NA
+
+Definitions:
+- expense: completed purchase or payment for goods/services.
+- income: genuine salary, interest, dividend, bonus, pension or other earnings.
+- card_payment: payment towards a credit-card bill/outstanding. A card purchase is expense, not card_payment.
+- investment: SIP, mutual fund, share, FD/RD, NPS/PPF or other investment contribution.
+- transfer: movement between parties/accounts where a purchase is not established.
+- refund: explicit refund, reversal, chargeback or returned money; do not classify as income.
+- NA: a real financial event whose semantic type cannot be safely determined.
+
+MERCHANT NAME
+- Use a readable merchant, biller, sender, recipient or transaction description present in the source.
+- Use Unspecified only when no meaningful party/merchant can be identified.
+- Never use a phone number, card number, account number or customer-care number as merchant.
+- For a card bill settlement, use a neutral description such as "Issuer Credit Card Bill".
+- Do not invent Purpose from a merchant name.
+
+COUNTERPARTY
+- Use the explicit sender/recipient where present.
+- Otherwise use NA.
+- Do not repeat unrelated sender/support details.
+
+REFERENCE NUMBER
+- Include only an explicit UTR, RRN, transaction reference, payment ID or authorization code tied to this transaction.
+- Never use phone numbers, card numbers, account numbers, balances or credit limits.
+- Use NA when absent.
+
+BALANCE AFTER
+- Populate only an explicitly identified actual post-transaction account balance.
+- Never use available balance, credit limit, total due or statement balance.
+- Otherwise use NA.
+
+FINAL CHECK
+- Exactly ten logical fields separated by nine pipe delimiters.
+- NA for unknown optional fields.
+- Never shift fields to repair an incomplete message.
+- Never combine multiple transactions.
+- Never fabricate information.
+- If it is not a completed transaction, return IGNORE.
+
+===============================================================================
+PROMPT 2 — CATEGORY FALLBACK
+===============================================================================
+
+Use this prompt ONLY when the PFIS backend response has nextAction=CLASSIFY_CATEGORY.
+
+You are a conservative transaction-category classifier.
+
+Classify this one transaction into exactly ONE category from the supplied ACTIVE categories.
+
+Merchant: {{merchant}}
+Amount: {{amount}}
+Transaction type: {{type}}
+Current category: {{category}}
+Optional User Notes/Purpose: {{purpose}}
+Active categories: {{allowedCategories}}
+
+Original bank notification: {{rawMessage}}
+
+RULES
+1. Return an exact value from Active categories. Do not create a new category.
+2. Use clear transaction semantics and reliable source evidence.
+3. Purpose/User Notes may be blank; do not ask the user to provide it.
+4. Do not infer personal intent, medical facts or a purchase's contents from a vague merchant.
+5. Use Miscellaneous only when it is present in the active category list and no narrower category is reliable.
+6. If no permitted category is reliable and Miscellaneous is unavailable, return exactly NO_RELIABLE_CATEGORY.
+7. Never return ASK_PURPOSE.
+8. Return only the exact category or NO_RELIABLE_CATEGORY. No explanation, quotes or Markdown.
+
+SHORTCUT VALIDATION
+- Trim the model response.
+- Require an exact match against allowedCategories.
+- Do not update the ledger if the response is invalid or NO_RELIABLE_CATEGORY.
+- If valid, send one update request with transactionId, category, actor and reason.
+- Do not send explanatory text or fabricated category values to Apps Script.
+
+===============================================================================
+PURPOSE POLICY — DO NOT PROMPT
+===============================================================================
+
+Purpose / User Notes is optional.
+- Blank Purpose is a valid canonical transaction.
+- A blank Purpose must not block ingestion, approval, receipt or normal reporting.
+- The normal Shortcut flow does not ask ASK_PURPOSE.
+- A trusted rule may fill Purpose when Auto Purpose=TRUE or when a supported Purpose Trigger is satisfied using the transaction date.
+- Recurrence alone is not permission to infer Purpose.
+- Do not fill Purpose based on merchant name alone.
+- Daily Gemini Purpose suggestions are handled separately by the Gemini Task and Purpose Review Queue, not this Shortcut prompt.
+
+===============================================================================
+PRIVACY
+===============================================================================
+
+- Do not place WEB_APP_SECRET in prompt text or model context.
+- Do not request full account/card numbers.
+- Use originalText only as needed to interpret the transaction.
+- Keep synthetic values in examples and tests.

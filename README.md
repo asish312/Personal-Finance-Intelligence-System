@@ -664,17 +664,17 @@ Do not commit either property value to this repository.
 ### Deploy
 
 1. Open the Apps Script project authorised to the intended workbook.
-2. Add <code>PFIS_TransactionEngine_v1.0.0.gs</code>.
-3. Add <code>PFIS_Preflight_Tests_v1.0.0.gs</code> to the same project when validating.
+2. Replace the contents of the existing <code>PFIS_TransactionEngine_v1.0.0.gs</code> with the current file from GitHub <code>main</code>. Do not leave old and new engine copies side by side; they declare the same top-level constants and functions.
+3. Replace/add <code>PFIS_Preflight_Tests_v1.0.0.gs</code> in the same project when validating.
 4. Configure Script Properties.
 5. Run <code>PFIS_VALIDATE()</code> or POST <code>{"action":"validate"}</code>.
 6. Run <code>PFIS_RUN_ALL_PREFLIGHT_TESTS()</code> in a safe project/staging environment.
-7. Confirm the test report and temporary spreadsheet cleanup.
-8. Deploy as a Web App and place its <code>/exec</code> URL in the iOS Shortcut.
-9. Restrict who can access the endpoint as far as the Shortcut's sign-in model allows. If using WEB_APP_SECRET, protect the Shortcut containing it.
-10. After source changes, deploy a new Web App version; saving code in the editor does not update an existing versioned deployment.
+7. Confirm the test report, every new review test, and temporary spreadsheet cleanup.
+8. Update the external iOS Shortcut request dictionary: remove <code>deviceLocked</code> and send <code>isReviewNeeded</code> as a real JSON boolean (<code>true</code>/<code>false</code>) on ingest when needed. The Shortcut definition is not stored in this GitHub repository.
+9. Deploy as a new Web App version and place its <code>/exec</code> URL in the iOS Shortcut.
+10. Restrict who can access the endpoint as far as the Shortcut's sign-in model allows. If using WEB_APP_SECRET, protect the Shortcut containing it.
 
-The preflight suite checks configured production workbook schema read-only when SPREADSHEET_ID exists and runs integration writes against a disposable synthetic spreadsheet. A JavaScript syntax check is not a Google Apps Script runtime pass.
+The preflight suite checks configured production workbook schema read-only when SPREADSHEET_ID exists and runs integration writes against a disposable synthetic spreadsheet. JavaScript syntax parsing is not a Google Apps Script runtime pass. A live production deployment is not complete until the staging report passes and the new Web App version is explicitly deployed.
 
 ### API surface
 

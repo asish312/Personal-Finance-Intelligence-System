@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+<title id="title">PFIS spending patterns — synthetic demo</title>
+<desc id="desc">Sample spending analytics showing category composition, merchant concentration, weekday heatmap and recurring commitment trends.</desc>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0c162a"/><stop offset="1" stop-color="#1d304e"/></linearGradient>
+<style>.ui{font-family:Inter,Segoe UI,Arial,sans-serif}.w{fill:#f6f8ff}.m{fill:#9aadc8}.card{fill:#14243d;stroke:#2f4565;stroke-width:1.4}.h{font-size:22px;font-weight:750}.sub{font-size:14px}.sm{font-size:15px}.tiny{font-size:12px}.grid{stroke:#354a67;stroke-width:1;opacity:.7}</style></defs>
+<rect width="1600" height="1080" rx="30" fill="url(#bg)"/>
+<rect x="34" y="28" width="1532" height="112" rx="22" fill="#253a5d"/>
+<g class="ui"><text x="70" y="76" fill="#7de0cf" font-size="13" font-weight="800" letter-spacing="2">PFIS · SPENDING INTELLIGENCE</text><text x="70" y="111" class="w" font-size="30" font-weight="850">Find the patterns behind every outflow</text><text x="1528" y="82" text-anchor="end" class="m sm">Category · Merchant · Timing · Commitments</text><text x="1528" y="108" text-anchor="end" fill="#f1c17c" class="tiny" font-weight="800">SYNTHETIC DATA · INR</text></g>
+<!-- category bars -->
+<rect class="card" x="34" y="164" width="740" height="400" rx="20"/>
+<g class="ui"><text x="66" y="209" class="w h">Category composition</text><text x="66" y="235" class="m sub">Which areas contribute most to operating outflow?</text></g>
+<g class="ui sm w"><text x="66" y="294">Home &amp; utilities</text><text x="66" y="352">Food &amp; dining</text><text x="66" y="410">Transport</text><text x="66" y="468">Shopping</text><text x="66" y="526">Health &amp; personal</text></g>
+<g><rect x="245" y="276" width="410" height="20" rx="10" fill="#2b3f5d"/><rect x="245" y="276" width="348" height="20" rx="10" fill="#31c8b5"/><rect x="245" y="334" width="410" height="20" rx="10" fill="#2b3f5d"/><rect x="245" y="334" width="286" height="20" rx="10" fill="#598cff"/><rect x="245" y="392" width="410" height="20" rx="10" fill="#2b3f5d"/><rect x="245" y="392" width="205" height="20" rx="10" fill="#a58af7"/><rect x="245" y="450" width="410" height="20" rx="10" fill="#2b3f5d"/><rect x="245" y="450" width="164" height="20" rx="10" fill="#f3b263"/><rect x="245" y="508" width="410" height="20" rx="10" fill="#2b3f5d"/><rect x="245" y="508" width="123" height="20" rx="10" fill="#e97faa"/></g>
+<g class="ui tiny m"><text x="675" y="291">₹28,800</text><text x="675" y="349">₹23,600</text><text x="675" y="407">₹16,900</text><text x="675" y="465">₹13,500</text><text x="675" y="523">₹10,100</text></g>
+<!-- merchant lollipop -->
+<rect class="card" x="800" y="164" width="766" height="400" rx="20"/>
+<g class="ui"><text x="832" y="209" class="w h">Merchant concentration</text><text x="832" y="235" class="m sub">Rank merchants to spot repeated high-value outflows.</text></g>
+<g class="ui sm w"><text x="832" y="294">City Grocer</text><text x="832" y="352">Northline Fuel</text><text x="832" y="410">Bluebird Cafe</text><text x="832" y="468">Metro Market</text><text x="832" y="526">Pine Pharmacy</text></g>
+<g><rect x="1020" y="276" width="410" height="20" rx="10" fill="#293e5d"/><rect x="1020" y="276" width="350" height="20" rx="10" fill="#558cff"/><rect x="1020" y="334" width="410" height="20" rx="10" fill="#293e5d"/><rect x="1020" y="334" width="285" height="20" rx="10" fill="#558cff"/><rect x="1020" y="392" width="410" height="20" rx="10" fill="#293e5d"/><rect x="1020" y="392" width="218" height="20" rx="10" fill="#558cff"/><rect x="1020" y="450" width="410" height="20" rx="10" fill="#293e5d"/><rect x="1020" y="450" width="172" height="20" rx="10" fill="#558cff"/><rect x="1020" y="508" width="410" height="20" rx="10" fill="#293e5d"/><rect x="1020" y="508" width="130" height="20" rx="10" fill="#558cff"/></g>
+<g class="ui tiny m"><text x="1450" y="291">₹8,200</text><text x="1450" y="349">₹6,700</text><text x="1450" y="407">₹5,100</text><text x="1450" y="465">₹4,000</text><text x="1450" y="523">₹3,000</text></g>
+<!-- heatmap -->
+<rect class="card" x="34" y="592" width="740" height="430" rx="20"/>
+<g class="ui"><text x="66" y="637" class="w h">When do outflows happen?</text><text x="66" y="663" class="m sub">Sample weekday heatmap · darker to brighter means lower to higher activity.</text></g>
+<g class="ui tiny m" text-anchor="middle"><text x="278" y="711">Mon</text><text x="353" y="711">Tue</text><text x="428" y="711">Wed</text><text x="503" y="711">Thu</text><text x="578" y="711">Fri</text><text x="653" y="711">Sat</text><text x="728" y="711">Sun</text></g>
+<g>
+<rect x="250" y="730" width="55" height="42" rx="8" fill="#164f56"/><rect x="325" y="730" width="55" height="42" rx="8" fill="#22847e"/><rect x="400" y="730" width="55" height="42" rx="8" fill="#25736e"/><rect x="475" y="730" width="55" height="42" rx="8" fill="#36bcae"/><rect x="550" y="730" width="55" height="42" rx="8" fill="#50d0c0"/><rect x="625" y="730" width="55" height="42" rx="8" fill="#77dfd0"/><rect x="700" y="730" width="55" height="42" rx="8" fill="#2c8f88"/>
+<rect x="250" y="785" width="55" height="42" rx="8" fill="#267c76"/><rect x="325" y="785" width="55" height="42" rx="8" fill="#39b7aa"/><rect x="400" y="785" width="55" height="42" rx="8" fill="#185a5d"/><rect x="475" y="785" width="55" height="42" rx="8" fill="#22736f"/><rect x="550" y="785" width="55" height="42" rx="8" fill="#43c7b8"/><rect x="625" y="785" width="55" height="42" rx="8" fill="#87e6d8"/><rect x="700" y="785" width="55" height="42" rx="8" fill="#5bd0c1"/>
+<rect x="250" y="840" width="55" height="42" rx="8" fill="#1e6867"/><rect x="325" y="840" width="55" height="42" rx="8" fill="#24736e"/><rect x="400" y="840" width="55" height="42" rx="8" fill="#34a99e"/><rect x="475" y="840" width="55" height="42" rx="8" fill="#18575b"/><rect x="550" y="840" width="55" height="42" rx="8" fill="#3cbfae"/><rect x="625" y="840" width="55" height="42" rx="8" fill="#91e9db"/><rect x="700" y="840" width="55" height="42" rx="8" fill="#62d2c5"/>
+</g>
+<g class="ui tiny m"><text x="66" y="754">Week 1</text><text x="66" y="809">Week 2</text><text x="66" y="864">Week 3</text><text x="66" y="948">Activity</text><rect x="126" y="936" width="20" height="14" rx="3" fill="#18575b"/><rect x="154" y="936" width="20" height="14" rx="3" fill="#34a99e"/><rect x="182" y="936" width="20" height="14" rx="3" fill="#91e9db"/><text x="214" y="948">Higher</text></g>
+<!-- recurring -->
+<rect class="card" x="800" y="592" width="766" height="430" rx="20"/>
+<g class="ui"><text x="832" y="637" class="w h">Recurring commitments over time</text><text x="832" y="663" class="m sub">Keep predictable obligations visible before planning flexible spending.</text></g>
+<g class="grid"><path d="M870 730H1510M870 790H1510M870 850H1510M870 910H1510"/></g>
+<path d="M900 780 L1010 767 L1120 760 L1230 744 L1340 738 L1450 722" fill="none" stroke="#aa91ff" stroke-width="4" stroke-linecap="round"/>
+<path d="M900 874 L1010 867 L1120 855 L1230 862 L1340 842 L1450 830" fill="none" stroke="#39cdb8" stroke-width="4" stroke-linecap="round"/>
+<g fill="#aa91ff"><circle cx="900" cy="780" r="5"/><circle cx="1010" cy="767" r="5"/><circle cx="1120" cy="760" r="5"/><circle cx="1230" cy="744" r="5"/><circle cx="1340" cy="738" r="5"/><circle cx="1450" cy="722" r="5"/></g>
+<g class="ui axis m tiny" text-anchor="middle"><text x="900" y="965">May</text><text x="1010" y="965">Jun</text><text x="1120" y="965">Jul</text><text x="1230" y="965">Aug</text><text x="1340" y="965">Sep</text><text x="1450" y="965">Oct</text></g>
+<g class="ui tiny"><circle cx="1200" cy="693" r="5" fill="#aa91ff"/><text x="1214" y="697" class="m">Fixed commitments</text><circle cx="1380" cy="693" r="5" fill="#39cdb8"/><text x="1394" y="697" class="m">Variable spend</text></g>
+<text x="1530" y="1050" class="ui tiny" text-anchor="end" fill="#f1c17c" font-weight="800">ALL VALUES AND MERCHANTS ARE FICTIONAL</text>
+</svg>

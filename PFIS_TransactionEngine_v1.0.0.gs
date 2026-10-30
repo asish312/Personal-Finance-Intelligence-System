@@ -2666,7 +2666,7 @@ function pfisNormalizeRuleMerchantPattern(value) {
   let pattern = pfisNormalizeMerchant(value);
   const compact = pattern.replace(/\s+/g, '');
   // Repair a known data-entry shape: an identical merchant token pasted twice
-  // without a separator (e.g. GUDIVENUKALAGUDIVENUKALA). This is conservative: the
+  // without a separator (e.g. EXAMPLEMERCHANTEXAMPLEMERCHANT). This is conservative: the
   // whole pattern must consist of two identical halves before it is shortened.
   if (!pattern.includes(' ') && compact.length >= 8 && compact.length % 2 === 0) {
     const half = compact.slice(0, compact.length / 2);

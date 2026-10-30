@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+<title id="title">PFIS evidence and data quality analytics — synthetic demo</title>
+<desc id="desc">Illustrative notification processing funnel, source channel mix, review queue, completeness metrics and duplicate-control trend.</desc>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0d172b"/><stop offset="1" stop-color="#1e304c"/></linearGradient>
+<style>.ui{font-family:Inter,Segoe UI,Arial,sans-serif}.w{fill:#f7f9ff}.m{fill:#9bacc8}.card{fill:#14243d;stroke:#304765;stroke-width:1.4}.h{font-size:22px;font-weight:750}.sub{font-size:14px}.sm{font-size:15px}.tiny{font-size:12px}.grid{stroke:#354b69;stroke-width:1}</style></defs>
+<rect width="1600" height="1080" rx="30" fill="url(#bg)"/>
+<rect x="34" y="28" width="1532" height="112" rx="22" fill="#243858"/>
+<g class="ui"><text x="70" y="76" fill="#7bdcca" font-size="13" font-weight="800" letter-spacing="2">PFIS · DATA QUALITY &amp; EVIDENCE</text><text x="70" y="111" class="w" font-size="30" font-weight="850">Confidence comes from traceable evidence</text><text x="1528" y="82" text-anchor="end" class="m sm">Source coverage · Review state · Reconciliation</text><text x="1528" y="108" text-anchor="end" fill="#f1c17c" class="tiny" font-weight="800">SYNTHETIC DEMO ONLY</text></g>
+<!-- funnel -->
+<rect class="card" x="34" y="164" width="740" height="390" rx="20"/>
+<g class="ui"><text x="66" y="209" class="w h">From alert to trusted record</text><text x="66" y="235" class="m sub">Illustrative processing funnel: source alerts are not the same as unique transactions.</text></g>
+<g class="ui" text-anchor="middle">
+<rect x="104" y="276" width="590" height="48" rx="10" fill="#334c70"/><text x="399" y="306" class="w sm" font-weight="750">1,000 source notifications</text>
+<rect x="151" y="337" width="496" height="48" rx="10" fill="#35628a"/><text x="399" y="367" class="w sm" font-weight="750">972 parsed and normalised</text>
+<rect x="198" y="398" width="402" height="48" rx="10" fill="#257e78"/><text x="399" y="428" class="w sm" font-weight="750">936 accepted or reconciled</text>
+<rect x="253" y="459" width="292" height="48" rx="10" fill="#755d9f"/><text x="399" y="489" class="w sm" font-weight="750">36 flagged for attention</text>
+</g>
+<text x="66" y="532" class="ui m tiny">Funnel figures are fictional and do not represent real processing performance.</text>
+<!-- channel donut -->
+<rect class="card" x="802" y="164" width="764" height="390" rx="20"/>
+<g class="ui"><text x="834" y="209" class="w h">Evidence channel composition</text><text x="834" y="235" class="m sub">Multiple notifications can support the same canonical transaction.</text></g>
+<circle cx="1040" cy="390" r="105" fill="none" stroke="#293d5a" stroke-width="32"/>
+<circle cx="1040" cy="390" r="105" fill="none" stroke="#31c9b5" stroke-width="32" stroke-dasharray="398 660" transform="rotate(-90 1040 390)"/>
+<circle cx="1040" cy="390" r="105" fill="none" stroke="#5d8dff" stroke-width="32" stroke-dasharray="262 660" stroke-dashoffset="-398" transform="rotate(-90 1040 390)"/>
+<g class="ui" text-anchor="middle"><text x="1040" y="384" class="w" font-size="28" font-weight="800">1,000</text><text x="1040" y="410" class="m tiny">SOURCE ITEMS</text></g>
+<g class="ui"><circle cx="1224" cy="320" r="7" fill="#31c9b5"/><text x="1244" y="326" class="w sm">SMS alerts</text><text x="1510" y="326" text-anchor="end" class="w sm" font-weight="750">604 · 60.4%</text><rect x="1224" y="340" width="286" height="10" rx="5" fill="#2a3e5b"/><rect x="1224" y="340" width="173" height="10" rx="5" fill="#31c9b5"/>
+<circle cx="1224" cy="402" r="7" fill="#5d8dff"/><text x="1244" y="408" class="w sm">Email alerts</text><text x="1510" y="408" text-anchor="end" class="w sm" font-weight="750">396 · 39.6%</text><rect x="1224" y="422" width="286" height="10" rx="5" fill="#2a3e5b"/><rect x="1224" y="422" width="113" height="10" rx="5" fill="#5d8dff"/>
+<text x="1224" y="481" class="m tiny">These counts measure evidence records,</text><text x="1224" y="500" class="m tiny">not unique ledger transactions.</text></g>
+<!-- queue -->
+<rect class="card" x="34" y="578" width="740" height="430" rx="20"/>
+<g class="ui"><text x="66" y="623" class="w h">Review queue composition</text><text x="66" y="649" class="m sub">The system surfaces uncertain outcomes for human review.</text></g>
+<g class="ui sm w"><text x="66" y="716">Potential duplicate</text><text x="66" y="780">Source conflict</text><text x="66" y="844">Category missing</text><text x="66" y="908">Account mapping</text></g>
+<g><rect x="265" y="696" width="360" height="22" rx="11" fill="#2b3f5d"/><rect x="265" y="696" width="152" height="22" rx="11" fill="#f1b863"/><rect x="265" y="760" width="360" height="22" rx="11" fill="#2b3f5d"/><rect x="265" y="760" width="96" height="22" rx="11" fill="#ec809e"/><rect x="265" y="824" width="360" height="22" rx="11" fill="#2b3f5d"/><rect x="265" y="824" width="225" height="22" rx="11" fill="#5f8fff"/><rect x="265" y="888" width="360" height="22" rx="11" fill="#2b3f5d"/><rect x="265" y="888" width="75" height="22" rx="11" fill="#a58cf7"/></g>
+<g class="ui sm w" text-anchor="end"><text x="675" y="714">8</text><text x="675" y="778">5</text><text x="675" y="842">12</text><text x="675" y="906">4</text></g>
+<text x="66" y="968" class="ui m tiny">A duplicate candidate is not silently deleted. Missing Purpose is optional.</text>
+<!-- completeness -->
+<rect class="card" x="802" y="578" width="764" height="430" rx="20"/>
+<g class="ui"><text x="834" y="623" class="w h">Data-quality signals</text><text x="834" y="649" class="m sub">Keep evidence coverage separate from optional descriptive enrichment.</text></g>
+<g class="ui">
+<rect x="834" y="690" width="210" height="222" rx="16" fill="#1b3850" stroke="#315c75"/><text x="856" y="730" class="m tiny">EVIDENCE VERIFIED</text><text x="856" y="786" class="w" font-size="34" font-weight="850">91.2%</text><rect x="856" y="815" width="166" height="10" rx="5" fill="#2d4c62"/><rect x="856" y="815" width="151" height="10" rx="5" fill="#35cbb7"/><text x="856" y="870" class="m tiny">Matched source evidence</text>
+<rect x="1060" y="690" width="210" height="222" rx="16" fill="#1b3850" stroke="#315c75"/><text x="1082" y="730" class="m tiny">DATE-ONLY ITEMS</text><text x="1082" y="786" class="w" font-size="34" font-weight="850">17</text><text x="1082" y="840" class="m tiny">Timestamp precision</text><text x="1082" y="860" class="m tiny">preserved honestly</text>
+<rect x="1286" y="690" width="246" height="222" rx="16" fill="#1b3850" stroke="#315c75"/><text x="1308" y="730" class="m tiny">MISSING PURPOSE</text><text x="1308" y="786" class="w" font-size="34" font-weight="850">23</text><text x="1308" y="840" class="m tiny">Optional description gap</text><text x="1308" y="860" class="m tiny">not an approval exception</text>
+</g>
+<text x="1530" y="1050" class="ui tiny" text-anchor="end" fill="#f1c17c" font-weight="800">ALL METRICS ARE FICTIONAL DEMONSTRATION VALUES</text>
+</svg>

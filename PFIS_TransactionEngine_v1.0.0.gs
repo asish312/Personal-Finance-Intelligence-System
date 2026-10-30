@@ -635,7 +635,7 @@ function pfisGetTrustedPurposeFromRule(ruleResult, merchant, transactionDate) {
 /**
  * Tests the transaction's own calendar date, never the request-arrival/current date.
  * Saturday/Sunday are non-working by default. Optional Holiday Calendar rows can
- * override dates per scope (e.g. HCL) or globally (ALL).
+ * override dates per scope (e.g. EMPLOYER_DEMO) or globally (ALL).
  *
  * Holiday Calendar headers: Date | Calendar Scope | Is Working Day | Description
  */

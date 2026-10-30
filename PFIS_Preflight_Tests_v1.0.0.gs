@@ -572,7 +572,26 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         var stored = pfisGetTransaction(smsResponse.transactionId, false);
         pfisPreflightAssert_(stored.category === 'Transport', 'Updated category was not stored.');
         pfisPreflightAssert_(stored.userNotes === 'Staging test purchase for transport', 'Updated purpose was not stored.');
-        return 'Category and confirmed purpose persisted in the temporary workbook';
+
+        var blankPurpose = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'update', transactionId: smsResponse.transactionId, purpose: '',
+          actor: 'PFIS_PREFLIGHT_TEST', reason: 'Purpose intentionally left blank',
+          requestId: 'PFIS-TEST-UPDATE-BLANK-PURPOSE'
+        }), 'POST');
+        pfisPreflightAssert_(blankPurpose && blankPurpose.success === true, 'Blank purpose update was rejected: ' + JSON.stringify(blankPurpose));
+        stored = pfisGetTransaction(smsResponse.transactionId, false);
+        pfisPreflightAssert_(stored.userNotes === '', 'Blank purpose did not clear User Notes.');
+        pfisPreflightAssert_(stored.needsReview === false, 'Blank purpose incorrectly created a review requirement.');
+
+        var blankCategory = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'update', transactionId: smsResponse.transactionId, category: '',
+          actor: 'PFIS_PREFLIGHT_TEST', reason: 'Unknown category sent by client',
+          requestId: 'PFIS-TEST-UPDATE-BLANK-CATEGORY'
+        }), 'POST');
+        pfisPreflightAssert_(blankCategory && blankCategory.success === true, 'Blank category did not fall back: ' + JSON.stringify(blankCategory));
+        stored = pfisGetTransaction(smsResponse.transactionId, false);
+        pfisPreflightAssert_(stored.category === 'Miscellaneous', 'Blank update category did not resolve to Miscellaneous.');
+        return 'Purpose can be cleared without review; blank Category is saved as active Miscellaneous';
       }, startedAt);
 
       if (duplicateResponse && duplicateResponse.transactionId) {
@@ -675,25 +694,22 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           originalText: suggestionBody, sender: 'PFIS TEST SMS', requestId: 'PFIS-TEST-PURPOSE-PREFILL-001'
         }), 'POST');
         pfisPreflightAssert_(response && response.success === true, 'Suggestion test transaction failed to insert: ' + JSON.stringify(response));
-        pfisPreflightAssert_(response.requiresPurpose === true, 'Non-recurring transaction should require purpose confirmation.');
-        pfisPreflightAssert_(response.purposeSuggestion === 'Staging test purchase for transport',
-          'Ingestion response did not return the exact historical purpose suggestion: ' + JSON.stringify(response.purposeSuggestion));
-        pfisPreflightAssert_(Array.isArray(response.purposeExamples) && response.purposeExamples.length >= 1,
-          'Ingestion response did not return historical purposeExamples.');
+        pfisPreflightAssert_(response.requiresPurpose === false, 'Purpose must be optional even when historical suggestions exist.');
+        pfisPreflightAssert_(response.nextAction === 'SHOW_RECEIPT', 'Blank purpose should not open a prompt: ' + response.nextAction);
+        pfisPreflightAssert_(response.purposeSuggestion === '',
+          'Optional purpose contract must not return a prompt default.');
+        pfisPreflightAssert_(Array.isArray(response.purposeExamples) && response.purposeExamples.length === 0,
+          'Purpose examples should not be part of a required enrichment queue.');
         pfisPreflightAssert_(response.transaction && response.transaction.userNotes === '',
-          'Historical suggestion must not be saved automatically to User Notes.');
+          'Optional purpose must remain blank unless the user supplied it.');
 
         var queueResponse = pfisRouteRequest(pfisPreflightParams_(testToken, {
           action: 'getneedsenrichment', limit: 50, requestId: 'PFIS-TEST-PURPOSE-PREFILL-QUEUE-001'
         }), 'POST');
         pfisPreflightAssert_(queueResponse && queueResponse.success === true, 'getneedsenrichment failed: ' + JSON.stringify(queueResponse));
         var queued = (queueResponse.data || []).filter(function (item) { return item.transactionId === response.transactionId; })[0];
-        pfisPreflightAssert_(!!queued, 'New transaction did not appear in enrichment queue.');
-        pfisPreflightAssert_(queued.purposeSuggestion === 'Staging test purchase for transport',
-          'Enrichment queue did not return purposeSuggestion.');
-        pfisPreflightAssert_(Array.isArray(queued.purposeExamples) && queued.purposeExamples.length >= 1,
-          'Enrichment queue did not return purposeExamples.');
-        return 'Same historical purpose sent on immediate response and getneedsenrichment; no auto-save occurred';
+        pfisPreflightAssert_(!queued, 'A purpose-only gap should not appear in the required enrichment queue.');
+        return 'Missing purpose remains blank, is not prompted, and is not added to the required enrichment queue';
       }, startedAt);
 
       pfisPreflightRunCase_(report, 'Purpose suggestion is explicitly blank when no history matches', function () {
@@ -704,15 +720,16 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           sender: 'PFIS TEST SMS', requestId: 'PFIS-TEST-PURPOSE-NO-HISTORY-001'
         }), 'POST');
         pfisPreflightAssert_(response && response.success === true, 'No-history test transaction failed: ' + JSON.stringify(response));
-        pfisPreflightAssert_(response.requiresPurpose === true, 'Purpose should still be required when no history exists.');
+        pfisPreflightAssert_(response.requiresPurpose === false, 'Purpose should remain optional when no history exists.');
+        pfisPreflightAssert_(response.nextAction === 'SHOW_RECEIPT', 'Missing purpose must not block the receipt.');
         pfisPreflightAssert_(Object.prototype.hasOwnProperty.call(response, 'purposeSuggestion') && response.purposeSuggestion === '',
-          'Missing purpose history should return an explicit empty purposeSuggestion.');
+          'An optional purpose should not fabricate a default.');
         pfisPreflightAssert_(Array.isArray(response.purposeExamples) && response.purposeExamples.length === 0,
-          'Missing purpose history should return an empty purposeExamples array.');
-        return 'No reliable historical purpose found; explicit empty default sent and user prompt remains required';
+          'No purpose examples should be returned when no historical purpose exists.');
+        return 'No purpose history is normal; transaction is accepted with blank User Notes';
       }, startedAt);
 
-      pfisPreflightRunCase_(report, 'End-to-end unmatched amount assigns category but asks for purpose', function () {
+      pfisPreflightRunCase_(report, 'End-to-end unmatched amount assigns category and accepts blank purpose', function () {
         var txn = '04/10/2026 12:00:00|-50.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRFALLBACK050|NA';
         var body = 'PFIS synthetic payment INR 50 to Test Merchant on 04/10/2026 12:00:00. Reference UTRFALLBACK050.';
         var response = pfisRouteRequest(pfisPreflightParams_(testToken, {
@@ -725,8 +742,10 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(response.transaction.userNotes === '', 'A purpose was inherited despite the amount rule not matching.');
         pfisPreflightAssert_(response.transaction.ruleType === 'MERCHANT_CATEGORY_FALLBACK',
           'Insertion did not report merchant-category fallback.');
-        pfisPreflightAssert_(response.nextAction === 'ASK_PURPOSE', 'Expected ASK_PURPOSE for category-known/purpose-missing: ' + response.nextAction);
-        return 'Insertion assigned active category without a second classifier call; purpose remains user-confirmed';
+        pfisPreflightAssert_(response.nextAction === 'SHOW_RECEIPT', 'Blank purpose should not require another interaction: ' + response.nextAction);
+        pfisPreflightAssert_(response.requiresPurpose === false, 'The backend still marks purpose as required.');
+        pfisPreflightAssert_(response.needsReview === false, 'Missing purpose should not mark the transaction for review.');
+        return 'Insertion assigned category and accepted the transaction without asking for purpose';
       }, startedAt);
     } else {
       report.syntheticIntegration.status = 'BLOCKED_AFTER_SMS_INSERTION_FAILURE';

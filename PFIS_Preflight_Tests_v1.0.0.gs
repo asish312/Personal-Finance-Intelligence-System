@@ -465,6 +465,56 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         return response;
       }, startedAt);
 
+      pfisPreflightRunCase_(report, 'Generic Unspecified bank email links to exact-time account debit', function () {
+        var before = pfisPreflightCountNonblankKeys_(txSheet, 1);
+        var debitTxn = '02/10/2026 12:30:00|-128.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRGENERIC123456|NA';
+        var debitText = 'Axis Bank SMS: INR 128.00 debited at Test Merchant on 02/10/2026 12:30:00. Account 1234. UTR UTRGENERIC123456.';
+        var seed = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: debitTxn, originalText: debitText,
+          sender: 'PFIS TEST SMS', requestId: 'PFIS-TEST-GENERIC-SEED'
+        }), 'POST');
+        pfisPreflightAssert_(seed && seed.success === true && seed.status === 'ACCEPTED', 'Generic match seed failed: ' + JSON.stringify(seed));
+        var genericTxn = '02/10/2026 12:30:00|-128.00|Axis Bank|Savings Account|UPI|expense|Unspecified|Unspecified|UTRGENERIC123456|NA';
+        var genericEmail = 'Axis Bank email: Amount Debited INR 128.00. Merchant: Unspecified. Original transaction merchant detail: Test Merchant. Account 1234. Date & Time: 02/10/2026 12:30:00 IST. UTR UTRGENERIC123456.';
+        var linked = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'EMAIL', txnString: genericTxn, originalText: genericEmail,
+          sender: 'PFIS TEST EMAIL', subject: 'Generic merchant notification', requestId: 'PFIS-TEST-GENERIC-EMAIL'
+        }), 'POST');
+        pfisPreflightAssert_(linked && linked.success === true && linked.status === 'RECONCILED',
+          'Generic merchant cross-channel match failed: ' + JSON.stringify(linked));
+        pfisPreflightAssert_(linked.transactionId === seed.transactionId, 'Generic alert linked to the wrong canonical row.');
+        pfisPreflightAssert_(linked.transactionInserted === false, 'Generic email inserted a second ledger row.');
+        pfisPreflightAssert_(pfisPreflightCountNonblankKeys_(txSheet, 1) === before + 1,
+          'Expected exactly one new canonical transaction for the two generic-alert sources.');
+        return 'Unspecified email linked by exact bank + amount + transaction time + resolved account; no second transaction';
+      }, startedAt);
+
+      pfisPreflightRunCase_(report, 'Wallet payment confirmation links to card-issuer acknowledgement', function () {
+        var before = pfisPreflightCountNonblankKeys_(txSheet, 1);
+        var walletTxn = '02/10/2026 15:00:00|-4537.00|Amazon Pay|Wallet|UPI|card_payment|ICICI Credit Card Bill|ICICI Bank|ORDERICICI4537|NA';
+        var walletText = 'Amazon Pay: Your Credit Card Bill Payment is successful. Paid to ICICI Bank. Amount INR 4537.00. Order Id ORDERICICI4537.';
+        var wallet = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'EMAIL', txnString: walletTxn, originalText: walletText,
+          sender: 'PFIS TEST AMAZON PAY', subject: 'Payment successful', requestId: 'PFIS-TEST-CARD-WALLET'
+        }), 'POST');
+        pfisPreflightAssert_(wallet && wallet.success === true && wallet.status === 'ACCEPTED',
+          'Wallet/card payment seed failed: ' + JSON.stringify(wallet));
+        var issuerTxn = '02/10/2026 15:05:00|-4537.00|ICICI Bank|Credit Card|Credit Card|card_payment|ICICI Credit Card Bill|ICICI Bank|ICICIREF4537|NA';
+        var issuerText = 'ICICI Bank: Payment of INR 4537.00 received towards your ICICI Credit Card on 02/10/2026 15:05:00. Reference ICICIREF4537.';
+        var issuer = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: issuerTxn, originalText: issuerText,
+          sender: 'ICICI TEST SMS', requestId: 'PFIS-TEST-CARD-ISSUER'
+        }), 'POST');
+        pfisPreflightAssert_(issuer && issuer.success === true && issuer.status === 'RECONCILED',
+          'Card issuer event did not link to the wallet/payment event: ' + JSON.stringify(issuer));
+        pfisPreflightAssert_(issuer.transactionId === wallet.transactionId, 'Card issuer alert linked to the wrong settlement.');
+        pfisPreflightAssert_(issuer.paymentEventLinked === true, 'Response did not identify payment-event linkage.');
+        pfisPreflightAssert_(issuer.transactionInserted === false, 'Issuer acknowledgement created a second canonical transaction.');
+        pfisPreflightAssert_(pfisPreflightCountNonblankKeys_(txSheet, 1) === before + 1,
+          'Wallet and issuer notifications should produce exactly one canonical payment event.');
+        return 'Wallet and ICICI issuer confirmations retained as source evidence linked to one card-payment ledger event';
+      }, startedAt);
+
       pfisPreflightRunCase_(report, 'Exact SMS replay is idempotent', function () {
         var before = pfisPreflightCountNonblankKeys_(txSheet, 1);
         var sourcesBefore = pfisPreflightCountPrefixedKeys_(sourceSheet, 1, 'SRC-');
@@ -526,6 +576,22 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(response && response.success === true, 'Duplicate candidate ingestion failed: ' + JSON.stringify(response));
         pfisPreflightAssert_(response.status === 'DUPLICATE_CANDIDATE', 'Similar same-channel alert was not flagged: ' + response.status);
         pfisPreflightAssert_(response.transaction && response.transaction.validationFlag === 'DUPLICATE_CANDIDATE', 'Duplicate validation flag missing.');
+        pfisPreflightAssert_(pfisFindTransactionRow(response.transactionId) >= 2,
+          'A potential duplicate candidate must remain in the active Transaction Log.');
+        pfisPreflightAssert_(pfisFindRowByValue(archiveSheet, 1, response.transactionId) < 2,
+          'A potential duplicate must not be auto-archived.');
+        pfisPreflightAssert_(response.transaction.needsReview === true,
+          'A potential duplicate must remain in the review queue.');
+        var pending = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'getpendingreview', limit: 100, requestId: 'PFIS-TEST-DUPLICATE-PENDING-QUEUE'
+        }), 'POST');
+        pfisPreflightAssert_((pending.data || []).some(function (item) { return item.transactionId === response.transactionId; }),
+          'Potential duplicate is missing from getpendingreview.');
+        var quality = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'getdataquality', requestId: 'PFIS-TEST-DUPLICATE-DATA-QUALITY'
+        }), 'POST');
+        pfisPreflightAssert_(quality.data && quality.data.needsReview >= 1,
+          'Data quality Needs Review count did not include the duplicate candidate.');
         return response;
       }, startedAt);
 
@@ -595,7 +661,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       }, startedAt);
 
       if (duplicateResponse && duplicateResponse.transactionId) {
-        pfisPreflightRunCase_(report, 'Human duplicate resolution updates review state', function () {
+          pfisPreflightRunCase_(report, 'Human duplicate resolution updates review state', function () {
           var response = pfisRouteRequest(pfisPreflightParams_(testToken, {
             action: 'resolveexception', transactionId: duplicateResponse.transactionId,
             resolution: 'CONFIRM_DISTINCT', reason: 'Preflight confirms this represents a separate test transaction',
@@ -604,7 +670,37 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           pfisPreflightAssert_(response && response.success === true, 'Exception resolution failed: ' + JSON.stringify(response));
           pfisPreflightAssert_(['EXCEPTION_RESOLVED', 'EXCEPTION_RESOLVED_REVIEW_REMAINS'].indexOf(response.status) >= 0,
             'Unexpected exception status: ' + response.status);
-          return response.status;
+
+          var archiveTxn = '01/10/2026 10:03:00|-125.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRARCHIVE99999|NA';
+          var archiveText = 'Axis Bank alert reference UTRARCHIVE99999: INR 125.00 debited at Test Merchant on 01/10/2026 10:03:00. Account 1234. Test event C.';
+          var candidate = pfisRouteRequest(pfisPreflightParams_(testToken, {
+            action: 'ingest', sourceType: 'SMS', txnString: archiveTxn, originalText: archiveText,
+            sender: 'PFIS TEST SMS', requestId: 'PFIS-TEST-ARCHIVE-CANDIDATE'
+          }), 'POST');
+          pfisPreflightAssert_(candidate && candidate.success && candidate.status === 'DUPLICATE_CANDIDATE',
+            'Archive test candidate was not flagged: ' + JSON.stringify(candidate));
+          pfisPreflightAssert_(pfisFindTransactionRow(candidate.transactionId) >= 2,
+            'Candidate should be live before explicit archive decision.');
+          var archived = pfisRouteRequest(pfisPreflightParams_(testToken, {
+            action: 'resolveexception', transactionId: candidate.transactionId,
+            resolution: 'CONFIRM_DUPLICATE', duplicateOf: smsResponse.transactionId,
+            reason: 'Confirmed same underlying Axis bank payment notification',
+            actor: 'PFIS_PREFLIGHT_TEST', requestId: 'PFIS-TEST-CONFIRM-DUPLICATE'
+          }), 'POST');
+          pfisPreflightAssert_(archived && archived.success && archived.status === 'DUPLICATE_ARCHIVED',
+            'Explicit duplicate archive failed: ' + JSON.stringify(archived));
+          pfisPreflightAssert_(pfisFindTransactionRow(candidate.transactionId) < 2,
+            'Archived duplicate still exists in the active Transaction Log.');
+          var archiveRow = pfisFindRowByValue(archiveSheet, 1, candidate.transactionId);
+          pfisPreflightAssert_(archiveRow >= 2, 'Confirmed duplicate was not copied to Rejected & Archive Log.');
+          var sources = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length)
+            .map(function (row) { return pfisObjectFromRow(row, PFIS_SOURCE_FIELDS); });
+          pfisPreflightAssert_(sources.some(function (source) {
+            return source.linkedTxnId === smsResponse.transactionId &&
+              pfisString(source.parseStatus).toUpperCase() === 'DUPLICATE_SUPPRESSED' &&
+              String(source.notes).indexOf(candidate.transactionId) >= 0;
+          }), 'Archived duplicate source evidence was not re-linked to the surviving canonical transaction.');
+          return 'Distinct resolution retains the row; confirmed duplicate resolution archives with reason and re-links evidence';
         }, startedAt);
       } else {
         pfisPreflightRecord_(report, 'Human duplicate resolution updates review state', null, 'Skipped because duplicate-candidate setup failed.', 0);

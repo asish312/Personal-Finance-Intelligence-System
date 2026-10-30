@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+<title id="title">PFIS financial performance analytics — synthetic demo</title>
+<desc id="desc">Four analytical panels showing monthly inflow and outflow, budget allocation, net cash-flow trend, and savings rate using fictional values.</desc>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0b1529"/><stop offset="1" stop-color="#1d3150"/></linearGradient>
+<linearGradient id="teal" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#14b8a6"/><stop offset="1" stop-color="#4de0c7"/></linearGradient>
+<style>
+.ui{font-family:Inter,Segoe UI,Arial,sans-serif}.w{fill:#f7f9ff}.m{fill:#9aadc9}.card{fill:#14243d;stroke:#2e4566;stroke-width:1.4}.h{font-size:22px;font-weight:750}.sub{font-size:14px}.sm{font-size:15px}.tiny{font-size:12px}.axis{fill:#8ea3c1;font-size:12px}.grid{stroke:#344a68;stroke-width:1;opacity:.7}
+</style></defs>
+<rect width="1600" height="1080" rx="30" fill="url(#bg)"/>
+<rect x="34" y="28" width="1532" height="112" rx="22" fill="url(#teal)"/>
+<g class="ui w"><text x="70" y="76" font-size="30" font-weight="850">Your money, month by month</text><text x="70" y="108" font-size="15" opacity=".9">Follow income, commitments, outflows and progress toward savings</text><text x="1528" y="75" text-anchor="end" font-size="14" font-weight="800">PFIS ANALYTICS</text><text x="1528" y="103" text-anchor="end" font-size="13" opacity=".9">Illustrative data · INR · Not live figures</text></g>
+<!-- KPI -->
+<g class="ui"><rect class="card" x="34" y="164" width="370" height="118" rx="18"/><rect class="card" x="420" y="164" width="370" height="118" rx="18"/><rect class="card" x="806" y="164" width="370" height="118" rx="18"/><rect class="card" x="1192" y="164" width="374" height="118" rx="18"/>
+<g class="m sm"><text x="62" y="202">ALLOCATED INCOME</text><text x="448" y="202">OPERATING SPEND</text><text x="834" y="202">PRE-SWEEP SURPLUS</text><text x="1220" y="202">SAVINGS RATE</text></g>
+<g class="w" font-size="29" font-weight="800"><text x="62" y="247">₹1,42,000</text><text x="448" y="247">₹82,600</text><text x="834" y="247">₹39,400</text><text x="1220" y="247">27.7%</text></g>
+<g class="tiny"><text x="62" y="269" fill="#58ddc7">Budget month allocation</text><text x="448" y="269" fill="#f6bd72">Excludes internal transfers</text><text x="834" y="269" fill="#9db7ff">After planned commitments</text><text x="1220" y="269" fill="#58ddc7">Illustrative period</text></g></g>
+<!-- chart 1 -->
+<rect class="card" x="34" y="310" width="748" height="350" rx="20"/>
+<g class="ui"><text x="66" y="354" class="w h">Income vs operating outflow</text><text x="66" y="380" class="m sub">Are inflows keeping pace with day-to-day spending?</text></g>
+<g class="grid"><path d="M112 430H744M112 480H744M112 530H744M112 580H744"/></g>
+<g class="ui axis"><text x="68" y="434">₹160k</text><text x="68" y="484">₹120k</text><text x="77" y="534">₹80k</text><text x="77" y="584">₹40k</text></g>
+<path d="M145 451 L250 438 L355 426 L460 434 L565 410 L670 399" stroke="#35d1bb" fill="none" stroke-width="4" stroke-linecap="round"/>
+<path d="M145 535 L250 548 L355 520 L460 531 L565 503 L670 515" stroke="#ffb75e" fill="none" stroke-width="4" stroke-linecap="round"/>
+<g fill="#35d1bb"><circle cx="145" cy="451" r="5"/><circle cx="250" cy="438" r="5"/><circle cx="355" cy="426" r="5"/><circle cx="460" cy="434" r="5"/><circle cx="565" cy="410" r="5"/><circle cx="670" cy="399" r="5"/></g>
+<g fill="#ffb75e"><circle cx="145" cy="535" r="5"/><circle cx="250" cy="548" r="5"/><circle cx="355" cy="520" r="5"/><circle cx="460" cy="531" r="5"/><circle cx="565" cy="503" r="5"/><circle cx="670" cy="515" r="5"/></g>
+<g class="ui axis" text-anchor="middle"><text x="145" y="620">May</text><text x="250" y="620">Jun</text><text x="355" y="620">Jul</text><text x="460" y="620">Aug</text><text x="565" y="620">Sep</text><text x="670" y="620">Oct</text></g>
+<g class="ui tiny"><circle cx="525" cy="354" r="5" fill="#35d1bb"/><text x="538" y="358" class="m">Income</text><circle cx="620" cy="354" r="5" fill="#ffb75e"/><text x="633" y="358" class="m">Outflow</text></g>
+<!-- chart 2 -->
+<rect class="card" x="806" y="310" width="760" height="350" rx="20"/>
+<g class="ui"><text x="838" y="354" class="w h">Where the budget is allocated</text><text x="838" y="380" class="m sub">A zero-based plan gives each part of income a job.</text></g>
+<g class="ui sm w"><text x="838" y="430">Essentials</text><text x="838" y="478">Flexible spending</text><text x="838" y="526">Debt &amp; EMI</text><text x="838" y="574">Investments</text><text x="838" y="622">Pre-sweep balance</text></g>
+<g>
+<rect x="1038" y="412" width="390" height="20" rx="10" fill="#2a3d5a"/><rect x="1038" y="412" width="288" height="20" rx="10" fill="#32c8b5"/>
+<rect x="1038" y="460" width="390" height="20" rx="10" fill="#2a3d5a"/><rect x="1038" y="460" width="185" height="20" rx="10" fill="#5c8cff"/>
+<rect x="1038" y="508" width="390" height="20" rx="10" fill="#2a3d5a"/><rect x="1038" y="508" width="132" height="20" rx="10" fill="#a48af7"/>
+<rect x="1038" y="556" width="390" height="20" rx="10" fill="#2a3d5a"/><rect x="1038" y="556" width="84" height="20" rx="10" fill="#f3ad60"/>
+<rect x="1038" y="604" width="390" height="20" rx="10" fill="#2a3d5a"/><rect x="1038" y="604" width="108" height="20" rx="10" fill="#e97eaa"/>
+</g>
+<g class="ui sm w" text-anchor="end"><text x="1500" y="429">₹52,000</text><text x="1500" y="477">₹33,500</text><text x="1500" y="525">₹24,000</text><text x="1500" y="573">₹15,000</text><text x="1500" y="621">₹17,500</text></g>
+<!-- chart 3 -->
+<rect class="card" x="34" y="684" width="748" height="350" rx="20"/>
+<g class="ui"><text x="66" y="728" class="w h">Net cash movement</text><text x="66" y="754" class="m sub">What remains after actual outflows in each period?</text></g>
+<g class="grid"><path d="M110 810H744M110 860H744M110 910H744M110 960H744"/></g>
+<path d="M145 897 L250 876 L355 890 L460 850 L565 835 L670 814 L670 960 L145 960Z" fill="#3c8cff" opacity=".10"/>
+<path d="M145 897 L250 876 L355 890 L460 850 L565 835 L670 814" stroke="#77a4ff" stroke-width="4" fill="none" stroke-linecap="round"/>
+<g fill="#77a4ff"><circle cx="145" cy="897" r="5"/><circle cx="250" cy="876" r="5"/><circle cx="355" cy="890" r="5"/><circle cx="460" cy="850" r="5"/><circle cx="565" cy="835" r="5"/><circle cx="670" cy="814" r="5"/></g>
+<g class="ui axis" text-anchor="middle"><text x="145" y="1000">May</text><text x="250" y="1000">Jun</text><text x="355" y="1000">Jul</text><text x="460" y="1000">Aug</text><text x="565" y="1000">Sep</text><text x="670" y="1000">Oct</text></g>
+<!-- chart 4 -->
+<rect class="card" x="806" y="684" width="760" height="350" rx="20"/>
+<g class="ui"><text x="838" y="728" class="w h">Savings rate by month</text><text x="838" y="754" class="m sub">Track the share of allocated income retained as savings.</text></g>
+<g class="grid"><path d="M870 952H1510M870 900H1510M870 848H1510M870 796H1510"/></g>
+<g class="ui axis"><text x="838" y="956">0%</text><text x="832" y="904">10%</text><text x="832" y="852">20%</text><text x="832" y="800">30%</text></g>
+<g fill="#35c8b5"><rect x="918" y="862" width="54" height="90" rx="8"/><rect x="1018" y="847" width="54" height="105" rx="8"/><rect x="1118" y="838" width="54" height="114" rx="8"/><rect x="1218" y="821" width="54" height="131" rx="8"/><rect x="1318" y="812" width="54" height="140" rx="8"/><rect x="1418" y="798" width="54" height="154" rx="8"/></g>
+<g class="ui axis" text-anchor="middle"><text x="945" y="982">May</text><text x="1045" y="982">Jun</text><text x="1145" y="982">Jul</text><text x="1245" y="982">Aug</text><text x="1345" y="982">Sep</text><text x="1445" y="982">Oct</text></g>
+<text x="1530" y="1060" text-anchor="end" class="ui tiny" fill="#f2c17a" font-weight="800">ALL DATA IS SYNTHETIC AND FOR VISUAL EXPLANATION ONLY</text>
+</svg>

@@ -104,7 +104,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Axis Shortcut payload tolerates one leading blank pipe field', function () {
-      var input = ' | 2026-10-18 10:16:36 | -150.00 | Axis | Savings Account | UPI | transfer | MAITI SAMIR | MAITI SAMIR | 632366487838 | NA';
+      var input = ' | 2026-10-18 10:16:36 | -150.00 | Axis | Savings Account | UPI | transfer | DEMO PERSON | DEMO PERSON | DEMO-UTR-0001 | NA';
       var parsed = pfisParseTxnString(input);
       pfisPreflightAssert_(!!parsed, 'Valid Axis payload with a single leading blank was rejected.');
       pfisPreflightAssert_(Utilities.formatDate(parsed.datetime, PFIS_TIME_ZONE, 'yyyy-MM-dd HH:mm:ss') === '2026-10-18 10:16:36', 'Transaction timestamp changed.');
@@ -113,14 +113,14 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       pfisPreflightAssert_(parsed.accountType === 'Savings Account', 'Account Type field shifted.');
       pfisPreflightAssert_(parsed.instrument === 'UPI', 'Instrument field shifted.');
       pfisPreflightAssert_(parsed.type === 'transfer', 'Transaction Type field shifted.');
-      pfisPreflightAssert_(parsed.merchant === 'MAITI SAMIR' && parsed.counterparty === 'MAITI SAMIR', 'Merchant/counterparty fields shifted.');
-      pfisPreflightAssert_(parsed.refNo === '632366487838', 'Reference field shifted.');
+      pfisPreflightAssert_(parsed.merchant === 'DEMO PERSON' && parsed.counterparty === 'DEMO PERSON', 'Merchant/counterparty fields shifted.');
+      pfisPreflightAssert_(parsed.refNo === 'DEMO-UTR-0001', 'Reference field shifted.');
       pfisPreflightAssert_(parsed.balanceAfter === '', 'NA balance should be treated as absent, not numeric.');
       return 'Parsed all 10 fields correctly; NA balance normalized to blank';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Parser still rejects shifted or unexplained extra fields', function () {
-      var malformed = '2026-10-18 10:16:36|-150.00|Axis||Savings Account|UPI|transfer|MAITI SAMIR|MAITI SAMIR|632366487838|NA';
+      var malformed = '2026-10-18 10:16:36|-150.00|Axis||Savings Account|UPI|transfer|DEMO PERSON|DEMO PERSON|DEMO-UTR-0001|NA';
       pfisPreflightAssert_(pfisParseTxnString(malformed) === null, 'Parser guessed the meaning of a shifted 11-field payload.');
       return 'An extra field that is not the supported leading-empty-field case remains rejected';
     }, startedAt);

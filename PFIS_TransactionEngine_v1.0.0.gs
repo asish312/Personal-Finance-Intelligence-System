@@ -2380,10 +2380,16 @@ function PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS() {
 
     const sourceSheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
     const sourceRows = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length);
-    const sourceToTransaction = Object.create(null);
+    const sourceById = Object.create(null);
     sourceRows.forEach(function (row) {
       const source = pfisObjectFromRow(row, PFIS_SOURCE_FIELDS);
-      if (pfisString(source.sourceId)) sourceToTransaction[pfisString(source.sourceId)] = pfisString(source.linkedTxnId);
+      const sourceId = pfisString(source.sourceId);
+      if (sourceId) {
+        sourceById[sourceId] = {
+          transactionId: pfisString(source.linkedTxnId),
+          status: pfisString(source.parseStatus).toUpperCase()
+        };
+      }
     });
 
     const transactionSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
@@ -2419,8 +2425,13 @@ function PFIS_APPLY_APPROVED_PURPOSE_SUGGESTIONS() {
           return block('Suggested Purpose, Evidence Summary and at least one Evidence Source ID are required.');
         }
         if (!reviewer || !reviewedAt) return block('Human approval requires Reviewed By and Reviewed At.');
-        if (!evidenceSourceIds.every(function (sourceId) { return sourceToTransaction[sourceId] === transactionId; })) {
-          return block('Evidence Source ID does not link to the specified canonical transaction.');
+        if (!evidenceSourceIds.every(function (sourceId) {
+          const source = sourceById[sourceId];
+          return !!source &&
+            source.transactionId === transactionId &&
+            ['SUPERSEDED', 'PARSE_FAILED', 'CONFLICT'].indexOf(source.status) < 0;
+        })) {
+          return block('Evidence Source ID must be active, non-conflicting evidence linked to the specified canonical transaction.');
         }
 
         const transactionRow = pfisFindTransactionRow(transactionId);

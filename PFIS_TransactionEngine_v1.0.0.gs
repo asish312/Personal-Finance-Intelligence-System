@@ -1194,11 +1194,16 @@ function pfisFindCardPaymentEventMatch(incoming, rawEvidence) {
     const existingEvidence = linkedSources.map(function (s) { return s.rawBody || ''; }).join('\n');
     const existingIssuer = pfisGetPaymentIssuerKey(existingEvidence, existing.bank, existing.merchant, existing.cardName);
     if (existingIssuer !== incomingIssuer) return;
+    const existingRef = pfisNormalizeReference(existing.refNo);
+    const incomingRef = pfisNormalizeReference(incoming.refNo);
+    if (existingRef && incomingRef && existingRef !== incomingRef) return;
     const accountA = pfisString(existing.account).toLowerCase();
     const accountB = pfisString(incoming.account).toLowerCase();
     const bothCreditCardAccounts = pfisNormalizeAccountType(existing.accountType) === 'creditcard' &&
       pfisNormalizeAccountType(incoming.accountType) === 'creditcard';
     if (bothCreditCardAccounts && accountA && accountB && accountA !== accountB) return;
+    if (bothCreditCardAccounts && existing.cardName && incoming.cardName &&
+        pfisNormalizeMerchant(existing.cardName) !== pfisNormalizeMerchant(incoming.cardName)) return;
     candidates.push({ transactionId: existing.transactionId, reason: 'same_card_payment_issuer_amount_day' });
   });
   const unique = pfisUniqueBy(candidates, 'transactionId');
@@ -1524,7 +1529,6 @@ function pfisInvalidateSourceCache() {
 // -----------------------------------------------------------------------------
 
 function pfisAppendTransaction(transaction, auditSummary) {
-  // Check if the engine marked this as a duplicate candidate
   // Potential duplicates stay in the live ledger and review queue. Only an
   // explicit human CONFIRM_DUPLICATE decision may send a row to the archive.
   let isDuplicate = transaction && (
@@ -1551,7 +1555,7 @@ function pfisAppendTransaction(transaction, auditSummary) {
     transaction.needsReview = false;
     transaction.reviewStatus = 'Rejected - Duplicate';
     transaction.validationFlag = 'DUPLICATE_REJECTED';
-    transaction.reviewReason = 'Auto-rejected duplicate detected during ingestion';
+    transaction.reviewReason = 'Explicitly confirmed duplicate before archive append';
     transaction.reviewedBy = 'SYSTEM_DEDUPLICATION';
     transaction.reviewedAt = new Date();
   }
@@ -1869,7 +1873,11 @@ function pfisSourceRowsForTransaction(transactionId) {
 
 function pfisGetPendingReview(limitInput) {
   const limit = pfisClampLimit(limitInput, 50);
-  const txns = pfisReadTransactions().filter(function (txn) { return pfisTruthy(txn.needsReview); }).map(function (txn) {
+  const txns = pfisReadTransactions().filter(function (txn) {
+    const flag = pfisString(txn.validationFlag).toUpperCase();
+    return pfisTruthy(txn.needsReview) || pfisString(txn.reviewStatus).toUpperCase() === 'PENDING' ||
+      ['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT', 'NEEDS_REVIEW'].indexOf(flag) >= 0;
+  }).map(function (txn) {
     const verification = pfisGetVerificationState(txn.transactionId, txn.validationFlag);
     return {
       kind: 'transaction', transactionId: txn.transactionId, dateTime: txn.dateTime, amount: txn.amount,
@@ -1894,23 +1902,17 @@ function pfisGetNeedsEnrichment(limitInput) {
   const limit = pfisClampLimit(limitInput, 50);
   const pending = pfisReadTransactions().map(function (txn) {
     const enrichment = pfisGetEnrichmentState(txn.category, txn.userNotes, undefined, txn.merchant);
-    if (!enrichment.requiresPurpose && !enrichment.requiresCategoryClassification) return null;
+    if (!enrichment.requiresCategoryClassification) return null;
     const item = {
       transactionId: txn.transactionId, dateTime: txn.dateTime, amount: txn.amount,
       merchant: txn.merchant, category: txn.category, userNotes: txn.userNotes, type: txn.type,
       requiresPurpose: enrichment.requiresPurpose,
       requiresCategoryClassification: enrichment.requiresCategoryClassification,
       verificationStatus: pfisGetVerificationState(txn.transactionId, txn.validationFlag).status,
-      // Stable keys preserve compatibility with the existing iOS Shortcut.
-      // Empty means no trustworthy history exists; it is not an invented default.
+      // Retained as compatibility fields; purpose is optional and never queued.
       purposeSuggestion: '',
       purposeExamples: []
     };
-    if (enrichment.requiresPurpose) {
-      const examples = pfisFindPurposeExamples(txn.transactionId, txn.merchant, txn.type, 3);
-      item.purposeExamples = examples;
-      item.purposeSuggestion = examples.length ? examples[0].purpose : '';
-    }
     return item;
   }).filter(Boolean);
   return pending.slice(0, limit);
@@ -3791,8 +3793,9 @@ function pfisGetDataQuality(params, requestId) {
     verified: 0, smsOnly: 0, emailOnly: 0, unresolvedSourceConflicts: 0
   };
   data.transactions.forEach(function (tx) {
-    if (pfisTruthy(tx.needsReview)) result.needsReview++;
     const flag = pfisString(tx.validationFlag).toUpperCase();
+    if (pfisTruthy(tx.needsReview) || pfisString(tx.reviewStatus).toUpperCase() === 'PENDING' ||
+        ['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT', 'NEEDS_REVIEW'].indexOf(flag) >= 0) result.needsReview++;
     if (flag === 'DUPLICATE_CANDIDATE') result.duplicateCandidates++;
     if (flag === 'SOURCE_CONFLICT') result.sourceConflicts++;
     if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(tx.merchant))) result.missingMerchant++;

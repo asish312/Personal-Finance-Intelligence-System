@@ -1,5 +1,5 @@
 /**
- * Personal Finance Intelligence System (PFIS) — Transaction Engine v1.0.0
+ * Personal Finance Intelligence System (PFIS) — Transaction Engine v1.0.1
  * First documented project release. Includes timezone-safe period bounds, parsed-date sorting/reconciliation,
  * reference-led cross-channel matching, exact same-channel duplicate suppression, card-payment
  * internal-transfer support, configurable amount-rule evidence, logically blank-safe row allocation,
@@ -4371,6 +4371,13 @@ function pfisApplyClientReviewIntent(response, params, requestId) {
     }
     return response;
   }
+  const storedFlag = pfisString(response.transaction && response.transaction.validationFlag).toUpperCase();
+  const storedReviewStatus = pfisString(response.transaction && response.transaction.reviewStatus).toUpperCase();
+  if (storedFlag === 'DUPLICATE_REJECTED' || storedReviewStatus === 'REJECTED - DUPLICATE') {
+    response.reviewRequestStatus = 'NOT_APPLICABLE_ARCHIVED';
+    response.nextAction = 'SHOW_RECEIPT';
+    return response;
+  }
 
   const outcome = pfisMarkTransactionForClientReview(
     response.transactionId, response.sourceId, requestId);
@@ -4398,7 +4405,9 @@ function pfisApplyClientReviewIntent(response, params, requestId) {
   response.needsReview = refreshed.needsReview;
   response.nextAction = 'REVIEW';
   response.reviewReason = transaction.reviewReason;
-  response.reviewRequestStatus = outcome.alreadyPending ? 'ALREADY_PENDING' : 'APPLIED';
+  response.reviewRequestStatus = outcome.clientReviewAlreadyPending
+    ? 'ALREADY_PENDING'
+    : (outcome.otherReviewAlreadyPending ? 'ALREADY_REVIEW_REQUIRED' : 'APPLIED');
   return response;
 }
 
@@ -4420,6 +4429,7 @@ function pfisMarkTransactionForClientReview(transactionId, sourceId, requestId) 
   const alreadyPending = pfisTruthy(current.needsReview) ||
     pfisString(current.reviewStatus).toUpperCase() === 'PENDING' ||
     ['DUPLICATE_CANDIDATE', 'SOURCE_CONFLICT', 'NEEDS_REVIEW'].indexOf(flag) >= 0;
+  const clientReviewAlreadyPending = pfisString(current.reviewReason).toLowerCase() === 'client_requested_review' && alreadyPending;
   const reviewReason = pfisString(current.reviewReason) || 'client_requested_review';
   const nextFlag = !flag || flag === 'VALID' || flag === 'NEEDS_REVIEW'
     ? 'NEEDS_REVIEW' : flag;
@@ -4435,7 +4445,7 @@ function pfisMarkTransactionForClientReview(transactionId, sourceId, requestId) 
 
   pfisAppendChangeOnce('client-review-request:' + (sourceId || requestId) + ':' + transactionId, {
     transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: 'system_capture',
-    field: 'Client Review Requested', oldValue: String(alreadyPending), newValue: 'true',
+    field: 'Client Review Requested', oldValue: String(clientReviewAlreadyPending), newValue: 'true',
     reason: 'The capture client explicitly deferred interactive review. Existing review reasons and higher-priority validation flags were preserved.',
     requestId: requestId
   });
@@ -4443,7 +4453,11 @@ function pfisMarkTransactionForClientReview(transactionId, sourceId, requestId) 
   pfisWriteLegacyTransactionAux(rowNumber,
     pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS),
     'Caller requested human review: ' + reviewReason);
-  return { success: true, alreadyPending: alreadyPending };
+  return {
+    success: true,
+    clientReviewAlreadyPending: clientReviewAlreadyPending,
+    otherReviewAlreadyPending: alreadyPending && !clientReviewAlreadyPending
+  };
 }
 
 /**

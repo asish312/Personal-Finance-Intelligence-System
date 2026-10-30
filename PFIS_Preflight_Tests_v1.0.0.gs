@@ -674,12 +674,17 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           pfisPreflightAssert_(['EXCEPTION_RESOLVED', 'EXCEPTION_RESOLVED_REVIEW_REMAINS'].indexOf(response.status) >= 0,
             'Unexpected exception status: ' + response.status);
 
+          var oldBudgetOffset = rulesSheet.getRange(2, 23).getValue();
+          rulesSheet.getRange(2, 23).setValue(1);
+          PFIS_RUNTIME_RULE_CACHE = null;
           var archiveTxn = '01/10/2026 10:03:00|-125.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRARCHIVE99999|NA';
           var archiveText = 'Axis Bank alert reference UTRARCHIVE99999: INR 125.00 debited at Test Merchant on 01/10/2026 10:03:00. Account 1234. Test event C.';
           var candidate = pfisRouteRequest(pfisPreflightParams_(testToken, {
             action: 'ingest', sourceType: 'SMS', txnString: archiveTxn, originalText: archiveText,
             sender: 'PFIS TEST SMS', requestId: 'PFIS-TEST-ARCHIVE-CANDIDATE'
           }), 'POST');
+          rulesSheet.getRange(2, 23).setValue(oldBudgetOffset);
+          PFIS_RUNTIME_RULE_CACHE = null;
           pfisPreflightAssert_(candidate && candidate.success && candidate.status === 'DUPLICATE_CANDIDATE',
             'Archive test candidate was not flagged: ' + JSON.stringify(candidate));
           pfisPreflightAssert_(pfisFindTransactionRow(candidate.transactionId) >= 2,
@@ -696,6 +701,13 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
             'Archived duplicate still exists in the active Transaction Log.');
           var archiveRow = pfisFindRowByValue(archiveSheet, 1, candidate.transactionId);
           pfisPreflightAssert_(archiveRow >= 2, 'Confirmed duplicate was not copied to Rejected & Archive Log.');
+          pfisPreflightAssert_(pfisHeaderToken(archiveSheet.getRange(1, 40).getDisplayValue()) === 'budgetmonth',
+            'Archive helper did not add the missing Budget Month header.');
+          pfisPreflightAssert_(pfisHeaderToken(archiveSheet.getRange(1, 41).getDisplayValue()) === 'incomemonth',
+            'Archive helper did not add the missing Income Month header.');
+          var archivedBudgetMonth = archiveSheet.getRange(archiveRow, 40).getValue();
+          pfisPreflightAssert_(Utilities.formatDate(archivedBudgetMonth, PFIS_TIME_ZONE, 'yyyy-MM-dd') === '2026-11-01',
+            'Archive operation did not preserve the original November Budget Month.');
           var sources = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length)
             .map(function (row) { return pfisObjectFromRow(row, PFIS_SOURCE_FIELDS); });
           pfisPreflightAssert_(sources.some(function (source) {
@@ -928,7 +940,11 @@ function pfisPreflightSetupWorkbook_(spreadsheet) {
   var categoriesSheet = spreadsheet.insertSheet(PFIS_SHEETS.categories);
   pfisPreflightWriteHeaders_(categoriesSheet, categoryHeaders);
   var archiveSheet = spreadsheet.insertSheet('Rejected & Archive Log');
-  pfisPreflightWriteHeaders_(archiveSheet, txHeaders);
+  // Mimic the current production archive tab, which stops at AM and lacks
+  // Budget Month / Income Month even though the ledger has those fields.
+  var archiveHeaders = PFIS_TX_HEADERS.concat(PFIS_LEGACY_TX_HEADERS)
+    .concat(['Flow Direction', 'Audit Trail']);
+  pfisPreflightWriteHeaders_(archiveSheet, archiveHeaders);
   var holidaySheet = spreadsheet.insertSheet(PFIS_HOLIDAY_CALENDAR_SHEET);
   pfisPreflightWriteHeaders_(holidaySheet, ['Date', 'Calendar Scope', 'Is Working Day', 'Description']);
 

@@ -1205,6 +1205,12 @@ function pfisFindCardPaymentEventMatch(incoming, rawEvidence, sourceType) {
     const isSameChannelIssuerReplay = existingSourceTypes.indexOf(normalizedSourceType) >= 0 &&
       existingSourceTypes.indexOf(otherSourceType) < 0;
     if (!hasCrossChannelEvidence && !isSameChannelIssuerReplay) return;
+    // Same-channel issuer notifications may be reconciled by calendar day only
+    // when at least one source is date-only. If both have precise times, the
+    // ordinary five-minute transaction matcher must decide instead.
+    const hasDateOnlyEvidence = pfisString(incoming.datePrecision).toUpperCase() !== 'DATETIME' ||
+      linkedSources.some(function (s) { return pfisString(s.datePrecision).toUpperCase() !== 'DATETIME'; });
+    if (isSameChannelIssuerReplay && !hasDateOnlyEvidence) return;
     const existingEvidence = linkedSources.map(function (s) { return s.rawBody || ''; }).join('\n');
     const existingIssuer = pfisGetPaymentIssuerKey(existingEvidence, existing.bank, existing.merchant, existing.cardName);
     if (existingIssuer !== incomingIssuer) return;

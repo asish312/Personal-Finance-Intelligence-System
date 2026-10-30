@@ -418,7 +418,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
 
     var testToken = pfisString(PropertiesService.getScriptProperties().getProperty('WEB_APP_SECRET'));
     var txnStringSms = '01/10/2026 10:00:00|-125.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRTEST123456|';
-    var originalSms = 'Axis Bank alert: INR 125.00 debited at Test Merchant on 01/10/2026 10:00:00. Account 1234. UTR UTRTEST123456.';
+    var originalSms = 'Axis Bank alert: INR 125.00 debited at Test Merchant on 01/10/2026 10:00:00. Description: household groceries. Account 1234. UTR UTRTEST123456.';
     var originalEmail = 'Axis Bank email alert: INR 125.00 debited at Test Merchant on 01/10/2026 10:10:00. Account 1234. UTR UTRTEST123456.';
 
     var smsResponse = pfisPreflightRunCase_(report, 'End-to-end SMS insertion', function () {

@@ -1,8 +1,8 @@
 /**
- * PFIS Transaction Engine v1.0.1 — bounded preflight / regression harness
+ * PFIS Transaction Engine v1.0.0 — bounded preflight / regression harness
  *
  * INSTALLATION
- * 1. Add this file to the SAME Apps Script project as the updated PFIS Transaction Engine source file.
+ * 1. Replace the contents of the existing preflight file in the SAME Apps Script project as the transaction engine.
  * 2. Save the project.
  * 3. Run PFIS_RUN_ALL_PREFLIGHT_TESTS manually from the Apps Script editor.
  * 4. Review the execution log and the returned JSON report.
@@ -30,7 +30,7 @@ var PFIS_PREFLIGHT_TEMP_PREFIX = 'PFIS_AUTOTEST_TEMP_DO_NOT_USE_';
 function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
   var startedAt = Date.now();
   var report = {
-    suite: 'PFIS Transaction Engine v1.0.1 preflight',
+    suite: 'PFIS Transaction Engine v1.0.0 preflight',
     startedAt: new Date(startedAt).toISOString(),
     maxRuntimeMs: PFIS_PREFLIGHT_MAX_RUNTIME_MS,
     productionSpreadsheet: { status: 'NOT_CHECKED' },
@@ -75,6 +75,13 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
     }
 
     // Pure logic tests do not access or mutate any spreadsheet.
+    pfisPreflightRunCase_(report, 'PFIS release identifiers remain v1.0.0', function () {
+      pfisPreflightAssert_(ENGINE_VERSION === 'v1.0.0', 'Engine version must remain v1.0.0.');
+      pfisPreflightAssert_(SCHEMA_VERSION === 'v1.0.0', 'Schema version must remain v1.0.0.');
+      pfisPreflightAssert_(PARSER_VERSION === 'v1.0.0', 'Parser version must remain v1.0.0.');
+      return 'Engine, schema and parser identifiers remain v1.0.0';
+    }, startedAt);
+
     pfisPreflightRunCase_(report, 'Currency and comma amount parsing', function () {
       pfisPreflightAssert_(pfisParseAmount('₹15,250.00', false) === 15250, '₹15,250.00 did not parse to 15250.');
       return '₹15,250.00 -> 15250';
@@ -99,6 +106,9 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       if (typeof pfisAppendChangeOnceBatch !== 'function') missing.push('pfisAppendChangeOnceBatch');
       if (typeof pfisLogUnhandledRequestError !== 'function') missing.push('pfisLogUnhandledRequestError');
       if (typeof pfisBuildMerchantCategoryFallback_ !== 'function') missing.push('pfisBuildMerchantCategoryFallback_');
+      if (typeof pfisSetCategoryFallbackMarker_ !== 'function') missing.push('pfisSetCategoryFallbackMarker_');
+      if (typeof pfisIsDefaultCategoryFallback_ !== 'function') missing.push('pfisIsDefaultCategoryFallback_');
+      if (typeof pfisArchiveRejectedTransaction !== 'function') missing.push('pfisArchiveRejectedTransaction');
       pfisPreflightAssert_(missing.length === 0, 'Missing runtime functions: ' + missing.join(', '));
       return 'All 12 ingestion/cache/audit/category-fallback helpers are defined';
     }, startedAt);
@@ -729,7 +739,12 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(blankCategory && blankCategory.success === true, 'Blank category did not fall back: ' + JSON.stringify(blankCategory));
         stored = pfisGetTransaction(smsResponse.transactionId, false);
         pfisPreflightAssert_(stored.category === 'Miscellaneous', 'Blank update category did not resolve to Miscellaneous.');
-        return 'Purpose can be cleared without review; blank Category is saved as active Miscellaneous';
+        pfisPreflightAssert_(pfisIsDefaultCategoryFallback_(stored.category, stored.ruleApplied),
+          'Blank category update did not record default fallback provenance.');
+        pfisPreflightAssert_(blankCategory.requiresCategoryClassification === true &&
+          blankCategory.isDefaultCategoryFallback === true && blankCategory.needsReview === false,
+          'Default fallback must be visible for classification without creating Needs Review.');
+        return 'Purpose can be cleared without review; blank Category is saved as active, traceable Miscellaneous fallback';
       }, startedAt);
 
       if (duplicateResponse && duplicateResponse.transactionId) {
@@ -789,6 +804,70 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       } else {
         pfisPreflightRecord_(report, 'Human duplicate resolution updates review state', null, 'Skipped because duplicate-candidate setup failed.', 0);
       }
+
+      pfisPreflightRunCase_(report, 'Human rejection archives a transaction, preserves evidence and is idempotent', function () {
+        var rejectTxn = '05/10/2026 14:25:00|-551.75|Axis Bank|Savings Account|UPI|expense|PFIS Rejection Test Merchant|PFIS Rejection Test Merchant|UTRREJECT55175|NA';
+        var rejectBody = 'PFIS synthetic rejection test: INR 551.75 at PFIS Rejection Test Merchant on 05/10/2026 14:25:00. Ref UTRREJECT55175.';
+        var inserted = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'ingest', sourceType: 'SMS', txnString: rejectTxn, originalText: rejectBody,
+          sender: 'PFIS TEST SMS', requestId: 'PFIS-TEST-REJECT-INSERT'
+        }), 'POST');
+        pfisPreflightAssert_(inserted && inserted.success === true && inserted.transactionId,
+          'Synthetic transaction for rejection test was not inserted: ' + JSON.stringify(inserted));
+        pfisPreflightAssert_(pfisFindTransactionRow(inserted.transactionId) >= 2,
+          'Rejection test target is not in the active Transaction Log.');
+
+        var rejected = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'resolveexception', transactionId: inserted.transactionId,
+          resolution: 'REJECT_TRANSACTION',
+          reason: 'Synthetic test proves this captured event is unwanted.',
+          actor: 'PFIS_PREFLIGHT_TEST', requestId: 'PFIS-TEST-REJECT-ARCHIVE'
+        }), 'POST');
+        pfisPreflightAssert_(rejected && rejected.success === true && rejected.status === 'TRANSACTION_REJECTED',
+          'Human rejection failed: ' + JSON.stringify(rejected));
+        pfisPreflightAssert_(pfisFindTransactionRow(inserted.transactionId) < 2,
+          'Rejected transaction remains in the active Transaction Log.');
+
+        var archiveRow = pfisFindRowByValue(archiveSheet, 1, inserted.transactionId);
+        pfisPreflightAssert_(archiveRow >= 2, 'Rejected transaction was not copied to Rejected & Archive Log.');
+        var archived = pfisObjectFromRow(
+          archiveSheet.getRange(archiveRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+        pfisPreflightAssert_(archived.validationFlag === 'REJECTED' &&
+          archived.reviewStatus === 'Rejected' && archived.needsReview === false &&
+          String(archived.reviewReason).indexOf('human_rejected:') === 0,
+          'Archive row does not contain the final human-rejected state.');
+
+        var rejectedSource = pfisFindSourceById(inserted.sourceId);
+        pfisPreflightAssert_(!!rejectedSource && rejectedSource.parseStatus === 'REJECTED' &&
+          rejectedSource.archivedFlag === true && rejectedSource.linkedTxnId === inserted.transactionId &&
+          rejectedSource.rawBody === rejectBody,
+          'Source evidence was deleted, detached or not marked REJECTED.');
+
+        var changes = pfisReadFixedRows(testSpreadsheet.getSheetByName(PFIS_SHEETS.changes), PFIS_CHANGE_FIELDS.length)
+          .map(function (row) { return pfisObjectFromRow(row, PFIS_CHANGE_FIELDS); });
+        pfisPreflightAssert_(changes.some(function (change) {
+          return change.transactionId === inserted.transactionId &&
+            change.targetTable === PFIS_SHEETS.archive &&
+            change.field === 'Archive Status' && change.newValue === 'REJECTED';
+        }), 'Rejection archive decision is missing from Change Log.');
+
+        var repeated = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'resolveexception', transactionId: inserted.transactionId,
+          resolution: 'REJECT_TRANSACTION',
+          reason: 'Synthetic test proves this captured event is unwanted.',
+          actor: 'PFIS_PREFLIGHT_TEST', requestId: 'PFIS-TEST-REJECT-ARCHIVE-REPLAY'
+        }), 'POST');
+        pfisPreflightAssert_(repeated && repeated.success === true && repeated.status === 'ALREADY_REJECTED',
+          'Repeated rejection did not return an idempotent archive result.');
+        pfisPreflightAssert_(pfisFindRowByValue(archiveSheet, 1, inserted.transactionId) === archiveRow,
+          'Repeated rejection created a second archive row.');
+
+        var replay = pfisReplayResponse(rejectedSource, 'PFIS-TEST-REJECT-SOURCE-REPLAY');
+        pfisPreflightAssert_(replay && replay.success === true && replay.status === 'REJECTED' &&
+          replay.transaction && replay.transaction.validationFlag === 'REJECTED',
+          'Source replay did not remain safely terminal after human rejection.');
+        return 'Human rejection archives once, retains and marks original Source Log evidence, writes Change Log audit, and blocks replay reinsertion';
+      }, startedAt);
 
       pfisPreflightRunCase_(report, 'Malformed transaction payload logs parse failure without ledger insertion', function () {
         var before = pfisPreflightCountNonblankKeys_(txSheet, 1);
@@ -907,6 +986,49 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(Array.isArray(response.purposeExamples) && response.purposeExamples.length === 0,
           'No purpose examples should be returned when no historical purpose exists.');
         return 'No purpose history is normal; transaction is accepted with blank User Notes';
+      }, startedAt);
+
+      pfisPreflightRunCase_(report, 'Default Miscellaneous fallback is traceable and remains classification-only', function () {
+        var parsed = {
+          datetime: pfisCreateIndiaDate(2026, 10, 5, 12, 0, 0), datePrecision: 'DATETIME',
+          amount: -51.25, bank: 'Axis Bank', accountType: 'Savings Account',
+          instrument: 'UPI', type: 'expense', merchant: 'PFIS Unmapped Category Merchant',
+          counterparty: 'PFIS Unmapped Category Merchant', refNo: 'UTRDEFAULTMISC051', balanceAfter: ''
+        };
+        var config = {
+          account: 'AXIS_SAVINGS', cardName: '', instrument: 'UPI', isInternal: false,
+          ambiguous: false, unresolved: false
+        };
+        var built = pfisBuildTransaction(parsed, { originalText: 'Synthetic unmapped category test' },
+          'SMS', 'PFIS-TEST-MISC-FALLBACK', 'SRC-PFIS-TEST-MISC-FALLBACK', 'synthetic-hash',
+          pfisEmptyRuleResult(), config, '', false);
+        pfisPreflightAssert_(built.category === 'Miscellaneous', 'Active Miscellaneous fallback was not assigned.');
+        pfisPreflightAssert_(pfisIsDefaultCategoryFallback_(built.category, built.ruleApplied),
+          'Default category fallback provenance was not stored in Rule Applied.');
+        pfisPreflightAssert_(built.needsReview === false, 'Fallback alone must not create financial-integrity review.');
+        var state = pfisGetEnrichmentState(built.category, built.userNotes, pfisGetCategoryList(),
+          built.merchant, built.ruleApplied);
+        pfisPreflightAssert_(state.requiresCategoryClassification === true &&
+          state.isDefaultCategoryFallback === true && state.requiresHumanReview === false,
+          'Default fallback must be classifiable later without blocking the transaction.');
+        pfisAppendTransaction(built, 'Synthetic default-category fallback test');
+        var queued = pfisGetNeedsEnrichment(100).filter(function (item) {
+          return item.transactionId === built.transactionId;
+        })[0];
+        pfisPreflightAssert_(!!queued && queued.isDefaultCategoryFallback === true &&
+          queued.classificationReason === 'DEFAULT_FALLBACK',
+          'Default fallback was not exposed in getneedsenrichment.');
+        var corrected = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'update', transactionId: built.transactionId, category: 'Transport',
+          actor: 'PFIS_PREFLIGHT_TEST', reason: 'Human selected the correct category',
+          requestId: 'PFIS-TEST-MISC-FALLBACK-CORRECT'
+        }), 'POST');
+        pfisPreflightAssert_(corrected && corrected.success === true, 'Fallback category correction failed.');
+        var correctedTxn = pfisGetTransaction(built.transactionId, false);
+        pfisPreflightAssert_(correctedTxn.category === 'Transport' &&
+          !pfisIsDefaultCategoryFallback_(correctedTxn.category, correctedTxn.ruleApplied),
+          'Explicit category selection did not clear fallback provenance.');
+        return 'Default fallback remains auditable, does not create Needs Review, is queued for classification, and clears when a human selects an active category';
       }, startedAt);
 
       pfisPreflightRunCase_(report, 'End-to-end unmatched amount assigns category and accepts blank purpose', function () {

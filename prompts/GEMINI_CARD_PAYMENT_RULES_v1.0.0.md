@@ -28,7 +28,7 @@ Also add a matching Config row for each phrase, but only because both are confir
 - Merchant Contains = the exact phrase above.
 - Account = AXIS_SAVINGS (use the existing account key exactly).
 - Card Name = use the existing friendly label for the Axis savings account.
-- Instrument = UPI for the SBI Cards and Payme source pattern; use the source-supported instrument for CreditCard Payment.
+- Instrument = UPI for the SBI Cards and Payme source pattern because the original alert explicitly contains the UPI rail; leave Config Instrument blank for CreditCard Payment because that alert text does not establish a payment rail. Do not infer or overwrite the existing Transaction Log instrument.
 - Is Internal = TRUE.
 - Priority = a unique unused value.
 - Do not invent a card-product suffix, receiving card name or Text Pattern.

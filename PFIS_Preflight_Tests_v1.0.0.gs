@@ -124,7 +124,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       if (typeof PFIS_PREVIEW_LEGACY_DUPLICATE_ARCHIVE_MIGRATION !== 'function') missing.push('PFIS_PREVIEW_LEGACY_DUPLICATE_ARCHIVE_MIGRATION');
       if (typeof PFIS_APPLY_LEGACY_DUPLICATE_ARCHIVE_MIGRATION !== 'function') missing.push('PFIS_APPLY_LEGACY_DUPLICATE_ARCHIVE_MIGRATION');
       pfisPreflightAssert_(missing.length === 0, 'Missing runtime functions: ' + missing.join(', '));
-      return 'All 12 ingestion/cache/audit/category-fallback helpers are defined';
+      return 'All required ingestion/cache/audit/category-fallback/reclassification/migration helpers are defined';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Axis Shortcut payload tolerates one leading blank pipe field', function () {
@@ -1353,7 +1353,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         'Skipped because the initial SMS insert failed; no further dependent writes were attempted.', 0);
     }
 
-    report.syntheticIntegration.status = report.tests.some(function (t) { return t.status === 'FAIL' && /^Synthetic|^Checkbox|^Partially|^End-to-end|^Legacy|^Delayed|^Exact|^Same-channel exact|^Replay of a suppressed|^Similar|^Cross-channel|^Confirmed|^Human|^Malformed|^Search|^Configured internal|^Blank checkbox cleanup|^Gemini Purpose|^Purpose suggestion|^End-to-end unmatched amount|^Auto Purpose T header|^Different amount reuses|^Conflicting merchant category|^isReviewNeeded contract|^PARSE_FAILED source requested/.test(t.name); })
+    report.syntheticIntegration.status = report.tests.some(function (t) { return t.status === 'FAIL' && /^Synthetic|^Checkbox|^Partially|^End-to-end|^Legacy|^Delayed|^Exact|^Same-channel exact|^Replay of a suppressed|^Similar|^Cross-channel|^Confirmed|^Human|^Malformed|^Search|^Configured internal|^Merchant rules and Config|^Historical card-payment reclassification|^Blank checkbox cleanup|^Gemini Purpose|^Purpose suggestion|^End-to-end unmatched amount|^Auto Purpose T header|^Different amount reuses|^Conflicting merchant category|^isReviewNeeded contract|^PARSE_FAILED source requested/.test(t.name); })
       ? 'FAILED' : 'COMPLETED';
 
   } catch (error) {

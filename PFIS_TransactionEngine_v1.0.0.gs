@@ -2740,16 +2740,32 @@ function pfisReclassifyTransactionFromEvidence(params, requestId) {
 
   let reviewCleared = false;
   const reviewReason = pfisString(current.reviewReason);
-  if (pfisTruthy(current.needsReview) &&
-      ['enrichment_required', 'unknown_transaction_type', 'config_mapping_unresolved'].indexOf(reviewReason) >= 0 &&
-      pfisIsMatchableMerchant(pfisNormalizeMerchant(current.merchant))) {
-    next.needsReview = false;
-    next.reviewStatus = 'Approved';
+  const classificationReviewReasons = [
+    'enrichment_required',
+    'unknown_transaction_type',
+    'merchant_missing_or_unusable',
+    'config_mapping_unresolved',
+    'config_mapping_ambiguous'
+  ];
+  // Reclassification can repair a legacy row where Needs Review is already FALSE
+  // and Review Status is Approved, but an old enrichment_required reason was left
+  // behind. Clear only known classification/configuration reasons; never clear an
+  // unrelated/manual review reason or any duplicate/source-conflict flag.
+  const canClearClassificationReason =
+    classificationReviewReasons.indexOf(reviewReason) >= 0 &&
+    pfisIsMatchableMerchant(pfisNormalizeMerchant(current.merchant));
+  if (canClearClassificationReason) {
     next.reviewReason = '';
-    next.reviewedBy = actor;
-    next.reviewedAt = new Date();
-    next.validationFlag = 'VALID';
-    reviewCleared = true;
+    if (pfisTruthy(current.needsReview) ||
+        pfisString(current.reviewStatus).toUpperCase() === 'PENDING' ||
+        currentFlag === 'NEEDS_REVIEW') {
+      next.needsReview = false;
+      next.reviewStatus = 'Approved';
+      next.reviewedBy = actor;
+      next.reviewedAt = new Date();
+      next.validationFlag = 'VALID';
+      reviewCleared = true;
+    }
   }
 
   const fields = ['category', 'type', 'isInternalTransfer', 'account', 'cardName', 'instrument',

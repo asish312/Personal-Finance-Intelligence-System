@@ -541,6 +541,11 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         var initial = pfisBuildTransaction(parsed, { originalText: raw }, 'SMS', transactionId,
           sourceId, pfisComputeSourceHash('SMS', raw), pfisEmptyRuleResult(), initialConfig,
           'enrichment_required', false);
+        // Mirror the current workbook's legacy state: approved flags but stale
+        // enrichment_required text left in Review Reason.
+        initial.needsReview = false;
+        initial.reviewStatus = 'Approved';
+        initial.validationFlag = 'VALID';
         pfisAppendTransaction(initial, 'Synthetic historical classification test');
         pfisAppendSourceRow({
           sourceId: sourceId, receivedAt: new Date(), sourceType: 'SMS', sender: 'PFIS TEST',
@@ -565,8 +570,9 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(after.category === 'Credit card payments' &&
           after.type === 'card_payment' && after.isInternalTransfer === true,
           'Reclassification did not apply category/type/internal classification: ' + JSON.stringify(after));
-        pfisPreflightAssert_(after.needsReview === false && after.reviewStatus === 'Approved',
-          'Resolved classification review was not cleared safely.');
+        pfisPreflightAssert_(after.needsReview === false && after.reviewStatus === 'Approved' &&
+          after.reviewReason === '',
+          'Stale enrichment review reason was not cleared while preserving the already-approved state.');
         pfisPreflightAssert_(after.amount === before.amount && after.dateTime.getTime() === before.dateTime.getTime() &&
           after.bank === before.bank && after.merchant === before.merchant && after.refNo === before.refNo,
           'Reclassification modified immutable financial facts.');
@@ -576,6 +582,10 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           return change.transactionId === transactionId && change.field === 'isInternalTransfer' &&
             change.newValue === 'true';
         }), 'Reclassification did not write Change Log audit for internal transfer flag.');
+        pfisPreflightAssert_(changes.some(function (change) {
+          return change.transactionId === transactionId && change.field === 'reviewReason' &&
+            change.oldValue === 'enrichment_required' && change.newValue === '';
+        }), 'Reclassification did not audit the stale enrichment review-reason cleanup.');
         return 'Category/type/internal status updated from linked evidence; financial facts preserved; review cleared and audited';
       } finally {
         categoriesSheet.getRange(6, 1, 1, 2).setValues([oldCategory]);
@@ -583,7 +593,6 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       }
     }, startedAt);
 
-    var testToken = pfisString(PropertiesService.getScriptProperties().getProperty('WEB_APP_SECRET'));
     var txnStringSms = '01/10/2026 10:00:00|-125.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRTEST123456|';
     var originalSms = 'Axis Bank alert: INR 125.00 debited at Test Merchant on 01/10/2026 10:00:00. Description: household groceries. Account 1234. UTR UTRTEST123456.';
     var originalEmail = 'Axis Bank email alert: INR 125.00 debited at Test Merchant on 01/10/2026 10:10:00. Account 1234. UTR UTRTEST123456.';

@@ -82,6 +82,16 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       return 'Engine, schema and parser identifiers remain v1.0.0';
     }, startedAt);
 
+    pfisPreflightRunCase_(report, 'Legacy duplicate reason parser requires an explicit surviving Transaction ID', function () {
+      pfisPreflightAssert_(pfisGetDuplicateTargetFromReason_('Rejected as duplicate of #202610-156') === '202610-156',
+        'Legacy "duplicate of #ID" reason was not parsed.');
+      pfisPreflightAssert_(pfisGetDuplicateTargetFromReason_('confirmed_duplicate_of:202610-156 | human reason') === '202610-156',
+        'Legacy confirmed_duplicate_of marker was not parsed.');
+      pfisPreflightAssert_(pfisGetDuplicateTargetFromReason_('Marked duplicate; survivor not recorded') === '',
+        'Missing survivor ID must remain blocked, not be guessed.');
+      return 'Only an explicit surviving Transaction ID can make a legacy duplicate eligible for migration';
+    }, startedAt);
+
     pfisPreflightRunCase_(report, 'Currency and comma amount parsing', function () {
       pfisPreflightAssert_(pfisParseAmount('₹15,250.00', false) === 15250, '₹15,250.00 did not parse to 15250.');
       return '₹15,250.00 -> 15250';

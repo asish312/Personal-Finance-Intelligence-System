@@ -8,7 +8,7 @@
 
 A personal-finance workflow built with Google Apps Script, Google Sheets, iOS Shortcuts and an optional Gemini-assisted enrichment layer.
 
-**Production contract: v1.0.1** · Schema/parser: v1.0.0 · Google Apps Script · Google Sheets
+**Production contract: v1.0.0** · Schema/parser: v1.0.0 · Google Apps Script · Google Sheets
 
 <sub>Every illustration, merchant, amount and transaction ID in this README is fictional. No live workbook figures or personal account details are reproduced.</sub>
 
@@ -153,7 +153,7 @@ Do not use an available balance, credit limit, statement balance or minimum due 
 
 A malformed parse should not be silently discarded. The current engine already stores the original source text and a <code>PARSE_FAILED</code> Source Log row, with a source ID and error reason. It does not create a canonical Transaction Log row when required facts are absent.
 
-That is the correct separation of evidence and ledger. The v1.0.1 API now includes <code>PARSE_FAILED</code> source rows in <code>getpendingreview</code> as <code>kind=source_parse_failure</code>; it does not invent a Transaction Log row. Keep the source-only case visible until it is reprocessed or otherwise resolved. The workbook view should distinguish source-only parse failures from ledger transactions.
+That is the correct separation of evidence and ledger. The v1.0.0 API now includes <code>PARSE_FAILED</code> source rows in <code>getpendingreview</code> as <code>kind=source_parse_failure</code>; it does not invent a Transaction Log row. Keep the source-only case visible until it is reprocessed or otherwise resolved. The workbook view should distinguish source-only parse failures from ledger transactions.
 
 1. Preserve the raw source, hash, sender, received time, parser version and parser error in Source Log.
 2. Add a source-level review case to the one Review Queue.
@@ -177,7 +177,7 @@ These are distinct cases:
 | Similar merchant/amount inside a time window | Review candidate unless the full identity evidence is strong |
 | Confirmed duplicate | Archive only after explicit human confirmation and a surviving Transaction ID is identified |
 
-A duplicate candidate is not a duplicate decision. The engine supports <code>CONFIRM_DISTINCT</code> and <code>CONFIRM_DUPLICATE</code>. The latter requires a human reason and <code>duplicateOf</code> canonical Transaction ID. Archive handling preserves auxiliary columns, relinks source evidence and writes audit history.
+A duplicate candidate is not a duplicate decision. The engine supports <code>CONFIRM_DISTINCT</code> and <code>CONFIRM_DUPLICATE</code>. The latter requires a human reason and <code>duplicateOf</code> canonical Transaction ID. For an incorrect or unwanted canonical transaction, <code>REJECT_TRANSACTION</code> requires a human reason, archives the full row, marks linked Source Log rows <code>REJECTED</code>, retains raw evidence and writes Change Log history. Suspected duplicates must use <code>CONFIRM_DUPLICATE</code>, not general rejection.
 
 ### Example: UPI payment to a card issuer
 
@@ -302,6 +302,8 @@ Keep the list short, mutually understandable and active. Example groups include 
 
 If a category is blank or unmapped:
 - use active <code>Miscellaneous</code> as a safe fallback when configured;
+- record <code>DEFAULT_CATEGORY:MISCELLANEOUS</code> in the existing Rule Applied field;
+- expose this fallback through <code>getneedsenrichment</code> for later classification without treating it alone as a financial-integrity review;
 - otherwise keep the transaction flagged for category classification;
 - do not reject an otherwise valid transaction solely because a category label is missing.
 
@@ -520,7 +522,7 @@ For email, use <code>sourceType=EMAIL</code> and include sender/subject when ava
 | REVIEW | Show the review reason and validation flag; no automatic approval/archive. A client-requested review stays pending until explicitly acknowledged. |
 | SHOW_ERROR | Show error/message and requestId; never show a success receipt |
 
-For a caller-requested review, acknowledge only after a human checks the source: POST <code>{"action":"resolveexception","transactionId":"...","resolution":"ACKNOWLEDGE_REVIEW","reason":"Human review explanation","actor":"reviewer"}</code>. The reason must be at least eight characters. This resolution is accepted only for an open <code>client_requested_review</code> case; it cannot clear duplicates, source conflicts, configuration problems or other review reasons. For network timeouts, retry the **exact same** txnString and originalText. Do not modify the amount/date/fields and submit a new payload to force a success. Source-hash idempotency handles exact replays.
+For a caller-requested review, acknowledge only after a human checks the source: POST <code>{"action":"resolveexception","transactionId":"...","resolution":"ACKNOWLEDGE_REVIEW","reason":"Human review explanation","actor":"reviewer"}</code>. The reason must be at least eight characters. This resolution is accepted only for an open <code>client_requested_review</code> case; it cannot clear duplicates, source conflicts, configuration problems or other review reasons. For an incorrect or unwanted canonical transaction, use <code>resolution="REJECT_TRANSACTION"</code> with a specific human reason of at least eight characters. The engine archives the row, marks linked source evidence <code>REJECTED</code> and audits the decision; use <code>CONFIRM_DUPLICATE</code> when a surviving canonical transaction exists. For network timeouts, retry the **exact same** txnString and originalText. Do not modify the amount/date/fields and submit a new payload to force a success. Source-hash idempotency handles exact replays.
 
 ### Extraction prompt — core rules
 
@@ -737,7 +739,7 @@ Implement workbook-only improvements:
 11. Update Data Dictionary, PFIS System Guide, labels, help text and charts. Document isReviewNeeded as an API request boolean mapped to existing Transaction Log O/T/U fields; do not add a physical transaction column. Each chart must use an actual calculation range and show its period and unit.
 
 Non-negotiable:
-- Do not edit Apps Script or iOS Shortcut files. The v1.0.1 API is already implemented; do not recreate it in spreadsheet formulas.
+- Do not edit Apps Script or iOS Shortcut files. The v1.0.0 API is already implemented; do not recreate it in spreadsheet formulas.
 - Do not add a Transaction Log column for isReviewNeeded; use existing O (Needs Review), T (Review Status) and U (Review Reason).
 - Do not alter Transaction IDs, amounts, dates, bank facts, merchant facts or source/audit evidence.
 - Do not auto-merge/delete duplicate candidates.
@@ -755,10 +757,10 @@ These are implementation boundaries, not features to pretend are complete:
 
 | Area | Current behaviour / risk | Long-term target |
 |---|---|---|
-| Unified review | v1.0.1 <code>getpendingreview</code> returns transaction review flags plus source CONFLICT and PARSE_FAILED cases; category classification remains on <code>getneedsenrichment</code> | Workbook Review Queue view aggregates the case types once and labels source-only cases clearly |
+| Unified review | v1.0.0 <code>getpendingreview</code> returns transaction review flags plus source CONFLICT and PARSE_FAILED cases; category classification remains on <code>getneedsenrichment</code> | Workbook Review Queue view aggregates the case types once and labels source-only cases clearly |
 | Category enrichment | <code>getneedsenrichment</code> is a separate API route | Show category gaps in the same Review Queue, with a distinct action type |
 | Purpose | Optional; rule-generated or Gemini-suggested with approval | Keep it optional and preserve rule evidence/audit |
-| Parser failure | Original source is retained as PARSE_FAILED and v1.0.1 now surfaces it as a source-only pending-review case; no canonical transaction is fabricated | Correct the parser output and reprocess the original source, retaining superseded evidence |
+| Parser failure | Original source is retained as PARSE_FAILED and v1.0.0 now surfaces it as a source-only pending-review case; no canonical transaction is fabricated | Correct the parser output and reprocess the original source, retaining superseded evidence |
 | Recent Transactions | Workbook formula/view responsibility, not an Apps Script refresh command | Dynamic latest-30 formula over the full canonical ledger |
 | Workbook formula portability | Google Sheets-only QUERY/UNIQUE/FILTER formulas may export to XLSX as unsupported functions or cached values | Validate formulas in Google Sheets; document Excel-export limitations |
 | Dashboard ranges | Fixed row references become stale as ledger grows | Dynamic/open-ended ranges or bounded helper tables |
@@ -803,7 +805,7 @@ Purpose suggestions remain optional and live in Purpose Review Queue because the
 | <code>README.md</code> | Complete project story, UI, configuration, Shortcut, Gemini, operations and maintainer notes |
 | <code>docs/images/</code> | Fictional SVG illustrations embedded above |
 
-Production engine is **v1.0.1**; schema and parser identifiers remain **v1.0.0**. The existing .gs file paths are stable replacement paths, not a versioned Apps Script deployment. Keep one branch: <code>main</code>.
+Production engine is **v1.0.0**; schema and parser identifiers remain **v1.0.0**. The existing .gs file paths are stable replacement paths, not a versioned Apps Script deployment. Keep one branch: <code>main</code>.
 
 ---
 
@@ -811,7 +813,7 @@ Production engine is **v1.0.1**; schema and parser identifiers remain **v1.0.0**
 
 ### Capture the event. Preserve the evidence. Understand the pattern.
 
-**PFIS · Personal Finance Intelligence System · Engine v1.0.1 / Schema v1.0.0**
+**PFIS · Personal Finance Intelligence System · Engine v1.0.0 / Schema v1.0.0**
 
 <sub>Google Apps Script · Google Sheets · iOS Shortcuts · Optional Gemini-assisted enrichment</sub>
 

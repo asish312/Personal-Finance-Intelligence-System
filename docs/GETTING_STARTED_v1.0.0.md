@@ -46,6 +46,7 @@ Before modifying an existing ledger, read [Ledger Cleanup Operations](LEDGER_CLE
 | <code>prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md</code> | Copy/paste extraction and category prompts |
 | <code>prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md</code> | Copy/paste workbook repair prompt |
 | <code>prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md</code> | Copy/paste Rules/Config prompt for credit-card settlements |
+| <code>prompts/GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md</code> | Recurring daily Gmail/Sheets verifier and data-quality monitor |
 | <code>prompts/README.md</code> | Prompt catalogue and usage notes |
 | <code>docs/images/</code> | SVG architecture/configuration and illustrative diagrams |
 

@@ -109,6 +109,10 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       if (typeof pfisSetCategoryFallbackMarker_ !== 'function') missing.push('pfisSetCategoryFallbackMarker_');
       if (typeof pfisIsDefaultCategoryFallback_ !== 'function') missing.push('pfisIsDefaultCategoryFallback_');
       if (typeof pfisArchiveRejectedTransaction !== 'function') missing.push('pfisArchiveRejectedTransaction');
+      if (typeof pfisMerchantPatternMatches_ !== 'function') missing.push('pfisMerchantPatternMatches_');
+      if (typeof pfisReclassifyTransactionFromEvidence !== 'function') missing.push('pfisReclassifyTransactionFromEvidence');
+      if (typeof PFIS_PREVIEW_LEGACY_DUPLICATE_ARCHIVE_MIGRATION !== 'function') missing.push('PFIS_PREVIEW_LEGACY_DUPLICATE_ARCHIVE_MIGRATION');
+      if (typeof PFIS_APPLY_LEGACY_DUPLICATE_ARCHIVE_MIGRATION !== 'function') missing.push('PFIS_APPLY_LEGACY_DUPLICATE_ARCHIVE_MIGRATION');
       pfisPreflightAssert_(missing.length === 0, 'Missing runtime functions: ' + missing.join(', '));
       return 'All 12 ingestion/cache/audit/category-fallback helpers are defined';
     }, startedAt);
@@ -424,6 +428,149 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       pfisPreflightAssert_(row === 3, 'Expected append below preserved row 2; got ' + row + '.');
       pfisPreflightAssert_(sourceSheet.getRange(2, 2).getValue() === 'PRESERVE_THIS_PARTIAL_ROW', 'Sentinel was changed.');
       return 'Partial row preserved; new source row should be row 3 or later';
+    }, startedAt);
+
+    var testToken = pfisString(PropertiesService.getScriptProperties().getProperty('WEB_APP_SECRET'));
+
+    pfisPreflightRunCase_(report, 'Merchant rules and Config match distinctive phrases in linked source evidence', function () {
+      var configSheet = testSpreadsheet.getSheetByName(PFIS_SHEETS.config);
+      var categoriesSheet = testSpreadsheet.getSheetByName(PFIS_SHEETS.categories);
+      var oldCategory = categoriesSheet.getRange(6, 1, 1, 2).getValues()[0];
+      var newRuleRows = [];
+      var newConfigRows = [];
+      var patterns = ['CreditCard Payment', 'SBI Cards and Payme'];
+      try {
+        categoriesSheet.getRange(6, 1, 1, 2).setValues([['Credit card payments', true]]);
+        patterns.forEach(function (pattern, index) {
+          var ruleRow = new Array(23).fill('');
+          ruleRow[0] = true; ruleRow[1] = 'MERCHANT'; ruleRow[3] = pattern;
+          ruleRow[4] = 'Credit card payments'; ruleRow[6] = '';
+          ruleRow[7] = 0; ruleRow[8] = false; ruleRow[9] = 'card_payment';
+          ruleRow[12] = 50 + index; ruleRow[13] = 'PFIS-TEST-CC-' + (index + 1);
+          ruleRow[14] = 'Merchant Rule'; ruleRow[15] = 'UPI'; ruleRow[16] = false;
+          ruleRow[17] = ''; ruleRow[18] = 'Test-only credit card settlement rule';
+          ruleRow[19] = false; ruleRow[20] = ''; ruleRow[21] = ''; ruleRow[22] = 0;
+          newRuleRows.push(ruleRow);
+          var cfgRow = new Array(10).fill('');
+          cfgRow[0] = 'Axis Bank'; cfgRow[1] = 'Savings Account'; cfgRow[3] = pattern;
+          cfgRow[4] = 'AXIS_SAVINGS'; cfgRow[5] = 'Axis Savings Account';
+          cfgRow[6] = 'UPI'; cfgRow[7] = true; cfgRow[8] = 50 + index;
+          newConfigRows.push(cfgRow);
+        });
+        rulesSheet.getRange(rulesSheet.getLastRow() + 1, 1, 2, 23).setValues(newRuleRows);
+        configSheet.getRange(configSheet.getLastRow() + 1, 1, 2, 10).setValues(newConfigRows);
+        PFIS_RUNTIME_RULE_CACHE = null; PFIS_RUNTIME_CONFIG_CACHE = null; PFIS_RUNTIME_CATEGORY_CACHE = null;
+
+        patterns.forEach(function (pattern, index) {
+          var evidence = index === 0
+            ? 'Axis Bank A/c AXIS_SAVINGS debited INR 2,397.46 by CreditCard Payment XX.'
+            : 'Axis Bank A/c AXIS_SAVINGS debited INR 41,091.74 UPI SBI Cards and Payme.';
+          var parsed = {
+            datetime: pfisCreateIndiaDate(2026, 10, 30, 6, 45, 0), datePrecision: 'DATETIME',
+            amount: index === 0 ? -2397.46 : -41091.74, bank: 'Axis Bank',
+            accountType: 'Savings Account', instrument: 'UPI', type: 'expense',
+            merchant: index === 0 ? 'Axis Credit Card Bill' : 'SBI Cards and Payme',
+            counterparty: index === 0 ? 'XX' : 'SBI Cards and Payme',
+            refNo: index === 0 ? '' : '132062254019', balanceAfter: ''
+          };
+          pfisPreflightAssert_(pfisMerchantPatternMatches_(pattern, parsed, evidence),
+            'Configured phrase did not match original source evidence: ' + pattern);
+          var matchedRule = pfisEvaluateRules(parsed, evidence);
+          pfisPreflightAssert_(matchedRule.category === 'Credit card payments' &&
+            matchedRule.typeOverride === 'card_payment',
+            'Rule did not assign card payment category/type for ' + pattern + ': ' + JSON.stringify(matchedRule));
+          var config = pfisResolveConfig(parsed, evidence);
+          pfisPreflightAssert_(config.account === 'AXIS_SAVINGS' && config.isInternal === true,
+            'Config did not mark the verified own savings account as internal for ' + pattern + ': ' + JSON.stringify(config));
+        });
+      } finally {
+        if (oldCategory[0] !== null || oldCategory[1] !== null) {
+          categoriesSheet.getRange(6, 1, 1, 2).setValues([oldCategory]);
+        } else {
+          categoriesSheet.getRange(6, 1, 1, 2).clearContent();
+        }
+        PFIS_RUNTIME_RULE_CACHE = null; PFIS_RUNTIME_CONFIG_CACHE = null; PFIS_RUNTIME_CATEGORY_CACHE = null;
+      }
+      return 'Both original-source merchant phrases correctly drive card_payment Rules and own-account internal Config mappings';
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'Historical card-payment reclassification uses linked source evidence and audits changes', function () {
+      var configSheet = testSpreadsheet.getSheetByName(PFIS_SHEETS.config);
+      var categoriesSheet = testSpreadsheet.getSheetByName(PFIS_SHEETS.categories);
+      var oldCategory = categoriesSheet.getRange(6, 1, 1, 2).getValues()[0];
+      var baseRuleRow = rulesSheet.getLastRow() + 1;
+      var baseConfigRow = configSheet.getLastRow() + 1;
+      var rule = new Array(23).fill('');
+      rule[0] = true; rule[1] = 'MERCHANT'; rule[3] = 'CreditCard Payment';
+      rule[4] = 'Credit card payments'; rule[9] = 'card_payment';
+      rule[12] = 60; rule[13] = 'PFIS-TEST-RECLASS-CC';
+      rule[14] = 'Merchant Rule'; rule[18] = 'Test historical card settlement';
+      var config = new Array(10).fill('');
+      config[0] = 'Axis Bank'; config[1] = 'Savings Account'; config[3] = 'CreditCard Payment';
+      config[4] = 'AXIS_SAVINGS'; config[5] = 'Axis Savings Account'; config[6] = 'UPI';
+      config[7] = true; config[8] = 60;
+      try {
+        categoriesSheet.getRange(6, 1, 1, 2).setValues([['Credit card payments', true]]);
+        rulesSheet.getRange(baseRuleRow, 1, 1, 23).setValues([rule]);
+        configSheet.getRange(baseConfigRow, 1, 1, 10).setValues([config]);
+        PFIS_RUNTIME_RULE_CACHE = null; PFIS_RUNTIME_CONFIG_CACHE = null; PFIS_RUNTIME_CATEGORY_CACHE = null;
+
+        var transactionId = 'PFIS-TEST-RECLASS-CC-001';
+        var sourceId = 'SRC-PFIS-TEST-RECLASS-CC-001';
+        var raw = 'Axis Bank A/c AXIS_SAVINGS debited INR 2,397.46 on 30/10/2026 by CreditCard Payment XX.';
+        var parsed = {
+          datetime: pfisCreateIndiaDate(2026, 10, 30, 6, 42, 35), datePrecision: 'DATETIME',
+          amount: -2397.46, bank: 'Axis Bank', accountType: 'Savings Account',
+          instrument: 'UPI', type: 'expense', merchant: 'Axis Credit Card Bill',
+          counterparty: 'XX', refNo: '', balanceAfter: ''
+        };
+        var initialConfig = {
+          account: 'AXIS_SAVINGS', cardName: 'Axis Savings Account', instrument: 'UPI',
+          isInternal: false, ambiguous: false, unresolved: false
+        };
+        var initial = pfisBuildTransaction(parsed, { originalText: raw }, 'SMS', transactionId,
+          sourceId, pfisComputeSourceHash('SMS', raw), pfisEmptyRuleResult(), initialConfig,
+          'enrichment_required', false);
+        pfisAppendTransaction(initial, 'Synthetic historical classification test');
+        pfisAppendSourceRow({
+          sourceId: sourceId, receivedAt: new Date(), sourceType: 'SMS', sender: 'PFIS TEST',
+          subject: '', rawBody: raw, sourceHash: pfisComputeSourceHash('SMS', raw),
+          parserVersion: PARSER_VERSION, parseStatus: 'ACCEPTED', extractedAmount: parsed.amount,
+          extractedDate: parsed.datetime, datePrecision: 'DATETIME', accountIdentifier: 'AXIS_SAVINGS',
+          extractedMerchant: parsed.merchant, extractedReferenceNo: '', linkedTxnId: transactionId,
+          ingestedAt: new Date(), processingError: '', archivedFlag: false, notes: 'Synthetic test evidence',
+          requestId: 'PFIS-TEST-RECLASS-SOURCE', batchId: ''
+        });
+        PFIS_RUNTIME_SOURCE_CACHE = null; PFIS_RUNTIME_TRANSACTION_CACHE = null;
+        var before = pfisGetTransaction(transactionId, false);
+        var result = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'reclassifyfromevidence', transactionId: transactionId,
+          reason: 'Apply verified card payment Rules and Config',
+          actor: 'PFIS_PREFLIGHT_TEST', requestId: 'PFIS-TEST-RECLASS-CC-APPLY'
+        }), 'POST');
+        pfisPreflightAssert_(result && result.success === true &&
+          ['RECLASSIFIED', 'RECLASSIFIED_REVIEW_CLEARED'].indexOf(result.status) >= 0,
+          'Evidence reclassification did not succeed: ' + JSON.stringify(result));
+        var after = pfisGetTransaction(transactionId, false);
+        pfisPreflightAssert_(after.category === 'Credit card payments' &&
+          after.type === 'card_payment' && after.isInternalTransfer === true,
+          'Reclassification did not apply category/type/internal classification: ' + JSON.stringify(after));
+        pfisPreflightAssert_(after.needsReview === false && after.reviewStatus === 'Approved',
+          'Resolved classification review was not cleared safely.');
+        pfisPreflightAssert_(after.amount === before.amount && after.dateTime.getTime() === before.dateTime.getTime() &&
+          after.bank === before.bank && after.merchant === before.merchant && after.refNo === before.refNo,
+          'Reclassification modified immutable financial facts.');
+        var changes = pfisReadFixedRows(testSpreadsheet.getSheetByName(PFIS_SHEETS.changes), PFIS_CHANGE_FIELDS.length)
+          .map(function (row) { return pfisObjectFromRow(row, PFIS_CHANGE_FIELDS); });
+        pfisPreflightAssert_(changes.some(function (change) {
+          return change.transactionId === transactionId && change.field === 'isInternalTransfer' &&
+            change.newValue === 'true';
+        }), 'Reclassification did not write Change Log audit for internal transfer flag.');
+        return 'Category/type/internal status updated from linked evidence; financial facts preserved; review cleared and audited';
+      } finally {
+        categoriesSheet.getRange(6, 1, 1, 2).setValues([oldCategory]);
+        PFIS_RUNTIME_RULE_CACHE = null; PFIS_RUNTIME_CONFIG_CACHE = null; PFIS_RUNTIME_CATEGORY_CACHE = null;
+      }
     }, startedAt);
 
     var testToken = pfisString(PropertiesService.getScriptProperties().getProperty('WEB_APP_SECRET'));

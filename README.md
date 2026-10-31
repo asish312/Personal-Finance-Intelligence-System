@@ -18,6 +18,22 @@ A personal-finance workflow built with Google Apps Script, Google Sheets, iOS Sh
 
 ## Start here
 
+**New to PFIS? Follow these links in order.**
+
+| Step | Document | Why read it |
+|---|---|---|
+| 1 | [Getting Started](docs/GETTING_STARTED_v1.0.0.md) | Architecture, repository file map, setup and safe test sequence |
+| 2 | [iOS Shortcut Implementation](docs/IOS_SHORTCUT_IMPLEMENTATION_v1.0.0.md) | Build the Shortcut, map `isReviewNeeded`, submit JSON and route responses |
+| 3 | [iOS Shortcut Prompt Library](prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md) | Copy/paste transaction extraction and category prompts |
+| 4 | [Gemini Workbook Guide](docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md) | Safely inspect and maintain the Google Sheets workbook |
+| 5 | [Gemini Spreadsheet Repair Prompt](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Copy/paste prompt for workbook repair |
+| Optional | [Gemini Purpose Enrichment](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) | Daily evidence-backed Purpose suggestions with human approval |
+| Optional | [Prompt Catalogue](prompts/README.md) | Index of reusable prompts |
+
+This repository contains the Apps Script source, regression harness, operating documentation and reusable prompts. It does **not** contain the owner's private Google Sheets workbook, deployment secrets or an importable Apple `.shortcut` file. The iOS Shortcut must be built/maintained in Apple's Shortcuts app using the implementation guide.
+
+PFIS release identifiers remain **v1.0.0**.
+
 PFIS is designed to answer six questions:
 
 1. **What happened?** Capture the original bank SMS/email and extract the transaction facts.
@@ -413,54 +429,7 @@ Do not use a confidence number as a substitute for human approval.
 
 ### Daily Gemini Task prompt
 
-Copy the following instruction into a Gemini Task and schedule it daily:
-
-~~~text
-You are the PFIS daily Purpose enrichment assistant.
-
-Use the connected Google Sheets workbook. Read Transaction Log and Source Log. Write suggestions ONLY to Purpose Review Queue.
-
-OBJECTIVE
-Find recent canonical transactions from the previous 7 calendar days where Purpose/User Notes is blank. Propose a short factual Purpose only when the linked original SMS/email evidence explicitly supports it.
-
-CANDIDATE FILTER
-- Purpose is blank.
-- Category and Type are present.
-- Needs Review is not TRUE.
-- Review Status is not Pending.
-- Validation Flag is not DUPLICATE_CANDIDATE, SOURCE_CONFLICT or DUPLICATE_REJECTED.
-- At least one active Source Log row is linked to the exact Transaction ID.
-- Ignore SUPERSEDED, PARSE_FAILED and CONFLICT source records.
-- Do not process archived transactions.
-
-EVIDENCE STANDARD
-Read the relevant source text. Purpose must be directly supported by the alert. Do not infer intent from merchant, amount, category or recipient alone. Do not invent details or ask the user questions. Skip weak or ambiguous evidence.
-
-PURPOSE FORMAT
-Use a short, neutral, factual phrase (normally 3–8 words), for example "Monthly electricity bill", "Home grocery purchase" or "Credit card bill settlement" only when the message supports it. Do not repeat the merchant as Purpose. Do not infer a personal motive.
-
-SALARY
-Do not generate or rewrite salary Purpose. Trusted salary Purpose is handled by the Apps Script Rules trigger using the transaction date and configured Calendar Scope.
-
-WRITE RULES
-- Do not edit Transaction Log, Source Log, Change Log, Rules, Config, Categories or archived rows.
-- Do not approve suggestions.
-- Do not clear or overwrite an existing value.
-- Append to Purpose Review Queue only.
-- Use the exact 17-column queue schema.
-- Suggestion ID should be deterministic, e.g. PURPOSE- plus Transaction ID.
-- One suggestion per Transaction ID.
-- Before appending, scan the queue and skip any Transaction ID already present in any status.
-- Set Status=SUGGESTED and Gemini Run At to the run timestamp.
-- Leave Reviewed By, Reviewed At, Applied At and Apply Result blank.
-- Store a concise Evidence Summary and the linked Source ID(s), comma-separated.
-- Confidence is context for a reviewer, not an approval signal.
-
-DAILY REPORT
-Report eligible records inspected, suggestions added, skipped for insufficient evidence, skipped for review/conflict state, already-present records and errors.
-
-Never claim a suggestion was saved unless it is visible in Purpose Review Queue. If Gemini requires confirmation for a shared workbook edit, request that confirmation and do not claim the write is complete.
-~~~
+The canonical, ready-to-copy Task prompt and its eligibility, evidence, write and reporting rules are maintained in [Gemini Purpose Enrichment](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md). Use that document when creating the separate daily Gemini Task; do not maintain a second copy of the prompt here.
 
 ### Approve and apply
 
@@ -526,7 +495,7 @@ For a caller-requested review, acknowledge only after a human checks the source:
 
 ### Extraction prompt — core rules
 
-The Shortcut extraction action must:
+Use the full copy/paste extraction instructions in [iOS Shortcut Prompt Library](prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md). The Shortcut extraction action must:
 - return exactly <code>IGNORE</code> or ten pipe-separated fields;
 - use the transaction time, not the notification delivery time;
 - preserve date-only precision; do not invent midnight as an event time;
@@ -722,34 +691,7 @@ Gemini must not change Apps Script source, Shortcut configuration, Script Proper
 
 ### Copy/paste workbook implementation instruction
 
-~~~text
-You are working on the existing PFIS Google Sheets workbook. Inspect actual sheet names, headers, formulas, named ranges, chart sources and dependencies before editing. Do not redesign from scratch.
-
-Implement workbook-only improvements:
-1. Make Recent Transactions a formula-driven latest-30 view from the full canonical Transaction Log, sorted by actual DateTime descending. Make it read-only.
-2. Replace fixed row limits in Insights & Data Quality, Dashboard_Calc, Monthly Summary, Dashboard and Reports with scalable ranges.
-3. Repair unsupported formulas at the root cause; do not hide broken formulas with IFERROR or hard-code results.
-4. Preserve Transaction Log A:AC. Use optional Budget Month (AN) and Income Month (AO) headers only outside the core schema.
-5. Configure a generic EMPLOYER_DEMO last-working-day salary rule: Month Offset 0, Auto Purpose FALSE, Purpose Trigger LAST_WORKING_DAY_OF_MONTH, Budget Month Offset 1. Only enter verified holiday dates.
-6. Design a zero-based monthly budget. Opening budget allocation starts at zero; actual bank balances must never be reset.
-7. Create one unified Review Queue view covering transaction flags, source parse failures, source conflicts, and category gaps. Give every case a unique Case ID, deduplicate by Transaction ID or Source ID, and keep missing Purpose out of mandatory review.
-8. Create a Purpose Review Queue separately for optional Gemini suggestions. Gemini writes SUGGESTED rows only; human approval is mandatory before Apps Script applies them.
-9. Build a Savings Sweep Log that separates planned from verified savings and requires both source debit and destination credit Transaction IDs with matching amounts.
-10. Update the existing Insights & Data Quality review surface using the current API/workbook contract: include Transaction Log rows where Needs Review=TRUE or Review Status=Pending; include Source Log Parse Status=CONFLICT and PARSE_FAILED as source-only cases; identify each case by Transaction ID or Source ID and avoid double-counting. Show the reason code client_requested_review with a human-readable label such as “Capture client requested human review”. Keep category classification gaps visibly distinct because getneedsenrichment remains a separate API route. Clearly show that PARSE_FAILED has no canonical Transaction Log row until corrected/reprocessed.
-11. Update Data Dictionary, PFIS System Guide, labels, help text and charts. Document isReviewNeeded as an API request boolean mapped to existing Transaction Log O/T/U fields; do not add a physical transaction column. Each chart must use an actual calculation range and show its period and unit.
-
-Non-negotiable:
-- Do not edit Apps Script or iOS Shortcut files. The v1.0.0 API is already implemented; do not recreate it in spreadsheet formulas.
-- Do not add a Transaction Log column for isReviewNeeded; use existing O (Needs Review), T (Review Status) and U (Review Reason).
-- Do not alter Transaction IDs, amounts, dates, bank facts, merchant facts or source/audit evidence.
-- Do not auto-merge/delete duplicate candidates.
-- Purpose is optional and must not increase Needs Review.
-- Do not create fabricated data or use example/demo numbers in live calculations.
-- After editing, report exact sheet/cell ranges, old and new formulas, validations, unresolved items and whether each feature is implemented or still planned.
-- Do not claim a chart/formula is working until checked in the actual Google Sheet.
-~~~
-
----
+The canonical, concise, reusable repair instruction is maintained in [Gemini Spreadsheet Repair Prompt](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md). Read [Gemini Workbook Guide](docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md) before giving Gemini edit access. Prefer the live Google Sheet, back it up first, and verify all calculations in Google Sheets rather than relying on XLSX cached values.
 
 ## Known design gaps and recommended long-term direction
 
@@ -796,16 +738,29 @@ Purpose suggestions remain optional and live in Purpose Review Queue because the
 - Use synthetic merchants, values, IDs and names in repository docs/tests.
 - Keep employer-specific examples generic; this README uses <code>Example Employer</code> and <code>EMPLOYER_DEMO</code>.
 
-### Production file map
+### Complete repository file map
 
 | File | Responsibility |
 |---|---|
-| <code>PFIS_TransactionEngine_v1.0.0.gs</code> | Production Apps Script engine |
-| <code>PFIS_Preflight_Tests_v1.0.0.gs</code> | Synthetic preflight/regression harness |
-| <code>README.md</code> | Complete project story, UI, configuration, Shortcut, Gemini, operations and maintainer notes |
-| <code>docs/images/</code> | Fictional SVG illustrations embedded above |
+| [README.md](README.md) | Landing page: architecture, workbook, API, workflows and engineering boundaries |
+| [PFIS_TransactionEngine_v1.0.0.gs](PFIS_TransactionEngine_v1.0.0.gs) | Production Apps Script engine |
+| [PFIS_Preflight_Tests_v1.0.0.gs](PFIS_Preflight_Tests_v1.0.0.gs) | Synthetic preflight and regression harness |
+| [docs/GETTING_STARTED_v1.0.0.md](docs/GETTING_STARTED_v1.0.0.md) | Newcomer setup and installation order |
+| [docs/IOS_SHORTCUT_IMPLEMENTATION_v1.0.0.md](docs/IOS_SHORTCUT_IMPLEMENTATION_v1.0.0.md) | Complete Shortcut build, API mapping, routing and retry guide |
+| [docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md](docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md) | Workbook-only Gemini maintenance and validation guidance |
+| [docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) | Optional daily Purpose suggestions and human approval |
+| [prompts/README.md](prompts/README.md) | Prompt index |
+| [prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md](prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md) | Copy/paste extraction and category-classification prompts |
+| [prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Copy/paste workbook repair prompt |
+| [docs/images/pfis-configuration-journey.svg](docs/images/pfis-configuration-journey.svg) | Configuration journey illustration |
+| [docs/images/pfis-demo-budget-sweep.svg](docs/images/pfis-demo-budget-sweep.svg) | Fictional budget/savings illustration |
+| [docs/images/pfis-demo-data-quality.svg](docs/images/pfis-demo-data-quality.svg) | Fictional data-quality illustration |
+| [docs/images/pfis-demo-financial-performance.svg](docs/images/pfis-demo-financial-performance.svg) | Fictional financial-performance illustration |
+| [docs/images/pfis-demo-spending-patterns.svg](docs/images/pfis-demo-spending-patterns.svg) | Fictional spending-pattern illustration |
 
-Production engine is **v1.0.0**; schema and parser identifiers remain **v1.0.0**. The existing .gs file paths are stable replacement paths, not a versioned Apps Script deployment. Keep one branch: <code>main</code>.
+**Not committed intentionally:** the private Google Sheets workbook/export, real transaction data, Script Properties/secrets and a native Apple Shortcut export. The Shortcut implementation and prompts are documented here, but the actual automation is stored in the owner's Shortcuts app.
+
+Production engine, schema, parser and documentation identifiers remain **v1.0.0**. Apps Script Web App deployment revisions are separate from this project release label. Keep one branch: <code>main</code>.
 
 ---
 

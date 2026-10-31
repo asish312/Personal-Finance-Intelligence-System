@@ -32,7 +32,21 @@ For each mapping, verify:
 
 Do NOT assign a survivor for 202610-182. Its Axis email is only a generic INR 1,080 debit summary at 31-Oct-2026 01:06:50. 202610-183 is an SBI Card payment confirmation for INR 1,080, but it has no exact payment time or common reference conclusively tying it to that Axis debit. Leave 202610-182 unchanged and report it for human confirmation.
 
-Do not change Transaction ID, date/time, amount, bank, account, merchant, category, type, instrument, internal-transfer flag, source records, Change Log, archive rows or formulas. Do not change Review Status or Validation Flag. Do not move/delete any rows.
+Do not change Transaction ID, date/time, amount, bank, account, merchant, category, type, instrument, internal-transfer flag, Source Log, archive rows or formulas. Do not change Review Status or Validation Flag. Do not move/delete any rows.
 
-After making only the four Review Reason updates, report exact cells and before/after text. Do not run Apps Script archive migration; the owner will review the preview and run it separately.
+Append exactly one audit row to Change Log for each Review Reason update. Preserve all existing Change Log rows. Use the workbook's exact ten-column header order:
+Change ID | Transaction ID | Changed At | Target Table | Actor | Field | Old Value | New Value | Reason | Request ID
+
+For each row:
+- Change ID: a unique value such as CHG-GEMINI-DUPMAP-<Transaction ID>; check for collisions and make it unique.
+- Transaction ID: the duplicate transaction ID.
+- Changed At: current timestamp as a date/time value.
+- Target Table: Transaction Log.
+- Actor: Gemini-assisted human review.
+- Field: Review Reason.
+- Old Value / New Value: exact before/after text.
+- Reason: human-confirmed survivor mapping based on the source evidence described above.
+- Request ID: GEMINI-LEGACY-DUPLICATE-MAP-20261031.
+
+After making only the four Review Reason updates and their four append-only Change Log audit rows, report exact cells and before/after text. Do not run Apps Script archive migration; the owner will review the preview and run it separately.
 ~~~

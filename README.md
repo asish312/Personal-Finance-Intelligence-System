@@ -27,6 +27,8 @@ A personal-finance workflow built with Google Apps Script, Google Sheets, iOS Sh
 | 3 | [iOS Shortcut Prompt Library](prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md) | Copy/paste transaction extraction and category prompts |
 | 4 | [Gemini Workbook Guide](docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md) | Safely inspect and maintain the Google Sheets workbook |
 | 5 | [Gemini Spreadsheet Repair Prompt](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Copy/paste prompt for workbook repair |
+| 6 | [Ledger Cleanup Operations](docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md) | Safely migrate legacy confirmed duplicates and reclassify existing transactions from source evidence |
+| 7 | [Gemini Card-Payment Rules Prompt](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Configure future credit-card settlement Rules and Config rows |
 | Optional | [Gemini Purpose Enrichment](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) | Daily evidence-backed Purpose suggestions with human approval |
 | Optional | [Prompt Catalogue](prompts/README.md) | Index of reusable prompts |
 
@@ -662,6 +664,12 @@ All Shortcut writes use POST JSON.
 - <code>update</code>
 - <code>reprocesssource</code>
 - <code>resolveexception</code>
+- <code>reclassifyfromevidence</code> — admin-only, explicit, audited refresh of classification/mapping fields using linked source evidence and current Rules/Config; it does not change financial facts.
+
+**Legacy maintenance functions (run manually in Apps Script after preview)**
+- <code>PFIS_PREVIEW_LEGACY_DUPLICATE_ARCHIVE_MIGRATION()</code> — read-only preview; requires an explicit surviving Transaction ID.
+- <code>PFIS_APPLY_LEGACY_DUPLICATE_ARCHIVE_MIGRATION()</code> — archives only eligible legacy rows, relinks source evidence and writes Change Log entries.
+- Follow [Ledger Cleanup Operations](docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md).
 
 **Read/diagnostic**
 - <code>health</code> / <code>ping</code>
@@ -749,9 +757,11 @@ Purpose suggestions remain optional and live in Purpose Review Queue because the
 | [docs/IOS_SHORTCUT_IMPLEMENTATION_v1.0.0.md](docs/IOS_SHORTCUT_IMPLEMENTATION_v1.0.0.md) | Complete Shortcut build, API mapping, routing and retry guide |
 | [docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md](docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md) | Workbook-only Gemini maintenance and validation guidance |
 | [docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) | Optional daily Purpose suggestions and human approval |
+| [docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md](docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md) | Safe legacy duplicate migration and historical evidence-based reclassification runbook |
 | [prompts/README.md](prompts/README.md) | Prompt index |
 | [prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md](prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md) | Copy/paste extraction and category-classification prompts |
 | [prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Copy/paste workbook repair prompt |
+| [prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Copy/paste Rules/Config prompt for card-payment settlement classification |
 | [docs/images/pfis-configuration-journey.svg](docs/images/pfis-configuration-journey.svg) | Configuration journey illustration |
 | [docs/images/pfis-demo-budget-sweep.svg](docs/images/pfis-demo-budget-sweep.svg) | Fictional budget/savings illustration |
 | [docs/images/pfis-demo-data-quality.svg](docs/images/pfis-demo-data-quality.svg) | Fictional data-quality illustration |

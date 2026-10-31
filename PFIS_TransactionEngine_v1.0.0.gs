@@ -1,5 +1,5 @@
 /**
- * Personal Finance Intelligence System (PFIS) — Transaction Engine v1.0.1
+ * Personal Finance Intelligence System (PFIS) — Transaction Engine v1.0.0
  * First documented project release. Includes timezone-safe period bounds, parsed-date sorting/reconciliation,
  * reference-led cross-channel matching, exact same-channel duplicate suppression, card-payment
  * internal-transfer support, configurable amount-rule evidence, logically blank-safe row allocation,
@@ -43,9 +43,10 @@
  *   true requests an auditable human review when the capture client could not
  *   complete an interactive review. It is semantic intent, not device state.
  *   Omitted/false never clears backend review state. Do not send `deviceLocked`.
- * - For a potential duplicate/source conflict, use action "resolveexception" with
- *   CONFIRM_DISTINCT, CONFIRM_DUPLICATE plus duplicateOf, or ACKNOWLEDGE_REVIEW
- *   for a caller-requested review; every resolution requires a human reason.
+ * - For a potential duplicate/source conflict or explicit rejection, use action "resolveexception" with
+ *   CONFIRM_DISTINCT, CONFIRM_DUPLICATE plus duplicateOf, ACKNOWLEDGE_REVIEW
+ *   for caller-requested review, or REJECT_TRANSACTION for an incorrect/unwanted transaction;
+ *   every resolution requires a human reason.
  * - Response status describes this request. verificationStatus describes evidence.
  *   needsEnrichment/requiresPurpose/requiresCategoryClassification describe missing
  *   information; needsReview/reviewStatus describe unresolved review conditions.
@@ -57,14 +58,14 @@
  * Time zone: Asia/Kolkata
  */
 
-const ENGINE_VERSION = 'v1.0.1';
+const ENGINE_VERSION = 'v1.0.0';
 const SCHEMA_VERSION = 'v1.0.0';
 const PARSER_VERSION = 'v1.0.0';
 const PFIS_TIME_ZONE = 'Asia/Kolkata';
 const PFIS_MAX_READ_LIMIT = 100;
 const PFIS_MATCH_WINDOW_MS = 5 * 60 * 1000;
 const PFIS_FINAL_SOURCE_STATUSES = Object.freeze([
-  'ACCEPTED', 'RECONCILED', 'DUPLICATE_CANDIDATE', 'DUPLICATE_SUPPRESSED', 'CONFLICT', 'PARSE_FAILED', 'NON_FINANCIAL_IGNORED', 'SUPERSEDED'
+  'ACCEPTED', 'RECONCILED', 'DUPLICATE_CANDIDATE', 'DUPLICATE_SUPPRESSED', 'CONFLICT', 'PARSE_FAILED', 'NON_FINANCIAL_IGNORED', 'SUPERSEDED', 'REJECTED'
 ]);
 const PFIS_PROCESSING_SOURCE_STATUSES = Object.freeze([
   'PROCESSING_INSERT', 'PROCESSING_DUPLICATE', 'PROCESSING_RECONCILE', 'PROCESSING_CONFLICT'
@@ -743,9 +744,11 @@ function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceI
   const type = pfisNormalizeType(ruleResult.typeOverride || parsed.type);
   const categories = pfisGetCategoryList();
   const configuredCategory = pfisCleanText(ruleResult.category);
+  const categoryFallback = categories.indexOf(configuredCategory) < 0 &&
+    categories.indexOf('Miscellaneous') >= 0;
   const category = categories.indexOf(configuredCategory) >= 0
     ? configuredCategory
-    : (categories.indexOf('Miscellaneous') >= 0 ? 'Miscellaneous' : '');
+    : (categoryFallback ? 'Miscellaneous' : '');
   // User Notes can be populated by Auto Purpose=TRUE or an explicitly satisfied
   // Purpose Trigger. Missing purpose is normal and never creates a review blocker.
   const userNotes = pfisGetTrustedPurposeFromRule(
@@ -785,10 +788,10 @@ function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceI
     reviewReason: actualReviewReason,
     reviewedBy: needsReview ? '' : 'SYSTEM_RULES',
     reviewedAt: needsReview ? '' : now,
-    ruleApplied: ruleResult.ruleApplied || '',
+    ruleApplied: pfisSetCategoryFallbackMarker_(ruleResult.ruleApplied, categoryFallback),
     ruleType: ruleResult.ruleType || '',
     // Do not fabricate a confidence score: Rules match means assigned, not calibrated confidence.
-    categoryConfidence: !category || confidence === null ? '' : confidence,
+    categoryConfidence: !category || categoryFallback || confidence === null ? '' : confidence,
     validationFlag: duplicate ? 'DUPLICATE_CANDIDATE' : (actualReviewReason === 'source_conflict' ? 'SOURCE_CONFLICT' : (needsReview ? 'NEEDS_REVIEW' : 'VALID')),
     createdAt: now,
     lastUpdatedAt: now,
@@ -1800,6 +1803,15 @@ function pfisReplayResponse(source, requestId) {
       sourceId: source.sourceId, transactionId: null, requestId: requestId
     };
   }
+  if (status === 'REJECTED') {
+    return {
+      success: true, status: 'REJECTED', recorded: true,
+      message: 'This source belongs to a transaction that was explicitly rejected and archived. No new transaction was created.',
+      sourceId: source.sourceId, transactionId: source.linkedTxnId || null,
+      transaction: source.linkedTxnId ? pfisGetTransaction(source.linkedTxnId, false) : null,
+      requestId: requestId
+    };
+  }
 
   const transaction = source.linkedTxnId ? pfisGetTransaction(source.linkedTxnId, false) : null;
   if (!transaction) {
@@ -1881,7 +1893,7 @@ function pfisGetTransaction(transactionId, includeEvidence) {
   const obj = pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
   const verification = pfisGetVerificationState(transactionId, obj.validationFlag);
   const categories = pfisGetCategoryList();
-  const enrichment = pfisGetEnrichmentState(obj.category, obj.userNotes, categories, obj.merchant);
+  const enrichment = pfisGetEnrichmentState(obj.category, obj.userNotes, categories, obj.merchant, obj.ruleApplied);
   obj.sheetRow = rowNumber;
   obj.verificationStatus = verification.status;
   obj.verificationSource = verification.source;
@@ -1896,6 +1908,9 @@ function pfisGetTransaction(transactionId, includeEvidence) {
 }
 
 function pfisGetVerificationState(transactionId, validationFlag) {
+  if (String(validationFlag || '').toUpperCase() === 'REJECTED') {
+    return { status: 'REJECTED', source: '', sourceCount: 0, sourceTypes: [] };
+  }
   // Include conflicting linked evidence in counts while keeping it from falsely
   // satisfying verification. A conflict must never be reported VERIFIED.
   const allLinked = pfisSourceRowsForTransaction(transactionId).filter(function (source) {
@@ -1986,13 +2001,15 @@ function pfisGetPendingReview(limitInput) {
 function pfisGetNeedsEnrichment(limitInput) {
   const limit = pfisClampLimit(limitInput, 50);
   const pending = pfisReadTransactions().map(function (txn) {
-    const enrichment = pfisGetEnrichmentState(txn.category, txn.userNotes, undefined, txn.merchant);
+    const enrichment = pfisGetEnrichmentState(txn.category, txn.userNotes, undefined, txn.merchant, txn.ruleApplied);
     if (!enrichment.requiresCategoryClassification) return null;
     const item = {
       transactionId: txn.transactionId, dateTime: txn.dateTime, amount: txn.amount,
       merchant: txn.merchant, category: txn.category, userNotes: txn.userNotes, type: txn.type,
       requiresPurpose: enrichment.requiresPurpose,
       requiresCategoryClassification: enrichment.requiresCategoryClassification,
+      isDefaultCategoryFallback: enrichment.isDefaultCategoryFallback,
+      classificationReason: enrichment.isDefaultCategoryFallback ? 'DEFAULT_FALLBACK' : 'MISSING_OR_INVALID_CATEGORY',
       verificationStatus: pfisGetVerificationState(txn.transactionId, txn.validationFlag).status,
       // Retained as compatibility fields; purpose is optional and never queued.
       purposeSuggestion: '',
@@ -2119,17 +2136,175 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
     duplicateOf: duplicateOf, archiveRow: archiveRow, requestId: requestId };
 }
 
+/**
+ * Human-only rejection for an incorrect or unwanted canonical transaction.
+ * Unlike CONFIRM_DUPLICATE, this does not require a surviving transaction.
+ * Source evidence remains linked to the rejected archive record.
+ */
+function pfisArchiveRejectedTransaction(transactionId, reason, actor, requestId) {
+  const txSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const archiveSheet = pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive);
+  if (!archiveSheet || archiveSheet.getLastColumn() < PFIS_TX_FIELDS.length) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_SHEET_INVALID',
+      message: 'Rejected & Archive Log is missing or does not contain the canonical A:AC schema. No rows were changed.',
+      transactionId: transactionId, requestId: requestId };
+  }
+  const observedArchiveHeaders = archiveSheet.getRange(1, 1, 1, PFIS_TX_FIELDS.length).getDisplayValues()[0];
+  const invalidArchiveHeaders = PFIS_TX_HEADERS.filter(function (header, index) {
+    return pfisHeaderToken(observedArchiveHeaders[index]) !== pfisHeaderToken(header);
+  });
+  if (invalidArchiveHeaders.length) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_SCHEMA_MISMATCH',
+      message: 'Rejected & Archive Log core headers do not match Transaction Log. No rows were changed.',
+      transactionId: transactionId, requestId: requestId };
+  }
+
+  const activeRow = pfisFindTransactionRow(transactionId);
+  if (activeRow < 2) {
+    const existingArchiveRow = pfisFindRowByValue(archiveSheet, 1, transactionId);
+    if (existingArchiveRow >= 2) {
+      const archived = pfisObjectFromRow(
+        archiveSheet.getRange(existingArchiveRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+      if (pfisString(archived.validationFlag).toUpperCase() === 'REJECTED' &&
+          pfisString(archived.reviewStatus).toUpperCase() === 'REJECTED') {
+        return { success: true, status: 'ALREADY_REJECTED', transactionId: transactionId,
+          archiveRow: existingArchiveRow, requestId: requestId,
+          message: 'This transaction is already rejected and archived.' };
+      }
+      return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_ID_COLLISION',
+        message: 'The Transaction ID already exists in the archive with a different resolution.',
+        transactionId: transactionId, archiveRow: existingArchiveRow, requestId: requestId };
+    }
+    return { success: false, status: 'NOT_FOUND', error: 'NOT_FOUND',
+      message: 'Active transaction not found: ' + transactionId, transactionId: transactionId, requestId: requestId };
+  }
+
+  const current = pfisObjectFromRow(
+    txSheet.getRange(activeRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  const currentFlag = pfisString(current.validationFlag).toUpperCase();
+  if (currentFlag === 'DUPLICATE_CANDIDATE') {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'USE_CONFIRM_DUPLICATE',
+      message: 'This row is a suspected duplicate. Use CONFIRM_DUPLICATE with the surviving canonical Transaction ID instead.',
+      transactionId: transactionId, requestId: requestId };
+  }
+  if (currentFlag === 'DUPLICATE_REJECTED' || currentFlag === 'REJECTED') {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'ALREADY_ARCHIVED',
+      message: 'This transaction already has a final archive status.',
+      transactionId: transactionId, requestId: requestId };
+  }
+
+  const rowWidth = Math.max(txSheet.getLastColumn(), PFIS_TX_FIELDS.length);
+  const originalValues = txSheet.getRange(activeRow, 1, 1, rowWidth).getValues()[0];
+  const record = pfisObjectFromRow(originalValues.slice(0, PFIS_TX_FIELDS.length), PFIS_TX_FIELDS);
+  const now = new Date();
+  record.needsReview = false;
+  record.reviewStatus = 'Rejected';
+  record.reviewReason = 'human_rejected: ' + reason;
+  record.reviewedBy = actor;
+  record.reviewedAt = now;
+  record.validationFlag = 'REJECTED';
+  record.lastUpdatedAt = now;
+
+  const archiveWidth = Math.max(archiveSheet.getLastColumn(), rowWidth);
+  if (archiveSheet.getMaxColumns() < archiveWidth) {
+    archiveSheet.insertColumnsAfter(archiveSheet.getMaxColumns(), archiveWidth - archiveSheet.getMaxColumns());
+  }
+  const ledgerHeaders = txSheet.getRange(1, 1, 1, rowWidth).getDisplayValues()[0];
+  const archiveHeaders = archiveSheet.getRange(1, 1, 1, archiveWidth).getDisplayValues()[0];
+  for (let col = PFIS_TX_FIELDS.length; col < rowWidth; col++) {
+    if (!pfisString(archiveHeaders[col]) && pfisString(ledgerHeaders[col])) {
+      archiveSheet.getRange(1, col + 1).setValue(ledgerHeaders[col]);
+    }
+  }
+
+  let archiveRow = pfisFindRowByValue(archiveSheet, 1, transactionId);
+  if (archiveRow >= 2) {
+    const archived = pfisObjectFromRow(
+      archiveSheet.getRange(archiveRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+    if (pfisString(archived.validationFlag).toUpperCase() !== 'REJECTED') {
+      return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_ID_COLLISION',
+        message: 'The Transaction ID already exists in the archive with a different resolution.',
+        transactionId: transactionId, archiveRow: archiveRow, requestId: requestId };
+    }
+  } else {
+    archiveRow = pfisGetNextAvailableRow(archiveSheet, 1);
+  }
+
+  const archivedValues = new Array(archiveWidth).fill('');
+  originalValues.forEach(function (value, index) { archivedValues[index] = value; });
+  pfisRowFromObject(record, PFIS_TX_FIELDS).forEach(function (value, index) { archivedValues[index] = value; });
+  archiveSheet.getRange(archiveRow, 1, 1, archiveWidth).setValues([archivedValues]);
+  pfisWriteLegacyTransactionAux(archiveRow, record, 'Human-rejected transaction: ' + reason, archiveSheet);
+
+  const sourceSheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
+  const sourceRows = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length);
+  const sourceAuditEvents = [];
+  let linkedSourceCount = 0;
+  sourceRows.forEach(function (row, index) {
+    const source = pfisObjectFromRow(row, PFIS_SOURCE_FIELDS);
+    if (pfisString(source.linkedTxnId) !== transactionId) return;
+    linkedSourceCount++;
+    const sourceRow = index + 2;
+    const marker = 'HUMAN_REJECTED_TRANSACTION:' + transactionId;
+    const oldNotes = pfisString(source.notes);
+    const nextNotes = oldNotes.toLowerCase().indexOf(marker.toLowerCase()) >= 0
+      ? oldNotes
+      : (oldNotes ? oldNotes + ' | ' : '') + marker + ' | reason=' + reason;
+    sourceSheet.getRange(sourceRow, 9).setValue('REJECTED');
+    sourceSheet.getRange(sourceRow, 19).setValue(true);
+    sourceSheet.getRange(sourceRow, 20).setValue(nextNotes);
+    sourceAuditEvents.push({
+      eventKey: 'rejected-source:' + transactionId + ':' + pfisString(source.sourceId),
+      change: {
+        transactionId: transactionId, targetTable: PFIS_SHEETS.sources, actor: actor,
+        field: 'Parse Status', oldValue: pfisString(source.parseStatus), newValue: 'REJECTED',
+        reason: 'Source evidence retained because its canonical transaction was explicitly rejected: ' + reason,
+        requestId: requestId
+      }
+    });
+  });
+
+  const transactionEvents = [
+    { field: 'Archive Status', oldValue: currentFlag || 'ACTIVE', newValue: 'REJECTED' },
+    { field: 'Needs Review', oldValue: String(pfisTruthy(current.needsReview)), newValue: 'false' },
+    { field: 'Review Status', oldValue: pfisString(current.reviewStatus), newValue: 'Rejected' },
+    { field: 'Review Reason', oldValue: pfisString(current.reviewReason), newValue: record.reviewReason },
+    { field: 'Validation Flag', oldValue: currentFlag, newValue: 'REJECTED' },
+    { field: 'Reviewed By', oldValue: pfisString(current.reviewedBy), newValue: actor },
+    { field: 'Reviewed At', oldValue: pfisString(current.reviewedAt), newValue: now.toISOString() }
+  ].map(function (event) {
+    return {
+      eventKey: 'rejected-transaction:' + transactionId + ':' + event.field,
+      change: {
+        transactionId: transactionId, targetTable: PFIS_SHEETS.archive, actor: actor,
+        field: event.field, oldValue: event.oldValue, newValue: event.newValue,
+        reason: 'Human explicitly rejected and archived this transaction: ' + reason,
+        requestId: requestId
+      }
+    };
+  });
+  pfisAppendChangeOnceBatch(transactionEvents.concat(sourceAuditEvents));
+
+  // Active-row clearing is last; an interrupted write leaves the transaction available for retry.
+  txSheet.getRange(activeRow, 1, 1, rowWidth).clearContent();
+  pfisInvalidateTransactionCache();
+  pfisInvalidateSourceCache();
+  return { success: true, status: 'TRANSACTION_REJECTED', transactionId: transactionId,
+    archiveRow: archiveRow, linkedSourceCount: linkedSourceCount, requestId: requestId,
+    message: 'Transaction moved to Rejected & Archive Log. Original source evidence and audit history were retained.' };
+}
+
 function pfisResolveTransactionException(params, requestId) {
   const transactionId = pfisString(params.transactionId || params.txnId);
   const resolution = pfisString(params.resolution).toUpperCase().replace(/[ -]+/g, '_');
   const reason = pfisCleanText(params.reason);
   if (!transactionId) return { success: false, status: 'UPDATE_REJECTED', error: 'BAD_REQUEST', message: 'transactionId is required.', requestId: requestId };
-  if (['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE', 'ACKNOWLEDGE_REVIEW'].indexOf(resolution) < 0) {
+  if (['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE', 'ACKNOWLEDGE_REVIEW', 'REJECT_TRANSACTION'].indexOf(resolution) < 0) {
     return {
       success: false, status: 'UPDATE_REJECTED', error: 'UNSUPPORTED_RESOLUTION',
-      message: 'Use CONFIRM_DISTINCT, CONFIRM_DUPLICATE with duplicateOf, or ACKNOWLEDGE_REVIEW for a caller-requested review.',
+      message: 'Use CONFIRM_DISTINCT, CONFIRM_DUPLICATE with duplicateOf, ACKNOWLEDGE_REVIEW, or REJECT_TRANSACTION for an explicit human rejection.',
       transactionId: transactionId,
-      allowedResolutions: ['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE', 'ACKNOWLEDGE_REVIEW'], requestId: requestId
+      allowedResolutions: ['CONFIRM_DISTINCT', 'CONFIRM_DUPLICATE', 'ACKNOWLEDGE_REVIEW', 'REJECT_TRANSACTION'], requestId: requestId
     };
   }
   if (!reason || reason.length < 8) {
@@ -2140,6 +2315,9 @@ function pfisResolveTransactionException(params, requestId) {
   }
   if (resolution === 'ACKNOWLEDGE_REVIEW') {
     return pfisAcknowledgeClientReview(transactionId, reason, pfisString(params.actor) || 'user', requestId);
+  }
+  if (resolution === 'REJECT_TRANSACTION') {
+    return pfisArchiveRejectedTransaction(transactionId, reason, pfisString(params.actor) || 'user', requestId);
   }
   if (resolution === 'CONFIRM_DUPLICATE') {
     const duplicateOf = pfisString(params.duplicateOf);
@@ -2172,8 +2350,8 @@ function pfisResolveTransactionException(params, requestId) {
   else if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(current.merchant))) remainingReason = 'merchant_missing_or_unusable';
   else if (pfisString(current.reviewReason) === 'time_precision_unavailable') remainingReason = 'time_precision_unavailable';
   else {
-    const enrichment = pfisGetEnrichmentState(current.category, current.userNotes, categories, current.merchant);
-    if (enrichment.requiresPurpose || enrichment.requiresCategoryClassification) remainingReason = 'enrichment_required';
+    const enrichment = pfisGetEnrichmentState(current.category, current.userNotes, categories, current.merchant, current.ruleApplied);
+    if (enrichment.requiresHumanReview) remainingReason = 'enrichment_required';
   }
   const needsReview = !!remainingReason;
   const newFlag = needsReview ? 'NEEDS_REVIEW' : 'VALID';
@@ -2235,6 +2413,7 @@ function pfisUpdateTransaction(params, requestId) {
   const has = function (key) { return Object.prototype.hasOwnProperty.call(params, key); };
   const patch = {};
   const categories = pfisGetCategoryList();
+  let categoryFallbackAssigned = false;
 
   // Validate the full patch before writing anything. This prevents a half-update
   // where purpose is saved but an explicitly supplied category is blank/invalid.
@@ -2254,6 +2433,7 @@ function pfisUpdateTransaction(params, requestId) {
         transactionId: transactionId, allowedCategories: categories, requestId: requestId
       };
       patch.category = fallback;
+      categoryFallbackAssigned = true;
     } else {
       if (categories.indexOf(category) < 0) {
         return {
@@ -2263,7 +2443,9 @@ function pfisUpdateTransaction(params, requestId) {
         };
       }
       patch.category = category;
+      categoryFallbackAssigned = false;
     }
+    patch.ruleApplied = pfisSetCategoryFallbackMarker_(current.ruleApplied, categoryFallbackAssigned);
   }
 
   let purposeKey = '';
@@ -2312,7 +2494,7 @@ function pfisUpdateTransaction(params, requestId) {
     };
   }
 
-  const mutableFields = ['category', 'userNotes', 'type', 'merchant'];
+  const mutableFields = ['category', 'userNotes', 'type', 'merchant', 'ruleApplied'];
   const changed = mutableFields.filter(function (field) {
     if (!Object.prototype.hasOwnProperty.call(patch, field)) return false;
     const oldValue = current[field] === null || current[field] === undefined ? '' : current[field];
@@ -2362,8 +2544,8 @@ function pfisUpdateTransaction(params, requestId) {
       stillNeedsReview = true;
       reviewReason = 'merchant_missing_or_unusable';
     } else {
-      const enrichment = pfisGetEnrichmentState(latest.category, latest.userNotes, categories, latest.merchant);
-      if (enrichment.requiresPurpose || enrichment.requiresCategoryClassification) {
+      const enrichment = pfisGetEnrichmentState(latest.category, latest.userNotes, categories, latest.merchant, latest.ruleApplied);
+      if (enrichment.requiresHumanReview) {
         stillNeedsReview = true;
         reviewReason = 'enrichment_required';
       } else if (['enrichment_required', 'unknown_transaction_type', 'merchant_missing_or_unusable'].indexOf(reviewReason) >= 0) {
@@ -2543,15 +2725,19 @@ function pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, con
   if (rowNumber < 2) return;
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
   const activeCategories = pfisGetCategoryList();
+  const configuredCategory = pfisCleanText(ruleResult.category);
+  const categoryFallback = activeCategories.indexOf(configuredCategory) < 0 &&
+    activeCategories.indexOf('Miscellaneous') >= 0;
+  const resolvedCategory = activeCategories.indexOf(configuredCategory) >= 0
+    ? configuredCategory
+    : (categoryFallback ? 'Miscellaneous' : '');
   const fieldsToFill = [
     ['accountType', pfisFormatAccountType(parsed.accountType)],
     ['instrument', pfisCleanText(parsed.instrument || ruleResult.instrumentOverride || configResult.instrument)],
     ['type', pfisNormalizeType(ruleResult.typeOverride || parsed.type)],
     ['account', pfisCleanText(ruleResult.accountOverride || configResult.account)],
     ['cardName', pfisCleanText(ruleResult.cardNameOverride || configResult.cardName)],
-    ['category', activeCategories.indexOf(pfisCleanText(ruleResult.category)) >= 0
-      ? pfisCleanText(ruleResult.category)
-      : (activeCategories.indexOf('Miscellaneous') >= 0 ? 'Miscellaneous' : '')],
+    ['category', resolvedCategory],
     ['userNotes', pfisGetTrustedPurposeFromRule(
       ruleResult, ruleResult.merchantOverride || parsed.merchant, parsed.datetime)]
   ];
@@ -2566,6 +2752,23 @@ function pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, con
       actor: 'system_reconciliation', field: item[0], oldValue: '', newValue: String(item[1]),
       reason: 'Filled previously blank canonical field from matching source; no non-empty value overwritten.', requestId: requestId
     });
+    if (item[0] === 'category') {
+      const ruleAppliedCol = PFIS_TX_FIELDS.indexOf('ruleApplied') + 1;
+      const oldRuleApplied = pfisString(sheet.getRange(rowNumber, ruleAppliedCol).getValue());
+      const newRuleApplied = pfisSetCategoryFallbackMarker_(oldRuleApplied, categoryFallback);
+      if (oldRuleApplied !== newRuleApplied) {
+        sheet.getRange(rowNumber, ruleAppliedCol).setValue(newRuleApplied);
+        pfisAppendChangeOnce('reconcile-category-provenance:' + transactionId, {
+          transactionId: transactionId, targetTable: PFIS_SHEETS.transactions,
+          actor: 'system_reconciliation', field: 'Rule Applied',
+          oldValue: oldRuleApplied, newValue: newRuleApplied,
+          reason: categoryFallback
+            ? 'Category was assigned to active Miscellaneous because no reliable active rule category was available.'
+            : 'A rule-derived active category replaced a previously blank category.',
+          requestId: requestId
+        });
+      }
+    }
   });
   sheet.getRange(rowNumber, 29).setValue(new Date());
   pfisInvalidateTransactionCache();
@@ -2612,8 +2815,8 @@ function pfisRefreshReviewStateAfterEnrichment(rowNumber, requestId) {
     needsReview = true;
     reason = 'merchant_missing_or_unusable';
   } else {
-    const enrichment = pfisGetEnrichmentState(row.category, row.userNotes, undefined, row.merchant);
-    if (enrichment.requiresPurpose || enrichment.requiresCategoryClassification) {
+    const enrichment = pfisGetEnrichmentState(row.category, row.userNotes, undefined, row.merchant, row.ruleApplied);
+    if (enrichment.requiresHumanReview) {
       needsReview = true;
       reason = 'enrichment_required';
     } else if (['enrichment_required', 'unknown_transaction_type', 'merchant_missing_or_unusable'].indexOf(oldReason) >= 0) {
@@ -3137,6 +3340,24 @@ function pfisGetCategoryList() {
   });
   PFIS_RUNTIME_CATEGORY_CACHE = categories;
   return categories.slice();
+}
+
+const PFIS_DEFAULT_CATEGORY_FALLBACK_MARKER = 'DEFAULT_CATEGORY:MISCELLANEOUS';
+
+function pfisSetCategoryFallbackMarker_(ruleApplied, isFallback) {
+  const marker = PFIS_DEFAULT_CATEGORY_FALLBACK_MARKER;
+  const parts = pfisString(ruleApplied).split(' | ').map(function (part) {
+    return pfisString(part);
+  }).filter(function (part) { return part && part !== marker; });
+  if (isFallback) parts.push(marker);
+  return parts.join(' | ');
+}
+
+function pfisIsDefaultCategoryFallback_(category, ruleApplied) {
+  return pfisCleanText(category) === 'Miscellaneous' &&
+    pfisString(ruleApplied).split(' | ').some(function (part) {
+      return pfisString(part) === PFIS_DEFAULT_CATEGORY_FALLBACK_MARKER;
+    });
 }
 
 function pfisApplyNotesTemplate(template, dateValue, monthOffset) {
@@ -4554,7 +4775,7 @@ function pfisBuildTransactionResponse(transaction, requestId, status, changedFie
   const safeTransaction = transaction ? pfisTransactionResponseView(transaction) : null;
   const categories = pfisGetCategoryList();
   const enrichment = transaction
-    ? pfisGetEnrichmentState(transaction.category, transaction.userNotes, categories, transaction.merchant)
+    ? pfisGetEnrichmentState(transaction.category, transaction.userNotes, categories, transaction.merchant, transaction.ruleApplied)
     : { requiresPurpose: false, requiresCategoryClassification: false };
   const verification = transaction ? {
     status: transaction.verificationStatus || 'UNKNOWN',
@@ -4574,7 +4795,8 @@ function pfisBuildTransactionResponse(transaction, requestId, status, changedFie
     needsReview: transaction ? pfisTruthy(transaction.needsReview) : false,
     needsEnrichment: enrichment.requiresCategoryClassification,
     requiresPurpose: enrichment.requiresPurpose,
-    requiresCategoryClassification: enrichment.requiresCategoryClassification
+    requiresCategoryClassification: enrichment.requiresCategoryClassification,
+    isDefaultCategoryFallback: enrichment.isDefaultCategoryFallback
   };
   response.nextAction = transaction
     ? pfisRecommendNextAction(status, transaction, enrichment)
@@ -4624,7 +4846,7 @@ function pfisRecommendNextAction(status, transaction, enrichment) {
   if (hardReviewReasons.indexOf(reviewReason) >= 0) return 'REVIEW';
 
   const state = enrichment || pfisGetEnrichmentState(
-    tx.category, tx.userNotes, undefined, tx.merchant
+    tx.category, tx.userNotes, undefined, tx.merchant, tx.ruleApplied
   );
   // Purpose is optional and is never a Shortcut question. The only normal
   // enrichment route is category classification; trusted rule purposes were
@@ -4658,13 +4880,16 @@ function pfisBuildUpdateResponse(transaction, requestId, status, changedFields) 
   return response;
 }
 
-function pfisGetEnrichmentState(category, notes, categoryList, merchant) {
+function pfisGetEnrichmentState(category, notes, categoryList, merchant, ruleApplied) {
   const categories = Array.isArray(categoryList) ? categoryList : pfisGetCategoryList();
   const categoryValue = pfisCleanText(category);
-  // Purpose is optional. It remains visible in data-quality metrics but never
-  // blocks capture, approval, review completion or reporting.
+  const categoryIsActive = !!categoryValue && categories.indexOf(categoryValue) >= 0;
+  const isDefaultCategoryFallback = categoryIsActive &&
+    pfisIsDefaultCategoryFallback_(categoryValue, ruleApplied);
   return {
-    requiresCategoryClassification: !categoryValue || categories.indexOf(categoryValue) < 0,
+    requiresCategoryClassification: !categoryIsActive || isDefaultCategoryFallback,
+    requiresHumanReview: !categoryIsActive,
+    isDefaultCategoryFallback: isDefaultCategoryFallback,
     requiresPurpose: false
   };
 }
@@ -4853,6 +5078,8 @@ function pfisBuildDisplayText(payload) {
     title = '🚧 DATA CONFLICT — REVIEW REQUIRED';
   } else if (isDuplicate) {
     title = '⚠️ POSSIBLE DUPLICATE — REVIEW';
+  } else if (['REJECTED', 'ALREADY_REJECTED', 'TRANSACTION_REJECTED'].indexOf(status) >= 0) {
+    title = '🗃️ TRANSACTION REJECTED & ARCHIVED';
   } else if (needsEnrichment &&
     ['enrichment_required', ''].indexOf(String(tx.reviewReason || p.reviewReason || '').toLowerCase()) >= 0) {
     title = status === 'IDEMPOTENT_REPLAY'
@@ -4992,7 +5219,9 @@ function pfisBuildDisplayText(payload) {
   // 5. Actionable next step, prioritized by severity
   let nextStep = '';
 
-  if (isError) {
+  if (['REJECTED', 'ALREADY_REJECTED', 'TRANSACTION_REJECTED'].indexOf(status) >= 0) {
+    nextStep = 'This transaction is archived. Original source evidence and audit history are retained.';
+  } else if (isError) {
     nextStep = firstValue(
       p.message,
       p.error,

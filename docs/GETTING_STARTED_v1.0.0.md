@@ -30,6 +30,9 @@ Gemini is not called by the transaction engine or iOS Shortcut.
 
 ## Repository file map
 
+Before modifying an existing ledger, read [Ledger Cleanup Operations](LEDGER_CLEANUP_OPERATIONS_v1.0.0.md). It documents the preview-first duplicate archive migration and evidence-based reclassification API.
+
+
 | Path | What it contains |
 |---|---|
 | <code>README.md</code> | Project overview, architecture, workbook concepts, API, deployment and design boundaries |
@@ -39,8 +42,10 @@ Gemini is not called by the transaction engine or iOS Shortcut.
 | <code>docs/IOS_SHORTCUT_IMPLEMENTATION_v1.0.0.md</code> | Shortcut actions, request fields, response routing and retry behaviour |
 | <code>docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md</code> | Safe workbook authoring and validation workflow |
 | <code>docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md</code> | Optional daily Gemini suggestion workflow |
+| <code>docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md</code> | Legacy duplicate archive migration and evidence-based reclassification runbook |
 | <code>prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md</code> | Copy/paste extraction and category prompts |
 | <code>prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md</code> | Copy/paste workbook repair prompt |
+| <code>prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md</code> | Copy/paste Rules/Config prompt for credit-card settlements |
 | <code>prompts/README.md</code> | Prompt catalogue and usage notes |
 | <code>docs/images/</code> | SVG architecture/configuration and illustrative diagrams |
 

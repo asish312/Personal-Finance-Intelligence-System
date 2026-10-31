@@ -341,7 +341,7 @@ function pfisRouteRequest(input, method) {
     if (action === 'getanomalies') return pfisGetAnomalies(params, requestId);
     if (action === 'getdataquality') return pfisGetDataQuality(params, requestId);
 
-    const writeActions = ['', 'ingest', 'ingesttransaction', 'update', 'updatetransaction', 'reprocesssource', 'resolveexception'];
+    const writeActions = ['', 'ingest', 'ingesttransaction', 'update', 'updatetransaction', 'reprocesssource', 'resolveexception', 'reclassifyfromevidence'];
     if (writeActions.indexOf(action) < 0) {
       return { success: false, error: 'UNKNOWN_ACTION', message: 'Unsupported action: ' + action, requestId: requestId };
     }

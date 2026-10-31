@@ -8,6 +8,7 @@ Use these prompts only for the workflow named in each document.
 | [Gemini Spreadsheet Repair](GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Gemini with the owner's connected Google Sheets workbook | A human asks Gemini to inspect or repair workbook formulas, views, labels or dashboard logic |
 | [Gemini Card-Payment Rules](GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Gemini with the PFIS workbook | Add/verify the two source-phrase Rules and matching Config rows for owned credit-card settlements |
 | [Gemini Legacy Duplicate Mapping](GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) | Gemini with the PFIS workbook | Append verified survivor IDs to legacy DUPLICATE_REJECTED rows without archiving or changing financial facts |
+| [Gemini Daily Transaction Verifier](GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md) | Scheduled Gemini Task using Gmail and live PFIS Sheets | Daily transaction-to-email reconciliation, data-quality monitoring and conservative API-only updates |
 
 Related implementation guides:
 

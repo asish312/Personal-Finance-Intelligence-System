@@ -65,6 +65,10 @@ Other workbook tabs are presentation, reporting or optional workflow sheets. Kee
 
 The workbook is intentionally **not committed to this public repository**. It contains private financial history and must remain in the owner's Google Drive. Use your own protected workbook. Never test against real financial rows when a synthetic preflight can be used.
 
+## In-workbook Help & Prompts tab
+
+Read [PFIS Help & Prompt Center](PFIS_HELP_AND_PROMPT_CENTER_v1.0.0.md), then use [Gemini Help Sheet Setup Prompt](../prompts/GEMINI_HELP_SHEET_SETUP_v1.0.0.md) with the live workbook to create one visible operator-help tab. The tab stores instructions and examples only; it is not another ledger.
+
 ## Install the Apps Script backend
 
 1. Open the Google Apps Script project connected to the intended Google Sheet.

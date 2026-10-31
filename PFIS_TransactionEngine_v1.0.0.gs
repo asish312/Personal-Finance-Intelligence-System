@@ -43,6 +43,8 @@
  *   true requests an auditable human review when the capture client could not
  *   complete an interactive review. It is semantic intent, not device state.
  *   Omitted/false never clears backend review state. Do not send `deviceLocked`.
+ * - For existing records that need a controlled, evidence-backed Rules/Config refresh, use POST action
+ *   "reclassifyfromevidence" with transactionId and a human reason. This does not change financial facts.
  * - For a potential duplicate/source conflict or explicit rejection, use action "resolveexception" with
  *   CONFIRM_DISTINCT, CONFIRM_DUPLICATE plus duplicateOf, ACKNOWLEDGE_REVIEW
  *   for caller-requested review, or REJECT_TRANSACTION for an incorrect/unwanted transaction;
@@ -357,6 +359,9 @@ function pfisRouteRequest(input, method) {
     try {
       pfisAssertSchema();
       if (action === 'update' || action === 'updatetransaction') return pfisPerfMeasure('update_pipeline', function () { return pfisUpdateTransaction(params, requestId); });
+      if (action === 'reclassifyfromevidence') return pfisPerfMeasure('reclassify_evidence_pipeline', function () {
+        return pfisReclassifyTransactionFromEvidence(params, requestId);
+      });
       if (action === 'resolveexception') return pfisPerfMeasure('resolve_exception_pipeline', function () { return pfisResolveTransactionException(params, requestId); });
       if (action === 'reprocesssource') return pfisPerfMeasure('reprocess_pipeline', function () {
         const result = pfisReprocessSource(params, requestId);
@@ -2094,7 +2099,20 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
   originalValues.forEach(function (value, index) { archivedValues[index] = value; });
   pfisRowFromObject(record, PFIS_TX_FIELDS).forEach(function (value, index) { archivedValues[index] = value; });
   let archiveRow = pfisFindRowByValue(archiveSheet, 1, transactionId);
-  if (archiveRow < 2) archiveRow = pfisGetNextAvailableRow(archiveSheet, 1);
+  if (archiveRow >= 2) {
+    const existingArchive = pfisObjectFromRow(
+      archiveSheet.getRange(archiveRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+    const existingTarget = pfisGetDuplicateTargetFromReason_(existingArchive.reviewReason);
+    if (pfisString(existingArchive.validationFlag).toUpperCase() !== 'DUPLICATE_REJECTED' ||
+        pfisString(existingArchive.reviewStatus).toUpperCase() !== 'REJECTED - DUPLICATE' ||
+        existingTarget !== duplicateOf) {
+      return { success: false, status: 'UPDATE_REJECTED', error: 'ARCHIVE_ID_COLLISION',
+        message: 'An archive row already exists for this Transaction ID with a different resolution or surviving transaction. No archive data was overwritten.',
+        transactionId: transactionId, duplicateOf: duplicateOf, archiveRow: archiveRow, requestId: requestId };
+    }
+  } else {
+    archiveRow = pfisGetNextAvailableRow(archiveSheet, 1);
+  }
   archiveSheet.getRange(archiveRow, 1, 1, archiveWidth).setValues([archivedValues]);
   pfisWriteLegacyTransactionAux(archiveRow, record,
     'Human-confirmed duplicate of ' + duplicateOf + ': ' + reason, archiveSheet);
@@ -2294,6 +2312,254 @@ function pfisArchiveRejectedTransaction(transactionId, reason, actor, requestId)
     message: 'Transaction moved to Rejected & Archive Log. Original source evidence and audit history were retained.' };
 }
 
+function pfisGetDuplicateTargetFromReason_(reason) {
+  const value = pfisString(reason);
+  const patterns = [
+    /confirmed_duplicate_of\\s*[:=#]\\s*([A-Za-z0-9_-]+)/i,
+    /duplicate\\s+of\\s*#?\\s*([A-Za-z0-9_-]+)/i
+  ];
+  for (let i = 0; i < patterns.length; i++) {
+    const match = value.match(patterns[i]);
+    if (match && match[1]) return match[1];
+  }
+  return '';
+}
+
+function pfisGetLegacyDuplicateArchiveCandidates_() {
+  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const rows = pfisReadFixedRows(sheet, PFIS_TX_FIELDS.length);
+  return rows.map(function (row, index) {
+    const transaction = pfisObjectFromRow(row, PFIS_TX_FIELDS);
+    const flag = pfisString(transaction.validationFlag).toUpperCase();
+    const reviewStatus = pfisString(transaction.reviewStatus).toUpperCase();
+    if (flag !== 'DUPLICATE_REJECTED' && reviewStatus !== 'REJECTED - DUPLICATE') return null;
+
+    const duplicateOf = pfisGetDuplicateTargetFromReason_(transaction.reviewReason);
+    if (!duplicateOf) return {
+      transactionId: transaction.transactionId, rowNumber: index + 2,
+      duplicateOf: '', status: 'BLOCKED_SURVIVING_TRANSACTION_NOT_RECORDED',
+      reason: 'Legacy duplicate marker exists, but Review Reason does not identify a surviving Transaction ID.'
+    };
+
+    const primaryRow = pfisFindTransactionRow(duplicateOf);
+    if (primaryRow < 2) return {
+      transactionId: transaction.transactionId, rowNumber: index + 2,
+      duplicateOf: duplicateOf, status: 'BLOCKED_SURVIVOR_NOT_ACTIVE',
+      reason: 'The referenced surviving Transaction ID is not present in the active Transaction Log.'
+    };
+    const primary = pfisGetTransaction(duplicateOf, false);
+    const primaryFlag = pfisString(primary && primary.validationFlag).toUpperCase();
+    if (!primary || ['DUPLICATE_CANDIDATE', 'DUPLICATE_REJECTED', 'SOURCE_CONFLICT', 'REJECTED'].indexOf(primaryFlag) >= 0) {
+      return {
+        transactionId: transaction.transactionId, rowNumber: index + 2,
+        duplicateOf: duplicateOf, status: 'BLOCKED_SURVIVOR_NOT_CANONICAL',
+        reason: 'The referenced surviving row is itself a duplicate, rejected or source-conflict record.'
+      };
+    }
+    const archiveSheet = pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive);
+    const existingArchiveRow = archiveSheet ? pfisFindRowByValue(archiveSheet, 1, transaction.transactionId) : -1;
+    if (existingArchiveRow >= 2) {
+      const archived = pfisObjectFromRow(
+        archiveSheet.getRange(existingArchiveRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+      if (pfisString(archived.validationFlag).toUpperCase() !== 'DUPLICATE_REJECTED' ||
+          pfisString(archived.reviewStatus).toUpperCase() !== 'REJECTED - DUPLICATE' ||
+          pfisGetDuplicateTargetFromReason_(archived.reviewReason) !== duplicateOf) {
+        return {
+          transactionId: transaction.transactionId, rowNumber: index + 2,
+          duplicateOf: duplicateOf, archiveRow: existingArchiveRow,
+          status: 'BLOCKED_ARCHIVE_COLLISION',
+          reason: 'An archive row with this Transaction ID has a different resolution; it will not be overwritten.'
+        };
+      }
+    }
+    return {
+      transactionId: transaction.transactionId, rowNumber: index + 2,
+      duplicateOf: duplicateOf, archiveRow: existingArchiveRow >= 2 ? existingArchiveRow : null,
+      status: 'ELIGIBLE',
+      reason: 'Existing final duplicate marker and surviving Transaction ID are both verifiable.'
+    };
+  }).filter(Boolean);
+}
+
+/**
+ * Read-only preview for legacy rows already marked DUPLICATE_REJECTED.
+ * No rows are changed. Review every eligible survivor link before applying.
+ */
+function PFIS_PREVIEW_LEGACY_DUPLICATE_ARCHIVE_MIGRATION() {
+  const candidates = pfisGetLegacyDuplicateArchiveCandidates_();
+  return {
+    success: true, dryRun: true, status: candidates.some(function (item) { return item.status === 'ELIGIBLE'; })
+      ? 'PREVIEW_READY' : 'NO_ELIGIBLE_LEGACY_DUPLICATES',
+    eligible: candidates.filter(function (item) { return item.status === 'ELIGIBLE'; }).length,
+    blocked: candidates.filter(function (item) { return item.status !== 'ELIGIBLE'; }).length,
+    candidates: candidates
+  };
+}
+
+function pfisArchiveLegacyConfirmedDuplicate_(candidate, requestId) {
+  const transactionId = candidate.transactionId;
+  const duplicateOf = candidate.duplicateOf;
+  const txSheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const archiveSheet = pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive);
+  if (!archiveSheet || archiveSheet.getLastColumn() < PFIS_TX_FIELDS.length) {
+    return { success: false, status: 'ARCHIVE_SHEET_INVALID', transactionId: transactionId };
+  }
+  const headers = archiveSheet.getRange(1, 1, 1, PFIS_TX_FIELDS.length).getDisplayValues()[0];
+  if (PFIS_TX_HEADERS.some(function (header, index) {
+    return pfisHeaderToken(headers[index]) !== pfisHeaderToken(header);
+  })) {
+    return { success: false, status: 'ARCHIVE_SCHEMA_MISMATCH', transactionId: transactionId };
+  }
+
+  const rowNumber = pfisFindTransactionRow(transactionId);
+  const primaryRow = pfisFindTransactionRow(duplicateOf);
+  if (rowNumber < 2 || primaryRow < 2) {
+    return { success: false, status: 'REVALIDATION_FAILED', transactionId: transactionId,
+      message: 'The active duplicate or its surviving transaction disappeared after preview.' };
+  }
+  const rowWidth = Math.max(txSheet.getLastColumn(), PFIS_TX_FIELDS.length);
+  const originalValues = txSheet.getRange(rowNumber, 1, 1, rowWidth).getValues()[0];
+  const record = pfisObjectFromRow(originalValues.slice(0, PFIS_TX_FIELDS.length), PFIS_TX_FIELDS);
+  const flag = pfisString(record.validationFlag).toUpperCase();
+  const reviewStatus = pfisString(record.reviewStatus).toUpperCase();
+  if ((flag !== 'DUPLICATE_REJECTED' && reviewStatus !== 'REJECTED - DUPLICATE') ||
+      pfisGetDuplicateTargetFromReason_(record.reviewReason) !== duplicateOf) {
+    return { success: false, status: 'REVALIDATION_FAILED', transactionId: transactionId,
+      message: 'The active row no longer has the explicit duplicate decision and surviving ID shown in preview.' };
+  }
+  const primary = pfisGetTransaction(duplicateOf, false);
+  const primaryFlag = pfisString(primary && primary.validationFlag).toUpperCase();
+  if (!primary || ['DUPLICATE_CANDIDATE', 'DUPLICATE_REJECTED', 'SOURCE_CONFLICT', 'REJECTED'].indexOf(primaryFlag) >= 0) {
+    return { success: false, status: 'SURVIVOR_NOT_CANONICAL', transactionId: transactionId, duplicateOf: duplicateOf };
+  }
+
+  const archiveWidth = Math.max(archiveSheet.getLastColumn(), rowWidth);
+  if (archiveSheet.getMaxColumns() < archiveWidth) {
+    archiveSheet.insertColumnsAfter(archiveSheet.getMaxColumns(), archiveWidth - archiveSheet.getMaxColumns());
+  }
+  const ledgerHeaders = txSheet.getRange(1, 1, 1, rowWidth).getDisplayValues()[0];
+  const archiveHeaders = archiveSheet.getRange(1, 1, 1, archiveWidth).getDisplayValues()[0];
+  for (let col = PFIS_TX_FIELDS.length; col < rowWidth; col++) {
+    if (!pfisString(archiveHeaders[col]) && pfisString(ledgerHeaders[col])) {
+      archiveSheet.getRange(1, col + 1).setValue(ledgerHeaders[col]);
+    }
+  }
+
+  let archiveRow = pfisFindRowByValue(archiveSheet, 1, transactionId);
+  if (archiveRow >= 2) {
+    const existing = pfisObjectFromRow(
+      archiveSheet.getRange(archiveRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+    if (pfisString(existing.validationFlag).toUpperCase() !== 'DUPLICATE_REJECTED' ||
+        pfisString(existing.reviewStatus).toUpperCase() !== 'REJECTED - DUPLICATE' ||
+        pfisGetDuplicateTargetFromReason_(existing.reviewReason) !== duplicateOf) {
+      return { success: false, status: 'ARCHIVE_ID_COLLISION', transactionId: transactionId,
+        duplicateOf: duplicateOf, archiveRow: archiveRow };
+    }
+  } else {
+    archiveRow = pfisGetNextAvailableRow(archiveSheet, 1);
+    record.needsReview = false;
+    record.reviewStatus = 'Rejected - Duplicate';
+    record.validationFlag = 'DUPLICATE_REJECTED';
+    record.lastUpdatedAt = new Date();
+    const archivedValues = new Array(archiveWidth).fill('');
+    originalValues.forEach(function (value, index) { archivedValues[index] = value; });
+    pfisRowFromObject(record, PFIS_TX_FIELDS).forEach(function (value, index) { archivedValues[index] = value; });
+    archiveSheet.getRange(archiveRow, 1, 1, archiveWidth).setValues([archivedValues]);
+    pfisWriteLegacyTransactionAux(archiveRow, record,
+      'Migrated previously human-confirmed duplicate; surviving Transaction ID ' + duplicateOf, archiveSheet);
+  }
+
+  const sourceSheet = pfisGetRequiredSheet(PFIS_SHEETS.sources);
+  const sourceRows = pfisReadFixedRows(sourceSheet, PFIS_SOURCE_FIELDS.length);
+  let linkedSourceCount = 0;
+  const sourceEvents = [];
+  sourceRows.forEach(function (row, index) {
+    const source = pfisObjectFromRow(row, PFIS_SOURCE_FIELDS);
+    if (pfisString(source.linkedTxnId) !== transactionId) return;
+    linkedSourceCount++;
+    const sourceRow = index + 2;
+    const marker = 'LEGACY_DUPLICATE_ARCHIVED:' + transactionId + ':SURVIVOR:' + duplicateOf;
+    const oldNotes = pfisString(source.notes);
+    const nextNotes = oldNotes.toLowerCase().indexOf(marker.toLowerCase()) >= 0
+      ? oldNotes : (oldNotes ? oldNotes + ' | ' : '') + marker;
+    sourceSheet.getRange(sourceRow, 16).setValue(duplicateOf);
+    sourceSheet.getRange(sourceRow, 9).setValue('DUPLICATE_SUPPRESSED');
+    sourceSheet.getRange(sourceRow, 19).setValue(true);
+    sourceSheet.getRange(sourceRow, 20).setValue(nextNotes);
+    sourceEvents.push({
+      eventKey: 'legacy-duplicate-source:' + transactionId + ':' + pfisString(source.sourceId),
+      change: {
+        transactionId: duplicateOf, targetTable: PFIS_SHEETS.sources,
+        actor: 'PFIS_LEGACY_DUPLICATE_MIGRATION', field: 'Linked Txn ID',
+        oldValue: transactionId, newValue: duplicateOf,
+        reason: 'Migrated an already human-confirmed duplicate to Rejected & Archive Log; original source evidence retained.',
+        requestId: requestId
+      }
+    });
+  });
+
+  pfisAppendChangeOnceBatch([{
+    eventKey: 'legacy-duplicate-archive:' + transactionId,
+    change: {
+      transactionId: transactionId, targetTable: PFIS_SHEETS.archive,
+      actor: 'PFIS_LEGACY_DUPLICATE_MIGRATION', field: 'Archive Location',
+      oldValue: PFIS_SHEETS.transactions, newValue: PFIS_SHEETS.archive,
+      reason: 'Migration of an already-confirmed DUPLICATE_REJECTED row. Surviving Transaction ID: ' + duplicateOf,
+      requestId: requestId
+    }
+  }, {
+    eventKey: 'legacy-duplicate-survivor:' + transactionId + ':' + duplicateOf,
+    change: {
+      transactionId: duplicateOf, targetTable: PFIS_SHEETS.transactions,
+      actor: 'PFIS_LEGACY_DUPLICATE_MIGRATION', field: 'Duplicate Evidence Linked',
+      oldValue: '', newValue: transactionId,
+      reason: 'Original evidence from the archived duplicate was re-linked to this surviving canonical transaction.',
+      requestId: requestId
+    }
+  }].concat(sourceEvents));
+
+  // The archive, evidence relinking and audit are complete before clearing the active row.
+  txSheet.getRange(rowNumber, 1, 1, rowWidth).clearContent();
+  pfisInvalidateTransactionCache();
+  pfisInvalidateSourceCache();
+  return { success: true, status: 'LEGACY_DUPLICATE_ARCHIVED', transactionId: transactionId,
+    duplicateOf: duplicateOf, archiveRow: archiveRow, linkedSourceCount: linkedSourceCount };
+}
+
+function PFIS_APPLY_LEGACY_DUPLICATE_ARCHIVE_MIGRATION() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    return { success: false, status: 'BUSY', message: 'Could not acquire the PFIS write lock.' };
+  }
+  const report = { success: true, status: 'COMPLETED', migrated: 0, blocked: 0, results: [] };
+  try {
+    const candidates = pfisGetLegacyDuplicateArchiveCandidates_();
+    candidates.forEach(function (candidate) {
+      if (candidate.status !== 'ELIGIBLE') {
+        report.blocked++;
+        report.results.push({ transactionId: candidate.transactionId, status: candidate.status, reason: candidate.reason });
+        return;
+      }
+      try {
+        const result = pfisArchiveLegacyConfirmedDuplicate_(candidate, Utilities.getUuid());
+        if (result && result.success) report.migrated++;
+        else report.blocked++;
+        report.results.push(result);
+      } catch (error) {
+        report.blocked++;
+        report.results.push({
+          transactionId: candidate.transactionId, status: 'ERROR',
+          message: String(error && error.message ? error.message : error)
+        });
+      }
+    });
+    report.status = report.blocked ? 'COMPLETED_WITH_EXCEPTIONS' : (report.migrated ? 'COMPLETED' : 'NO_ELIGIBLE_LEGACY_DUPLICATES');
+    return report;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function pfisResolveTransactionException(params, requestId) {
   const transactionId = pfisString(params.transactionId || params.txnId);
   const resolution = pfisString(params.resolution).toUpperCase().replace(/[ -]+/g, '_');
@@ -2389,6 +2655,137 @@ function pfisResolveTransactionException(params, requestId) {
     'Human confirmed distinct transaction: ' + reason);
   return pfisBuildUpdateResponse(pfisGetTransaction(transactionId, false), requestId,
     needsReview ? 'EXCEPTION_RESOLVED_REVIEW_REMAINS' : 'EXCEPTION_RESOLVED', ['needsReview', 'reviewStatus', 'reviewReason', 'validationFlag']);
+}
+
+/**
+ * Re-apply the current configured Rules and Config to one existing transaction
+ * using its linked original Source Log evidence. This is an explicit, audited
+ * administrative action; it never changes date, amount, bank, merchant, counterparty
+ * or reference facts. It can clear only known classification/configuration review reasons.
+ */
+function pfisReclassifyTransactionFromEvidence(params, requestId) {
+  const transactionId = pfisString(params.transactionId || params.txnId);
+  const reason = pfisCleanText(params.reason);
+  const actor = pfisString(params.actor) || 'user';
+  if (!transactionId) return { success: false, status: 'UPDATE_REJECTED', error: 'BAD_REQUEST',
+    message: 'transactionId is required.', requestId: requestId };
+  if (!reason || reason.length < 8) return { success: false, status: 'UPDATE_REJECTED', error: 'REASON_REQUIRED',
+    message: 'Provide a specific reclassification reason of at least eight characters.', transactionId: transactionId, requestId: requestId };
+
+  const rowNumber = pfisFindTransactionRow(transactionId);
+  if (rowNumber < 2) return { success: false, status: 'NOT_FOUND', error: 'NOT_FOUND',
+    message: 'Active transaction not found: ' + transactionId, transactionId: transactionId, requestId: requestId };
+
+  const sheet = pfisGetRequiredSheet(PFIS_SHEETS.transactions);
+  const current = pfisObjectFromRow(
+    sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+  const currentFlag = pfisString(current.validationFlag).toUpperCase();
+  if (['DUPLICATE_CANDIDATE', 'DUPLICATE_REJECTED', 'SOURCE_CONFLICT', 'REJECTED'].indexOf(currentFlag) >= 0) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'TRANSACTION_NOT_RECLASSIFIABLE',
+      message: 'Duplicate, rejected or source-conflict transactions cannot be reclassified by this action.',
+      transactionId: transactionId, currentValidationFlag: currentFlag, requestId: requestId };
+  }
+
+  const evidenceRows = pfisSourceRowsForTransaction(transactionId).filter(function (source) {
+    return ['ACCEPTED', 'RECONCILED', 'DUPLICATE_SUPPRESSED'].indexOf(pfisString(source.parseStatus).toUpperCase()) >= 0 &&
+      pfisString(source.rawBody).trim() !== '';
+  });
+  if (!evidenceRows.length) return { success: false, status: 'UPDATE_REJECTED', error: 'SOURCE_EVIDENCE_REQUIRED',
+    message: 'No active accepted source evidence is linked to this transaction.', transactionId: transactionId, requestId: requestId };
+
+  const rawEvidence = evidenceRows.map(function (source) { return pfisString(source.rawBody); }).join('\n');
+  const parsed = {
+    datetime: current.dateTime, amount: current.amount, bank: current.bank,
+    accountType: current.accountType, instrument: current.instrument, type: current.type,
+    merchant: current.merchant, counterparty: current.counterparty, refNo: current.refNo,
+    balanceAfter: current.balanceAfter
+  };
+  const ruleResult = pfisEvaluateRules(parsed, rawEvidence);
+  const categories = pfisGetCategoryList();
+  const category = pfisCleanText(ruleResult.category);
+  const type = pfisNormalizeType(ruleResult.typeOverride || current.type);
+  if (!ruleResult.ruleApplied || !category || categories.indexOf(category) < 0 || !type) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'RULE_CLASSIFICATION_UNRESOLVED',
+      message: 'Current Rules did not produce one active category and valid transaction type from the linked evidence. No fields were changed.',
+      transactionId: transactionId, suggestedCategory: category, suggestedType: type, requestId: requestId };
+  }
+
+  const configResult = pfisResolveConfig(parsed, rawEvidence);
+  if (!configResult || configResult.ambiguous || configResult.unresolved) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'CONFIG_MAPPING_UNRESOLVED',
+      message: 'Current Config did not resolve one unambiguous account mapping from source evidence. No fields were changed.',
+      transactionId: transactionId, requestId: requestId };
+  }
+  if (pfisString(current.account) && pfisString(configResult.account) &&
+      pfisString(current.account) !== pfisString(configResult.account)) {
+    return { success: false, status: 'UPDATE_REJECTED', error: 'CONFIG_ACCOUNT_MISMATCH',
+      message: 'The configured account differs from the existing canonical account. Review the mapping manually; no fields were changed.',
+      transactionId: transactionId, currentAccount: current.account,
+      configuredAccount: configResult.account, requestId: requestId };
+  }
+
+  const next = Object.assign({}, current);
+  next.category = category;
+  next.type = type;
+  next.isInternalTransfer = !!configResult.isInternal && ['transfer', 'card_payment'].indexOf(type) >= 0;
+  if (!pfisString(next.account)) next.account = pfisString(configResult.account);
+  if (!pfisString(next.cardName)) next.cardName = pfisString(configResult.cardName);
+  if (!pfisString(next.instrument)) next.instrument = pfisString(configResult.instrument);
+  next.ruleApplied = pfisSetCategoryFallbackMarker_(ruleResult.ruleApplied, false);
+  next.ruleType = pfisString(ruleResult.ruleType);
+  next.categoryConfidence = pfisParseConfidence(ruleResult.confidence);
+  next.isInvestment = type === 'investment';
+  next.isCardPayment = type === 'card_payment';
+  next.lastUpdatedAt = new Date();
+
+  let reviewCleared = false;
+  const reviewReason = pfisString(current.reviewReason);
+  if (pfisTruthy(current.needsReview) &&
+      ['enrichment_required', 'unknown_transaction_type', 'config_mapping_unresolved'].indexOf(reviewReason) >= 0 &&
+      pfisIsMatchableMerchant(pfisNormalizeMerchant(current.merchant))) {
+    next.needsReview = false;
+    next.reviewStatus = 'Approved';
+    next.reviewReason = '';
+    next.reviewedBy = actor;
+    next.reviewedAt = new Date();
+    next.validationFlag = 'VALID';
+    reviewCleared = true;
+  }
+
+  const fields = ['category', 'type', 'isInternalTransfer', 'account', 'cardName', 'instrument',
+    'ruleApplied', 'ruleType', 'categoryConfidence', 'needsReview', 'reviewStatus',
+    'reviewReason', 'reviewedBy', 'reviewedAt', 'validationFlag', 'lastUpdatedAt'];
+  const changed = fields.filter(function (field) {
+    if (current[field] instanceof Date && next[field] instanceof Date) return current[field].getTime() !== next[field].getTime();
+    return String(current[field] === null || current[field] === undefined ? '' : current[field]) !==
+      String(next[field] === null || next[field] === undefined ? '' : next[field]);
+  });
+  if (!changed.length) {
+    return pfisBuildUpdateResponse(pfisGetTransaction(transactionId, false), requestId, 'NO_CHANGE', []);
+  }
+
+  changed.forEach(function (field) {
+    sheet.getRange(rowNumber, PFIS_TX_FIELDS.indexOf(field) + 1).setValue(next[field]);
+  });
+  const auditEvents = changed.map(function (field) {
+    const oldValue = current[field] instanceof Date ? current[field].toISOString() : pfisString(current[field]);
+    const newValue = next[field] instanceof Date ? next[field].toISOString() : pfisString(next[field]);
+    return {
+      eventKey: 'reclassify-evidence:' + transactionId + ':' + requestId + ':' + field,
+      change: {
+        transactionId: transactionId, targetTable: PFIS_SHEETS.transactions, actor: actor,
+        field: field, oldValue: oldValue, newValue: newValue,
+        reason: 'Explicit reclassification using linked Source Log evidence and current Rules/Config: ' + reason,
+        requestId: requestId
+      }
+    };
+  });
+  pfisAppendChangeOnceBatch(auditEvents);
+  pfisInvalidateTransactionCache();
+  pfisWriteLegacyTransactionAux(rowNumber, next,
+    'Reclassified from linked source evidence by ' + actor + ': ' + reason);
+  return pfisBuildUpdateResponse(pfisGetTransaction(transactionId, false), requestId,
+    reviewCleared ? 'RECLASSIFIED_REVIEW_CLEARED' : 'RECLASSIFIED', changed);
 }
 
 function pfisUpdateTransaction(params, requestId) {
@@ -2890,9 +3287,9 @@ function pfisFlagTransactionsForReview(transactionIds, reason, validationFlag, r
  * Conflicting categories or invalid configured categories fail closed and leave
  * the category unresolved for the Shortcuts/AI fallback.
  */
-function pfisBuildMerchantCategoryFallback_(rules, merchantValue, categories) {
+function pfisBuildMerchantCategoryFallback_(rules, merchantValue, categories, rawEvidence, counterpartyValue) {
   const merchantKey = pfisNormalizeMerchant(merchantValue);
-  if (!merchantKey) return pfisEmptyRuleResult();
+  if (!merchantKey && !rawEvidence) return pfisEmptyRuleResult();
 
   const candidates = [];
   let invalidCategoryCandidate = false;
@@ -2902,7 +3299,9 @@ function pfisBuildMerchantCategoryFallback_(rules, merchantValue, categories) {
     if (['MERCHANT', 'AMOUNTMERCHANT'].indexOf(matchType) < 0) return;
 
     const pattern = pfisNormalizeRuleMerchantPattern(rule.merchantContains);
-    if (!pattern || merchantKey.indexOf(pattern) < 0) return;
+    if (!pattern || !pfisMerchantPatternMatches_(pattern, {
+      merchant: merchantValue, counterparty: counterpartyValue
+    }, rawEvidence)) return;
 
     const category = pfisCleanText(rule.category);
     if (!category || categories.indexOf(category) < 0) {
@@ -2959,7 +3358,7 @@ function pfisEvaluateRules(parsed, rawEvidence) {
     let specificity = 0;
 
     if (matchType === 'MERCHANT') {
-      isMatch = !!pattern && merchantKey.indexOf(pattern) >= 0;
+      isMatch = !!pattern && pfisMerchantPatternMatches_(pattern, parsed, rawEvidence);
       specificity = 2;
     } else if (matchType === 'AMOUNT') {
       const amountMatches = amount !== '' && Math.abs(Number(amount) - absoluteAmount) < 0.005;
@@ -3000,7 +3399,7 @@ function pfisEvaluateRules(parsed, rawEvidence) {
   if (!matches.length) {
     // Do not mask a fully matching but misconfigured rule with a weaker fallback.
     if (matchedRuleWithInvalidCategory) return pfisEmptyRuleResult();
-    return pfisBuildMerchantCategoryFallback_(rules, parsed.merchant, categories);
+    return pfisBuildMerchantCategoryFallback_(rules, parsed.merchant, categories, rawEvidence, parsed.counterparty);
   }
 
   // More constrained rules win over broad amount-only rules. Within the same
@@ -3077,6 +3476,25 @@ function pfisNormalizeRuleMerchantPattern(value) {
     if (half === compact.slice(compact.length / 2)) pattern = half;
   }
   return pattern;
+}
+
+/**
+ * Match a configured merchant phrase against extracted merchant/counterparty,
+ * or against original source evidence when the extractor used a different label.
+ * Raw-evidence matching requires a distinctive phrase (>=10 compact characters)
+ * to prevent generic tokens such as "bank", "card" or "payment" from matching.
+ */
+function pfisMerchantPatternMatches_(patternValue, parsed, rawEvidence) {
+  const pattern = pfisNormalizeRuleMerchantPattern(patternValue);
+  if (!pattern) return false;
+  const p = parsed && typeof parsed === 'object' ? parsed : { merchant: parsed };
+  const merchantKeys = [p.merchant, p.counterparty].map(function (value) {
+    return pfisNormalizeMerchant(value);
+  }).filter(Boolean);
+  if (merchantKeys.some(function (key) { return key.indexOf(pattern) >= 0; })) return true;
+  if (pattern.replace(/\s+/g, '').length < 10 || !rawEvidence) return false;
+  const rawKey = pfisNormalizeMerchant(pfisSanitizeRawText(rawEvidence, false));
+  return !!rawKey && rawKey.indexOf(pattern) >= 0;
 }
 
 function pfisAmountRuleHasEvidence(rule, parsed, rawEvidence) {
@@ -3248,7 +3666,7 @@ function pfisResolveConfig(parsed, rawEvidence) {
     const cfgType = pfisNormalizeAccountType(cfg.accountType);
     if (cfgType && typeKey && cfgType !== typeKey) return;
     const cfgMerchant = pfisNormalizeMerchant(cfg.merchantContains);
-    if (cfgMerchant && merchantKey.indexOf(cfgMerchant) < 0) return;
+    if (cfgMerchant && !pfisMerchantPatternMatches_(cfg.merchantContains, parsed, rawEvidence)) return;
 
     const configuredSuffixRaw = pfisCleanText(cfg.accountCardSuffix);
     const suffixCompact = configuredSuffixRaw.toLowerCase().replace(/[^a-z0-9]/g, '');

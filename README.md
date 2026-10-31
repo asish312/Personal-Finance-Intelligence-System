@@ -664,7 +664,7 @@ All Shortcut writes use POST JSON.
 - <code>update</code>
 - <code>reprocesssource</code>
 - <code>resolveexception</code>
-- <code>reclassifyfromevidence</code> — admin-only, explicit, audited refresh of classification/mapping fields using linked source evidence and current Rules/Config; it does not change financial facts.
+- <code>reclassifyfromevidence</code> — explicit, authenticated, audited maintenance refresh of classification/mapping fields using linked source evidence and current Rules/Config; it does not change financial facts.
 
 **Legacy maintenance functions (run manually in Apps Script after preview)**
 - <code>PFIS_PREVIEW_LEGACY_DUPLICATE_ARCHIVE_MIGRATION()</code> — read-only preview; requires an explicit surviving Transaction ID.

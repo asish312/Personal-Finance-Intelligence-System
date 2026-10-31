@@ -30,7 +30,7 @@ Gemini is not called by the transaction engine or iOS Shortcut.
 
 ## Repository file map
 
-Before modifying an existing ledger, read [Ledger Cleanup Operations](LEDGER_CLEANUP_OPERATIONS_v1.0.0.md). It documents the preview-first duplicate archive migration and evidence-based reclassification API.
+Before modifying an existing ledger, read [Ledger Cleanup Operations](LEDGER_CLEANUP_OPERATIONS_v1.0.0.md) and use the dedicated [Gemini Legacy Duplicate Mapping Prompt](../prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) only for the documented evidence-backed pairs. It documents the preview-first duplicate archive migration and evidence-based reclassification API.
 
 
 | Path | What it contains |

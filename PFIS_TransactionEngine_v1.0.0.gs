@@ -2315,8 +2315,8 @@ function pfisArchiveRejectedTransaction(transactionId, reason, actor, requestId)
 function pfisGetDuplicateTargetFromReason_(reason) {
   const value = pfisString(reason);
   const patterns = [
-    /confirmed_duplicate_of\\s*[:=#]\\s*([A-Za-z0-9_-]+)/i,
-    /duplicate\\s+of\\s*#?\\s*([A-Za-z0-9_-]+)/i
+    /confirmed_duplicate_of\s*[:=#]\s*([A-Za-z0-9_-]+)/i,
+    /duplicate\s+of\s*#?\s*([A-Za-z0-9_-]+)/i
   ];
   for (let i = 0; i < patterns.length; i++) {
     const match = value.match(patterns[i]);

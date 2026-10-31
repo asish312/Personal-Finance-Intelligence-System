@@ -95,6 +95,7 @@ Only make a write when the PFIS backend exposes an authorised, documented action
 
 Allowed automated write in the current PFIS v1.0.0 API:
 1. Use action=reclassifyfromevidence only for an existing active Transaction ID when:
+   - the record has a missing, invalid or explicitly provisional classification; never use it to overwrite an already valid human-maintained Category or Type merely because a rule would return a different value;
    - the relevant original source evidence is already linked to that transaction in PFIS Source Log;
    - current enabled Rules and Config give one unambiguous classification/account mapping;
    - the transaction is not a duplicate, rejected, source-conflict or unresolved integrity case;
@@ -102,6 +103,7 @@ Allowed automated write in the current PFIS v1.0.0 API:
    - a specific audit reason is supplied.
 2. Verify the API response, re-read the transaction and confirm the corresponding Change Log entries exist before reporting success.
 3. If the action returns an error, ambiguity, no evidence or no change, leave the record unchanged and report it.
+4. If Gemini cannot invoke the configured authenticated Apps Script endpoint, perform no write. Connected Google Sheets edit access does not permit bypassing the PFIS API or directly changing protected ledger fields.
 
 Do NOT:
 - Directly edit Transaction Log system fields, Source Log, Change Log, Validation Flag, Needs Review, Review Status, Reviewed By or Reviewed At.

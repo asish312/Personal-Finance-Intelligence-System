@@ -82,6 +82,15 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       return 'Engine, schema and parser identifiers remain v1.0.0';
     }, startedAt);
 
+    pfisPreflightRunCase_(report, 'Evidence reclassification is allowed through the POST router', function () {
+      var routeSource = pfisRouteRequest.toString();
+      pfisPreflightAssert_(/const writeActions = \[[^\]]*['"]reclassifyfromevidence['"][^\]]*\]/.test(routeSource),
+        'reclassifyfromevidence must be included in the router write allowlist.');
+      pfisPreflightAssert_(routeSource.indexOf("action === 'reclassifyfromevidence'") >= 0,
+        'reclassifyfromevidence must be dispatched to the evidence reclassification handler.');
+      return 'The authenticated write router allows and dispatches reclassifyfromevidence';
+    }, startedAt);
+
     pfisPreflightRunCase_(report, 'Legacy duplicate reason parser requires an explicit surviving Transaction ID', function () {
       pfisPreflightAssert_(pfisGetDuplicateTargetFromReason_('Rejected as duplicate of #202610-156') === '202610-156',
         'Legacy "duplicate of #ID" reason was not parsed.');

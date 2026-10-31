@@ -31,6 +31,8 @@ A personal-finance workflow built with Google Apps Script, Google Sheets, iOS Sh
 | 7 | [Gemini Card-Payment Rules Prompt](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Configure future credit-card settlement Rules and Config rows |
 | 8 | [Gemini Legacy Duplicate Mapping Prompt](prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) | Add verified survivor IDs to already-confirmed duplicate rows before preview-first migration |
 | 9 | [Gemini Daily Transaction Verifier](prompts/GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md) | Recurring Gmail + PFIS checks with conservative, auditable updates |
+| 10 | [PFIS Help & Prompt Center](docs/PFIS_HELP_AND_PROMPT_CENTER_v1.0.0.md) | Beginner guide: what inputs to provide and copy-ready operations prompts |
+| 11 | [Gemini Help Sheet Setup Prompt](prompts/GEMINI_HELP_SHEET_SETUP_v1.0.0.md) | Create the in-workbook PFIS Help & Prompts tab |
 | Optional | [Gemini Purpose Enrichment](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) | Daily evidence-backed Purpose suggestions with human approval |
 | Optional | [Prompt Catalogue](prompts/README.md) | Index of reusable prompts |
 
@@ -766,6 +768,8 @@ Purpose suggestions remain optional and live in Purpose Review Queue because the
 | [prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Copy/paste Rules/Config prompt for card-payment settlement classification |
 | [prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md](prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) | Copy/paste prompt to add verified survivor IDs for legacy duplicate archive migration |
 | [prompts/GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md](prompts/GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md) | Recurring daily Gmail reconciliation, ledger quality checks, limited authorised updates and mobile report |
+| [docs/PFIS_HELP_AND_PROMPT_CENTER_v1.0.0.md](docs/PFIS_HELP_AND_PROMPT_CENTER_v1.0.0.md) | Beginner-friendly operator manual and prompt examples for insert, lookup, update, anomaly review and archival |
+| [prompts/GEMINI_HELP_SHEET_SETUP_v1.0.0.md](prompts/GEMINI_HELP_SHEET_SETUP_v1.0.0.md) | One-time prompt to create the PFIS Help & Prompts sheet tab |
 | [docs/images/pfis-configuration-journey.svg](docs/images/pfis-configuration-journey.svg) | Configuration journey illustration |
 | [docs/images/pfis-demo-budget-sweep.svg](docs/images/pfis-demo-budget-sweep.svg) | Fictional budget/savings illustration |
 | [docs/images/pfis-demo-data-quality.svg](docs/images/pfis-demo-data-quality.svg) | Fictional data-quality illustration |

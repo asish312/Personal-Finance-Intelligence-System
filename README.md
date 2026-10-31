@@ -29,6 +29,7 @@ A personal-finance workflow built with Google Apps Script, Google Sheets, iOS Sh
 | 5 | [Gemini Spreadsheet Repair Prompt](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Copy/paste prompt for workbook repair |
 | 6 | [Ledger Cleanup Operations](docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md) | Safely migrate legacy confirmed duplicates and reclassify existing transactions from source evidence |
 | 7 | [Gemini Card-Payment Rules Prompt](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Configure future credit-card settlement Rules and Config rows |
+| 8 | [Gemini Legacy Duplicate Mapping Prompt](prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) | Add verified survivor IDs to already-confirmed duplicate rows before preview-first migration |
 | Optional | [Gemini Purpose Enrichment](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) | Daily evidence-backed Purpose suggestions with human approval |
 | Optional | [Prompt Catalogue](prompts/README.md) | Index of reusable prompts |
 
@@ -762,6 +763,7 @@ Purpose suggestions remain optional and live in Purpose Review Queue because the
 | [prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md](prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md) | Copy/paste extraction and category-classification prompts |
 | [prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Copy/paste workbook repair prompt |
 | [prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Copy/paste Rules/Config prompt for card-payment settlement classification |
+| [prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md](prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) | Copy/paste prompt to add verified survivor IDs for legacy duplicate archive migration |
 | [docs/images/pfis-configuration-journey.svg](docs/images/pfis-configuration-journey.svg) | Configuration journey illustration |
 | [docs/images/pfis-demo-budget-sweep.svg](docs/images/pfis-demo-budget-sweep.svg) | Fictional budget/savings illustration |
 | [docs/images/pfis-demo-data-quality.svg](docs/images/pfis-demo-data-quality.svg) | Fictional data-quality illustration |

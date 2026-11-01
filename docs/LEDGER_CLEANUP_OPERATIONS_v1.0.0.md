@@ -81,6 +81,8 @@ The supplied 1-Nov-2026 evidence shows two separate payments, not five independe
 | 202611-001 | 202611-003 | Both are SBI savings debits of ₹14,750 on 1-Nov-2026 to Sarada. The original YONO SMS for 001 includes reference 807793332; the second SBI notification has a different wording and no clock/reference. |
 | 202611-002 | 202611-004, 202611-005 | All are SBI savings debits of ₹15,250 on 1-Nov-2026 to Susil. The original YONO email for 002 includes reference 807746862; 004/005 are alternate SBI email/SMS templates without a clock/reference. |
 
+The workbook also contains a stale account override in `Rules!K16` (Rule ID `PR-016`): `AXIS_SAVINGS`. The original SBI notifications explicitly identify `SBI_SAVINGS`, and Config already maps that account. Clear only `Rules!K16` when it still contains `AXIS_SAVINGS`; do not change the Rule's merchant/category/type/recurrence fields or any Config baseline cells. The engine also gives explicit source-backed Config identity precedence over a legacy Rule override.
+
 All five source records are `DATE_ONLY`. The new matching logic does not compare their midnight timestamps as real transaction times. It uses same signed amount, IST day, bank, account identity and normalized beneficiary; a reference conflict or ambiguous candidate set blocks automatic reconciliation. Amount and date by themselves are not enough.
 
 ### Preview first — do not edit Transaction Log manually

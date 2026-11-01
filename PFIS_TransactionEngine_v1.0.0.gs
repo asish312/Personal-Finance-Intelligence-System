@@ -1418,6 +1418,9 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
     if (accountTypeConflict) return { kind: 'CONFLICT', reason: 'account_type_conflict' };
     if (accountIdentityAmbiguous) return { kind: 'CONFLICT', reason: 'account_identity_ambiguous' };
     if (accountIdentityConflict) return { kind: 'CONFLICT', reason: 'account_identity_conflict' };
+    if (!existingAccountIdentity.value || !incomingAccountIdentity.value) {
+      return { kind: 'NO_MATCH', reason: 'date_only_account_identity_unavailable' };
+    }
     return {
       kind: 'MATCH',
       reason: 'date_amount_account_counterparty_match',
@@ -1516,7 +1519,7 @@ function pfisFindSameChannelDuplicate(incoming, sourceType, merchant) {
         const sourceAccountIdentity = pfisGetEvidenceAccountIdentity(source.rawBody, existing.account);
         const incomingAccountIdentity = pfisGetEvidenceAccountIdentity(incoming.rawEvidence, incoming.account);
         if (sourceAccountIdentity.ambiguous || incomingAccountIdentity.ambiguous) return;
-        if (sourceAccountIdentity.value && incomingAccountIdentity.value &&
+        if (!sourceAccountIdentity.value || !incomingAccountIdentity.value ||
             pfisNormalizeMerchant(sourceAccountIdentity.value) !== pfisNormalizeMerchant(incomingAccountIdentity.value)) return;
         dateOnlyMatch = true;
         return;

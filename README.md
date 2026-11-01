@@ -28,6 +28,10 @@ A personal-finance workflow built with Google Apps Script, Google Sheets, iOS Sh
 | 4 | [Gemini Workbook Guide](docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md) | Safely inspect and maintain the Google Sheets workbook |
 | 5 | [Gemini Spreadsheet Repair Prompt](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Copy/paste prompt for workbook repair |
 | 6 | [Ledger Cleanup Operations](docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md) | Safely migrate legacy confirmed duplicates and reclassify existing transactions from source evidence |
+| 7 | [Account Balances](docs/ACCOUNT_BALANCES.md) | Baseline anchor, live balance matrix and reconciliation caveats |
+| 8 | [Config Contract](docs/CONFIG.md) | Apps Script Config A:J versus reporting baseline matrix L:P |
+| 9 | [Financial Accounting Contract](docs/FINANCIAL_ACCOUNTING_CONTRACT.md) | Cash flow, consumption, card settlements and cumulative surplus |
+| 10 | [Dashboard Specification](docs/DASHBOARD_SPEC.md) | Four Account Balances & Liquidity cards and dashboard placement |
 | 7 | [Gemini Card-Payment Rules Prompt](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Configure future credit-card settlement Rules and Config rows |
 | 8 | [Gemini Legacy Duplicate Mapping Prompt](prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) | Add verified survivor IDs to already-confirmed duplicate rows before preview-first migration |
 | 9 | [Gemini Daily Transaction Verifier](prompts/GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md) | Recurring Gmail + PFIS checks with conservative, auditable updates |
@@ -349,6 +353,12 @@ Optional J: <code>Text Pattern</code>.
 
 Do not store full account/card numbers. Do not let priority guess a card when the alert does not identify it. Mark <code>Is Internal</code> only for accounts genuinely owned by the same person; card bill payments are liability settlements, not automatically internal transfers.
 
+### Account Baseline & Live Balance Matrix — Config!L:P
+
+The account mapping engine reads Config!A:I and the optional J Text Pattern extension. Config!L:P is a separate spreadsheet reporting layer for opening baselines, date-bounded net activity and live balances. See [Account Balances](docs/ACCOUNT_BALANCES.md) and [Config Contract](docs/CONFIG.md). Do not extend the Apps Script Config schema to consume L:P unless a future engine requirement explicitly calls for it.
+
+Current Axis calibration: ₹11,204.00 opening baseline at 2026-10-20; displayed net activity ₹57,462.05; displayed live balance ₹68,666.05. The uploaded workbook's O2 formula contains an unexplained -₹202.02 adjustment versus raw ledger activity, so this remains a reconciliation exception—not a clean pure SUMIFS result.
+
 ### Rules — classify repeated patterns
 
 Supported match types:
@@ -575,6 +585,10 @@ The visuals below are illustrative mockups, not live workbook charts or a claim 
 
 ### Cash flow and budget performance
 
+The current Dashboard_Calc contract is **Net Cash Flow = Income (V6) − Net Consumption (V7) − Investments (V8)**. Credit-card bill payments are reported separately in V9 and are not subtracted again when the original card purchases are already included in consumption. The uploaded workbook shows current-period net cash flow of +₹6,995.61 and a cumulative monthly operating surplus of ₹1,71,360.36 (₹1,71,360 rounded to whole rupees). See [Financial Accounting Contract](docs/FINANCIAL_ACCOUNTING_CONTRACT.md).
+
+The Executive Dashboard's Account Balances & Liquidity section is Dashboard!B12:O14, between the primary KPI summary and Section A cash-flow charts. See [Dashboard Specification](docs/DASHBOARD_SPEC.md).
+
 <p align="center">
   <a href="https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/docs/images/pfis-demo-financial-performance.svg"><img src="https://raw.githubusercontent.com/asish312/Personal-Finance-Intelligence-System/main/docs/images/pfis-demo-financial-performance.svg" alt="Illustrative PFIS cash flow, allocation and savings rate charts" width="100%"/></a>
 </p>
@@ -762,6 +776,10 @@ Purpose suggestions remain optional and live in Purpose Review Queue because the
 | [docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md](docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md) | Workbook-only Gemini maintenance and validation guidance |
 | [docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) | Optional daily Purpose suggestions and human approval |
 | [docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md](docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md) | Safe legacy duplicate migration and historical evidence-based reclassification runbook |
+| [docs/ACCOUNT_BALANCES.md](docs/ACCOUNT_BALANCES.md) | Verified baseline/live-balance contract and ₹202.02 reconciliation exception |
+| [docs/CONFIG.md](docs/CONFIG.md) | Account/Card mapping schema and reporting balance-matrix contract |
+| [docs/FINANCIAL_ACCOUNTING_CONTRACT.md](docs/FINANCIAL_ACCOUNTING_CONTRACT.md) | Cash-flow definition and double-count prevention |
+| [docs/DASHBOARD_SPEC.md](docs/DASHBOARD_SPEC.md) | Executive Dashboard liquidity layer specification |
 | [prompts/README.md](prompts/README.md) | Prompt index |
 | [prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md](prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md) | Copy/paste extraction and category-classification prompts |
 | [prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md](prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md) | Copy/paste workbook repair prompt |

@@ -1898,7 +1898,7 @@ function pfisGetTransaction(transactionId, includeEvidence) {
   const obj = pfisObjectFromRow(sheet.getRange(rowNumber, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
   const verification = pfisGetVerificationState(transactionId, obj.validationFlag);
   const categories = pfisGetCategoryList();
-  const enrichment = pfisGetEnrichmentState(obj.category, obj.userNotes, categories, obj.merchant, obj.ruleApplied);
+  const enrichment = pfisGetEnrichmentState(obj.category, obj.userNotes, categories, obj.merchant, obj.ruleApplied, obj.type);
   obj.sheetRow = rowNumber;
   obj.verificationStatus = verification.status;
   obj.verificationSource = verification.source;
@@ -2006,7 +2006,7 @@ function pfisGetPendingReview(limitInput) {
 function pfisGetNeedsEnrichment(limitInput) {
   const limit = pfisClampLimit(limitInput, 50);
   const pending = pfisReadTransactions().map(function (txn) {
-    const enrichment = pfisGetEnrichmentState(txn.category, txn.userNotes, undefined, txn.merchant, txn.ruleApplied);
+    const enrichment = pfisGetEnrichmentState(txn.category, txn.userNotes, undefined, txn.merchant, txn.ruleApplied, txn.type);
     if (!enrichment.requiresCategoryClassification) return null;
     const item = {
       transactionId: txn.transactionId, dateTime: txn.dateTime, amount: txn.amount,
@@ -2616,7 +2616,7 @@ function pfisResolveTransactionException(params, requestId) {
   else if (!pfisIsMatchableMerchant(pfisNormalizeMerchant(current.merchant))) remainingReason = 'merchant_missing_or_unusable';
   else if (pfisString(current.reviewReason) === 'time_precision_unavailable') remainingReason = 'time_precision_unavailable';
   else {
-    const enrichment = pfisGetEnrichmentState(current.category, current.userNotes, categories, current.merchant, current.ruleApplied);
+    const enrichment = pfisGetEnrichmentState(current.category, current.userNotes, categories, current.merchant, current.ruleApplied, current.type);
     if (enrichment.requiresHumanReview) remainingReason = 'enrichment_required';
   }
   const needsReview = !!remainingReason;
@@ -2957,7 +2957,7 @@ function pfisUpdateTransaction(params, requestId) {
       stillNeedsReview = true;
       reviewReason = 'merchant_missing_or_unusable';
     } else {
-      const enrichment = pfisGetEnrichmentState(latest.category, latest.userNotes, categories, latest.merchant, latest.ruleApplied);
+      const enrichment = pfisGetEnrichmentState(latest.category, latest.userNotes, categories, latest.merchant, latest.ruleApplied, latest.type);
       if (enrichment.requiresHumanReview) {
         stillNeedsReview = true;
         reviewReason = 'enrichment_required';
@@ -3228,7 +3228,7 @@ function pfisRefreshReviewStateAfterEnrichment(rowNumber, requestId) {
     needsReview = true;
     reason = 'merchant_missing_or_unusable';
   } else {
-    const enrichment = pfisGetEnrichmentState(row.category, row.userNotes, undefined, row.merchant, row.ruleApplied);
+    const enrichment = pfisGetEnrichmentState(row.category, row.userNotes, undefined, row.merchant, row.ruleApplied, row.type);
     if (enrichment.requiresHumanReview) {
       needsReview = true;
       reason = 'enrichment_required';
@@ -5209,7 +5209,7 @@ function pfisBuildTransactionResponse(transaction, requestId, status, changedFie
   const safeTransaction = transaction ? pfisTransactionResponseView(transaction) : null;
   const categories = pfisGetCategoryList();
   const enrichment = transaction
-    ? pfisGetEnrichmentState(transaction.category, transaction.userNotes, categories, transaction.merchant, transaction.ruleApplied)
+    ? pfisGetEnrichmentState(transaction.category, transaction.userNotes, categories, transaction.merchant, transaction.ruleApplied, transaction.type)
     : { requiresPurpose: false, requiresCategoryClassification: false };
   const verification = transaction ? {
     status: transaction.verificationStatus || 'UNKNOWN',
@@ -5228,7 +5228,13 @@ function pfisBuildTransactionResponse(transaction, requestId, status, changedFie
     sourceTypes: verification.sourceTypes,
     needsReview: transaction ? pfisTruthy(transaction.needsReview) : false,
     needsEnrichment: enrichment.requiresCategoryClassification,
-    requiresPurpose: enrichment.requiresPurpose,
+    requiresPurpose: !!enrichment.requiresPurpose,
+    purposePromptReason: enrichment.purposePromptReason || '',
+    purposeQuestion: enrichment.requiresPurpose
+      ? (enrichment.purposePromptReason === 'MERCHANT_RULE_VARIANCE'
+        ? 'This merchant is recognised, but this transaction did not match a specific configured rule. What was this expense for?'
+        : 'This merchant or transaction is not covered by an active PFIS rule. What was this expense for?')
+      : '',
     requiresCategoryClassification: enrichment.requiresCategoryClassification,
     isDefaultCategoryFallback: enrichment.isDefaultCategoryFallback
   };
@@ -5280,13 +5286,13 @@ function pfisRecommendNextAction(status, transaction, enrichment) {
   if (hardReviewReasons.indexOf(reviewReason) >= 0) return 'REVIEW';
 
   const state = enrichment || pfisGetEnrichmentState(
-    tx.category, tx.userNotes, undefined, tx.merchant, tx.ruleApplied
+    tx.category, tx.userNotes, undefined, tx.merchant, tx.ruleApplied, tx.type
   );
-  // Purpose is optional and is never a Shortcut question. The only normal
-  // enrichment route is category classification; trusted rule purposes were
-  // already applied during insertion/reconciliation.
+  // Resolve category first, then any independent integrity review, then ask for
+  // Purpose when an expense has no specific active-rule match.
   if (state.requiresCategoryClassification) return 'CLASSIFY_CATEGORY';
   if (pfisTruthy(tx.needsReview)) return 'REVIEW';
+  if (state.requiresPurpose) return 'ASK_PURPOSE';
   return 'SHOW_RECEIPT';
 }
 
@@ -5314,17 +5320,53 @@ function pfisBuildUpdateResponse(transaction, requestId, status, changedFields) 
   return response;
 }
 
-function pfisGetEnrichmentState(category, notes, categoryList, merchant, ruleApplied) {
+/**
+ * Purpose collection is a user interaction, not an integrity-review flag.
+ *
+ * Ask only for expense transactions that have no meaningful Purpose and whose
+ * merchant/transaction did not resolve to one specific active rule:
+ * - blank/default-only Rule Applied: no specific rule matched;
+ * - CATEGORY_FALLBACK: a known merchant matched only a broad merchant category
+ *   fallback (for example, the merchant was recognised but the amount-specific
+ *   transaction rule did not match).
+ *
+ * A direct Rule ID match is treated as recognised. A trusted rule Purpose also
+ * suppresses the prompt. No amount threshold is used.
+ */
+function pfisHasSpecificRuleMatch_(ruleApplied) {
+  const marker = pfisString(ruleApplied).toUpperCase();
+  if (!marker) return false;
+  return marker.split('|').some(function (part) {
+    const token = pfisString(part).toUpperCase();
+    return !!token &&
+      token.indexOf('CATEGORY_FALLBACK:') !== 0 &&
+      token !== PFIS_DEFAULT_CATEGORY_FALLBACK_MARKER;
+  });
+}
+
+function pfisGetEnrichmentState(category, notes, categoryList, merchant, ruleApplied, transactionType) {
   const categories = Array.isArray(categoryList) ? categoryList : pfisGetCategoryList();
   const categoryValue = pfisCleanText(category);
   const categoryIsActive = !!categoryValue && categories.indexOf(categoryValue) >= 0;
   const isDefaultCategoryFallback = categoryIsActive &&
     pfisIsDefaultCategoryFallback_(categoryValue, ruleApplied);
+  const isExpense = pfisNormalizeType(transactionType) === 'expense';
+  const hasMeaningfulPurpose = pfisIsMeaningfulPurpose(notes, merchant);
+  const hasSpecificRuleMatch = pfisHasSpecificRuleMatch_(ruleApplied);
+  const isMerchantRuleFallback = pfisString(ruleApplied).toUpperCase()
+    .split('|').some(function (part) {
+      return pfisString(part).toUpperCase().indexOf('CATEGORY_FALLBACK:') === 0;
+    });
+  const requiresPurpose = isExpense && !hasMeaningfulPurpose && !hasSpecificRuleMatch;
+  const purposePromptReason = !requiresPurpose ? '' :
+    (isMerchantRuleFallback ? 'MERCHANT_RULE_VARIANCE' : 'UNMATCHED_MERCHANT_OR_TRANSACTION');
+
   return {
     requiresCategoryClassification: !categoryIsActive || isDefaultCategoryFallback,
     requiresHumanReview: !categoryIsActive,
     isDefaultCategoryFallback: isDefaultCategoryFallback,
-    requiresPurpose: false
+    requiresPurpose: requiresPurpose,
+    purposePromptReason: purposePromptReason
   };
 }
 

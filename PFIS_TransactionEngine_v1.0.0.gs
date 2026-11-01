@@ -1374,6 +1374,114 @@ function pfisFindCrossChannelMatch(incoming, sourceType, merchant) {
   return { status: 'NO_MATCH', timePrecisionCandidate: timeCandidates.length === 1, timePrecisionCandidateIds: timeCandidates };
 }
 
+function pfisFindCardPaymentEventMatch(incoming, rawEvidence, sourceType) {
+  if (pfisNormalizeType(incoming.resolvedType || incoming.type) !== 'card_payment') {
+    return { status: 'NO_MATCH' };
+  }
+  const normalizedSourceType = pfisNormalizeSourceType(sourceType);
+  if (!normalizedSourceType) return { status: 'NO_MATCH' };
+  const otherSourceType = normalizedSourceType === 'SMS' ? 'EMAIL' : 'SMS';
+  const incomingIssuer = pfisGetPaymentIssuerKey(rawEvidence, incoming.bank, incoming.merchant, incoming.cardName);
+  if (!incomingIssuer) return { status: 'NO_MATCH' };
+  const txRows = pfisReadTransactions();
+  const sourceIndex = pfisBuildSourceIndex();
+  const candidates = [];
+  txRows.forEach(function (existing) {
+    if (pfisNormalizeType(existing.type) !== 'card_payment') return;
+    if (!pfisSameMoney(existing.amount, incoming.amount)) return;
+    if (!pfisSameCalendarDay(existing.dateTime, incoming.datetime)) return;
+    const linkedSources = sourceIndex[existing.transactionId] || [];
+    const existingSourceTypes = pfisUnique(linkedSources.map(function (s) { return pfisNormalizeSourceType(s.sourceType); }));
+    // This matcher handles issuer/payment-rail confirmation pairs and repeated
+    // same-channel issuer messages. Existing source evidence is mandatory.
+    if (!existingSourceTypes.length) return;
+    const hasCrossChannelEvidence = existingSourceTypes.indexOf(otherSourceType) >= 0;
+    const isSameChannelIssuerReplay = existingSourceTypes.indexOf(normalizedSourceType) >= 0 &&
+      existingSourceTypes.indexOf(otherSourceType) < 0;
+    if (!hasCrossChannelEvidence && !isSameChannelIssuerReplay) return;
+    // Same-channel issuer notifications may be reconciled by calendar day only
+    // when at least one source is date-only. If both have precise times, the
+    // ordinary five-minute transaction matcher must decide instead.
+    const hasDateOnlyEvidence = pfisString(incoming.datePrecision).toUpperCase() !== 'DATETIME' ||
+      linkedSources.some(function (s) { return pfisString(s.datePrecision).toUpperCase() !== 'DATETIME'; });
+    if (isSameChannelIssuerReplay && !hasDateOnlyEvidence) return;
+    const existingEvidence = linkedSources.map(function (s) { return s.rawBody || ''; }).join('\n');
+    const existingIssuer = pfisGetPaymentIssuerKey(existingEvidence, existing.bank, existing.merchant, existing.cardName);
+    if (existingIssuer !== incomingIssuer) return;
+    const accountA = pfisString(existing.account).toLowerCase();
+    const accountB = pfisString(incoming.account).toLowerCase();
+    const bothCreditCardAccounts = pfisNormalizeAccountType(existing.accountType) === 'creditcard' &&
+      pfisNormalizeAccountType(incoming.accountType) === 'creditcard';
+    // References from a wallet/payment rail and issuer are separate namespaces.
+    // Same-channel issuer messages must not contradict two supplied references.
+    const existingRef = pfisNormalizeReference(existing.refNo);
+    const incomingRef = pfisNormalizeReference(incoming.refNo);
+    if (isSameChannelIssuerReplay && existingRef && incomingRef && existingRef !== incomingRef) return;
+    if (bothCreditCardAccounts && accountA && accountB && accountA !== accountB) return;
+    if (bothCreditCardAccounts && existing.cardName && incoming.cardName &&
+        pfisNormalizeMerchant(existing.cardName) !== pfisNormalizeMerchant(incoming.cardName)) return;
+    candidates.push({
+      transactionId: existing.transactionId,
+      reason: isSameChannelIssuerReplay
+        ? 'same_channel_card_payment_issuer_amount_day'
+        : 'cross_channel_card_payment_issuer_amount_day'
+    });
+  });
+  const unique = pfisUniqueBy(candidates, 'transactionId');
+  if (unique.length === 1) {
+    return { status: 'MATCHED', transactionId: unique[0].transactionId, reason: unique[0].reason };
+  }
+  if (unique.length > 1) {
+    return { status: 'CONFLICT', reason: 'ambiguous_card_payment_event_match',
+      candidateTransactionIds: unique.map(function (x) { return x.transactionId; }) };
+  }
+  return { status: 'NO_MATCH' };
+}
+
+function pfisGetPaymentIssuerKey(rawEvidence, bank, merchant, cardName) {
+  const haystack = pfisNormalizeMerchant([rawEvidence, bank, merchant, cardName].filter(Boolean).join(' '));
+  if (!haystack) return '';
+  if (haystack.indexOf('state bank of india') >= 0 || /\bsbi\b/.test(haystack) || haystack.indexOf('sbicard') >= 0) return 'sbi';
+  if (haystack.indexOf('icici') >= 0) return 'icici';
+  if (haystack.indexOf('axis') >= 0) return 'axis';
+  if (haystack.indexOf('hdfc') >= 0) return 'hdfc';
+  if (haystack.indexOf('kotak') >= 0) return 'kotak';
+  if (haystack.indexOf('yes bank') >= 0) return 'yesbank';
+  return '';
+}
+
+function pfisLinkPaymentEventSource(match, parsed, evidenceText, params, requestId, sourceType, sourceHash, ruleResult, configResult) {
+  const sourceId = pfisMakeId('SRC-');
+  const transactionId = pfisString(match.transactionId);
+  const sourceRowNumber = pfisAppendSourceRow({
+    sourceId: sourceId, receivedAt: pfisGetSourceLogReceivedAt(params), sourceType: sourceType,
+    sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
+    sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PROCESSING_RECONCILE',
+    extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
+    accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
+    extractedReferenceNo: parsed.refNo, linkedTxnId: transactionId, ingestedAt: new Date(),
+    processingError: '', archivedFlag: false,
+    notes: pfisBuildSourceNotes_({ phase: 'PAYMENT_EVENT_RECONCILE', reason: match.reason, transactionId: transactionId }, parsed, params),
+    requestId: requestId, batchId: pfisString(params.batchId)
+  });
+  pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, configResult, requestId);
+  pfisAppendChangeOnce('payment-event-source-linked:' + sourceId, {
+    transactionId: transactionId, targetTable: PFIS_SHEETS.sources, actor: 'system_payment_event',
+    field: 'Payment Event Evidence Linked', oldValue: '', newValue: transactionId,
+    reason: 'Matching card-payment issuer, amount and calendar date linked this notification to the existing canonical settlement.', requestId: requestId
+  });
+  pfisFinalizeSource(sourceRowNumber, 'RECONCILED',
+    'Linked as supporting evidence for the same card-payment event: ' + match.reason, '');
+  const transaction = pfisGetTransaction(transactionId, false);
+  const response = pfisBuildIngestResponse(transaction, requestId, sourceType, 'RECONCILED', sourceId);
+  response.transactionInserted = false;
+  response.sourceRecorded = true;
+  response.paymentEventLinked = true;
+  response.duplicateOf = transactionId;
+  response.message = 'This notification was linked to an existing card-payment event. No second ledger transaction was inserted.';
+  return response;
+}
+
 function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMerchant) {
   const sameBank = pfisNormalizeBank(existing.bank) === pfisNormalizeBank(incoming.bank);
   if (!sameBank) return { kind: 'NO_MATCH' };

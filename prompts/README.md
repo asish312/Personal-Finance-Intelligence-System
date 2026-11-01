@@ -20,5 +20,9 @@ Related implementation guides:
 - [iOS Shortcut Implementation](../docs/IOS_SHORTCUT_IMPLEMENTATION_v1.0.0.md)
 - [Gemini Workbook Guide](../docs/GEMINI_WORKBOOK_GUIDE_v1.0.0.md)
 - [Optional Gemini Purpose Enrichment](../docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md)
+- [Account Balances](../docs/ACCOUNT_BALANCES.md)
+- [Config Contract](../docs/CONFIG.md)
+- [Financial Accounting Contract](../docs/FINANCIAL_ACCOUNTING_CONTRACT.md)
+- [Dashboard Specification](../docs/DASHBOARD_SPEC.md)
 
 Security: never paste Script Properties, WEB_APP_SECRET, complete account/card numbers or private source messages into public repository files. The repository examples must remain synthetic.

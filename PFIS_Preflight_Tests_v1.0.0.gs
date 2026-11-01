@@ -1,5 +1,5 @@
 /**
- * PFIS Transaction Engine v1.1.0 — bounded preflight / regression harness
+ * PFIS Transaction Engine v1.0.0 — bounded preflight / regression harness
  *
  * INSTALLATION
  * 1. Replace the contents of the existing preflight file in the SAME Apps Script project as the transaction engine.
@@ -30,7 +30,7 @@ var PFIS_PREFLIGHT_TEMP_PREFIX = 'PFIS_AUTOTEST_TEMP_DO_NOT_USE_';
 function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
   var startedAt = Date.now();
   var report = {
-    suite: 'PFIS Transaction Engine v1.1.0 preflight',
+    suite: 'PFIS Transaction Engine v1.0.0 preflight',
     startedAt: new Date(startedAt).toISOString(),
     maxRuntimeMs: PFIS_PREFLIGHT_MAX_RUNTIME_MS,
     productionSpreadsheet: { status: 'NOT_CHECKED' },
@@ -76,10 +76,10 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
 
     // Pure logic tests do not access or mutate any spreadsheet.
     pfisPreflightRunCase_(report, 'PFIS release identifiers remain v1.0.0', function () {
-      pfisPreflightAssert_(ENGINE_VERSION === 'v1.1.0', 'Engine version must be v1.1.0.');
+      pfisPreflightAssert_(ENGINE_VERSION === 'v1.0.0', 'Engine version must be v1.0.0.');
       pfisPreflightAssert_(SCHEMA_VERSION === 'v1.0.0', 'Physical workbook schema must remain v1.0.0.');
-      pfisPreflightAssert_(PARSER_VERSION === 'v1.1.0', 'Parser version must be v1.1.0.');
-      return 'Engine/parser v1.1.0; physical workbook schema remains v1.0.0';
+      pfisPreflightAssert_(PARSER_VERSION === 'v1.0.0', 'Parser version must be v1.0.0.');
+      return 'Engine/parser/schema v1.0.0';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Evidence reclassification is allowed through the POST router', function () {
@@ -211,6 +211,121 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         PFIS_RUNTIME_CONFIG_CACHE = previousConfigCache;
       }
       return 'AI-extracted account alias resolves its matching Config row and canonical friendly card label';
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'Explicit SBI account identity overrides conflicting legacy Rule account override', function () {
+      var previousConfigCache = PFIS_RUNTIME_CONFIG_CACHE;
+      try {
+        PFIS_RUNTIME_CONFIG_CACHE = [{
+          bank: 'SBI', accountType: 'Savings Account', accountCardSuffix: '',
+          merchantContains: '', account: 'SBI_SAVINGS', cardName: 'SBI Saving Account',
+          instrument: 'Net Banking', isInternal: false, priority: 3, textPattern: ''
+        }];
+        var parsed = {
+          bank: 'SBI', accountType: 'Savings Account', instrument: 'Auto Debit',
+          merchant: 'SIP Investment', accountAlias: ''
+        };
+        var config = pfisResolveConfig(parsed,
+          'SBI Ac SBI_SAVINGS debited for SI Fund Transfer of Rs.14,750.00 to Sarada Ac X9805.');
+        var resolvedAccount = pfisResolveCanonicalAccount({ accountOverride: 'AXIS_SAVINGS' }, config);
+        pfisPreflightAssert_(config.account === 'SBI_SAVINGS' && config.identityEvidence === true,
+          'Source account identity did not resolve to SBI_SAVINGS: ' + JSON.stringify(config));
+        pfisPreflightAssert_(resolvedAccount === 'SBI_SAVINGS',
+          'Legacy Rule override incorrectly won over the explicit SBI account identity.');
+        return 'Explicit SBI_SAVINGS source identity wins over stale AXIS_SAVINGS Rule override';
+      } finally {
+        PFIS_RUNTIME_CONFIG_CACHE = previousConfigCache;
+      }
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'Date-only cross-channel matching uses amount, day, account and beneficiary', function () {
+      var previousConfigCache = PFIS_RUNTIME_CONFIG_CACHE;
+      try {
+        PFIS_RUNTIME_CONFIG_CACHE = [{
+          bank: 'SBI', accountType: 'Savings Account', accountCardSuffix: '',
+          merchantContains: '', account: 'SBI_SAVINGS', cardName: 'SBI Saving Account',
+          instrument: 'Net Banking', isInternal: false, priority: 3, textPattern: ''
+        }];
+        var day = pfisCreateIndiaDate(2026, 11, 1, 12, 0, 0);
+        var existing = {
+          transactionId: '202611-002', amount: -15250, bank: 'SBI',
+          accountType: 'Savings Account', account: 'AXIS_SAVINGS',
+          merchant: 'SIP Investment', counterparty: 'Susil', refNo: 807746862
+        };
+        var existingSource = {
+          sourceType: 'EMAIL', datePrecision: 'DATE_ONLY', extractedDate: day,
+          accountIdentifier: '', extractedReferenceNo: 807746862,
+          rawBody: 'SBI Ac SBI_SAVINGS debited for SI Fund Transfer of Rs.15250.00 to Susil Ac X4288.'
+        };
+        var incoming = {
+          amount: -15250, bank: 'SBI', accountType: 'Savings Account',
+          account: 'SBI_SAVINGS', merchant: 'SUSIL KUMARPAN',
+          counterparty: 'SUSIL KUMARPAN', refNo: '', datetime: day,
+          datePrecision: 'DATE_ONLY',
+          rawEvidence: 'Your A/C SBI_SAVINGS Debited INR 15250.00 on 01/11/26 -Transferred to Mr. SUSIL KUMARPAN.'
+        };
+        var matched = pfisAssessCrossCandidate(existing, existingSource, incoming, incoming.merchant);
+        pfisPreflightAssert_(matched.kind === 'MATCH' && matched.dateOnlyMatch === true,
+          'Strong date-only match did not resolve: ' + JSON.stringify(matched));
+        var differentParty = Object.assign({}, incoming, {
+          merchant: 'DIFFERENT BENEFICIARY', counterparty: 'DIFFERENT BENEFICIARY'
+        });
+        var notMatched = pfisAssessCrossCandidate(existing, existingSource, differentParty, differentParty.merchant);
+        pfisPreflightAssert_(notMatched.kind === 'NO_MATCH',
+          'Amount/date alone incorrectly matched a different beneficiary: ' + JSON.stringify(notMatched));
+        var wrongAccount = Object.assign({}, incoming, {
+          rawEvidence: 'Your A/C AXIS_SAVINGS Debited INR 15250.00 on 01/11/26 -Transferred to Mr. SUSIL KUMARPAN.'
+        });
+        var conflict = pfisAssessCrossCandidate(existing, existingSource, wrongAccount, wrongAccount.merchant);
+        pfisPreflightAssert_(conflict.kind === 'CONFLICT',
+          'A conflicting explicit account identity was not blocked: ' + JSON.stringify(conflict));
+        return 'Same-day same-amount beneficiary/account evidence links; different beneficiary does not; explicit account conflict is blocked';
+      } finally {
+        PFIS_RUNTIME_CONFIG_CACHE = previousConfigCache;
+      }
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'Same-channel date-only duplicate is suppressed without a second ledger transaction', function () {
+      var previousConfigCache = PFIS_RUNTIME_CONFIG_CACHE;
+      var previousTxCache = PFIS_RUNTIME_TRANSACTION_CACHE;
+      var previousSourceCache = PFIS_RUNTIME_SOURCE_CACHE;
+      try {
+        PFIS_RUNTIME_CONFIG_CACHE = [{
+          bank: 'SBI', accountType: 'Savings Account', accountCardSuffix: '',
+          merchantContains: '', account: 'SBI_SAVINGS', cardName: 'SBI Saving Account',
+          instrument: 'Net Banking', isInternal: false, priority: 3, textPattern: ''
+        }];
+        var day = pfisCreateIndiaDate(2026, 11, 1, 12, 0, 0);
+        var existing = {
+          transactionId: '202611-001', dateTime: day, amount: -14750,
+          bank: 'SBI', accountType: 'Savings Account', account: 'AXIS_SAVINGS',
+          merchant: 'SIP Investment', counterparty: 'Sarada', refNo: 807793332,
+          validationFlag: 'VALID'
+        };
+        var source = {
+          sourceId: 'SRC-202611-001', sourceType: 'SMS', datePrecision: 'DATE_ONLY',
+          extractedDate: day, extractedReferenceNo: 807793332,
+          accountIdentifier: '', rawBody: 'SBI Ac SBI_SAVINGS debited for SI Fund Transfer to Sarada Ac X9805.'
+        };
+        PFIS_RUNTIME_TRANSACTION_CACHE = [existing];
+        PFIS_RUNTIME_SOURCE_CACHE = { byTransaction: { '202611-001': [source] } };
+        var incoming = {
+          amount: -14750, bank: 'SBI', accountType: 'Savings Account',
+          account: 'SBI_SAVINGS', merchant: 'SARADA KUMARI A',
+          counterparty: 'SARADA KUMARI A', refNo: '',
+          datetime: day, datePrecision: 'DATE_ONLY',
+          accountIdentifier: '', rawEvidence: 'Your A/C SBI_SAVINGS Debited INR 14750 on 01/11/26 -Transferred to Mrs. SARADA KUMARI A.'
+        };
+        var duplicate = pfisFindSameChannelDuplicate(incoming, 'SMS', incoming.merchant);
+        pfisPreflightAssert_(duplicate && duplicate.transactionId === '202611-001' &&
+          duplicate.dateOnlyMatch === true && duplicate.exactDateTime === false,
+          'Same-channel date-only duplicate was not detected safely: ' + JSON.stringify(duplicate));
+        return 'Different SMS body wording and missing clock still link to the canonical event when amount/day/account/beneficiary agree';
+      } finally {
+        PFIS_RUNTIME_CONFIG_CACHE = previousConfigCache;
+        PFIS_RUNTIME_TRANSACTION_CACHE = previousTxCache;
+        PFIS_RUNTIME_SOURCE_CACHE = previousSourceCache;
+      }
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Parser still rejects shifted or unexplained extra fields', function () {

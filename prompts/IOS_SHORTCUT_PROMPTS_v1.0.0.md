@@ -9,7 +9,7 @@ These prompts are used by AI/Text actions inside the owner's iOS Shortcut. They 
 - Apps Script validates and reconciles the result; AI must not bypass backend rules.
 - Category classification is run only when the backend returns <code>nextAction=CLASSIFY_CATEGORY</code>.
 - An automatic Miscellaneous fallback is traceable and can be sent for later classification.
-- Purpose/User Notes is optional. Never ask <code>ASK_PURPOSE</code>.
+- Purpose/User Notes is collected only when the backend returns <code>nextAction=ASK_PURPOSE</code>. Never invent Purpose from the merchant name or bank message.
 - Do not expose <code>WEB_APP_SECRET</code> or full account/card numbers to the model.
 
 ---
@@ -170,15 +170,19 @@ Example update; synthetic values only:
 }
 ~~~
 
-## Purpose policy — do not prompt
+## Backend-directed Purpose collection
 
-- Blank Purpose/User Notes is a valid canonical transaction.
-- Blank Purpose does not block ingestion, review acknowledgement or receipt display.
-- The normal Shortcut flow does not ask <code>ASK_PURPOSE</code>.
-- A trusted backend rule may fill Purpose when Auto Purpose is enabled or a supported Purpose Trigger is satisfied using the transaction date.
-- Recurrence alone is not permission to infer Purpose.
-- Do not fill Purpose based on merchant name alone.
-- Optional Gemini Purpose suggestions are a separate human-approved workbook workflow.
+- Do not ask for Purpose during extraction. Wait for the backend's <code>nextAction</code>.
+- When the backend returns <code>ASK_PURPOSE</code>, ask the user for a short factual description of what the expense was for.
+- This applies to an expense with no specific active Rule ID match: an unknown/unmatched merchant, or a recognised merchant whose transaction only matched a broad merchant fallback because its transaction-specific rule did not match.
+- A direct rule match suppresses the prompt. A trusted rule-generated Purpose also suppresses it.
+- There is no amount threshold. Do not infer a purpose from the amount or merchant name.
+- If the merchant is recognised but this appears to be a different type of transaction, ask the user to describe that different transaction explicitly.
+- Submit only the user's answer through one <code>action=update</code> request containing <code>transactionId</code>, <code>purpose</code>, <code>actor</code> and a specific <code>reason</code>.
+- Do not send <code>isReviewNeeded</code> to represent a Purpose request. Purpose collection and integrity review are separate.
+- A blank answer may be skipped; do not fabricate a purpose. The transaction remains in the ledger with blank User Notes.
+- A trusted backend rule may fill Purpose when Auto Purpose is enabled or a supported Purpose Trigger is satisfied using the transaction date. Recurrence alone is not permission to infer Purpose.
+- Optional Gemini Purpose suggestions remain a separate human-approved workbook workflow.
 
 ## Privacy
 

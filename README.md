@@ -32,11 +32,11 @@ A personal-finance workflow built with Google Apps Script, Google Sheets, iOS Sh
 | 8 | [Config Contract](docs/CONFIG.md) | Apps Script Config A:J versus reporting baseline matrix L:P |
 | 9 | [Financial Accounting Contract](docs/FINANCIAL_ACCOUNTING_CONTRACT.md) | Cash flow, consumption, card settlements and cumulative surplus |
 | 10 | [Dashboard Specification](docs/DASHBOARD_SPEC.md) | Four Account Balances & Liquidity cards and dashboard placement |
-| 7 | [Gemini Card-Payment Rules Prompt](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Configure future credit-card settlement Rules and Config rows |
-| 8 | [Gemini Legacy Duplicate Mapping Prompt](prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) | Add verified survivor IDs to already-confirmed duplicate rows before preview-first migration |
-| 9 | [Gemini Daily Transaction Verifier](prompts/GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md) | Recurring Gmail + PFIS checks with conservative, auditable updates |
-| 10 | [PFIS Help & Prompt Center](docs/PFIS_HELP_AND_PROMPT_CENTER_v1.0.0.md) | Beginner guide: what inputs to provide and copy-ready operations prompts |
-| 11 | [Gemini Help Sheet Setup Prompt](prompts/GEMINI_HELP_SHEET_SETUP_v1.0.0.md) | Create the in-workbook PFIS Help & Prompts tab |
+| 11 | [Gemini Card-Payment Rules Prompt](prompts/GEMINI_CARD_PAYMENT_RULES_v1.0.0.md) | Configure future credit-card settlement Rules and Config rows |
+| 12 | [Gemini Legacy Duplicate Mapping Prompt](prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) | Add verified survivor IDs to already-confirmed duplicate rows before preview-first migration |
+| 13 | [Gemini Daily Transaction Verifier](prompts/GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md) | Recurring Gmail + PFIS checks with conservative, auditable updates |
+| 14 | [PFIS Help & Prompt Center](docs/PFIS_HELP_AND_PROMPT_CENTER_v1.0.0.md) | Beginner guide: what inputs to provide and copy-ready operations prompts |
+| 15 | [Gemini Help Sheet Setup Prompt](prompts/GEMINI_HELP_SHEET_SETUP_v1.0.0.md) | Create the in-workbook PFIS Help & Prompts tab |
 | Optional | [Gemini Purpose Enrichment](docs/GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) | Daily evidence-backed Purpose suggestions with human approval |
 | Optional | [Prompt Catalogue](prompts/README.md) | Index of reusable prompts |
 

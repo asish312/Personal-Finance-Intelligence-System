@@ -567,7 +567,7 @@ function pfisIngestSource(params, requestId, options) {
   pfisNormalizeSourceDatePrecision(parsed, evidenceText, params);
   const ruleResult = pfisPerfMeasure('rules_evaluation', function () { return pfisEvaluateRules(parsed, evidenceText); });
   const configResult = pfisPerfMeasure('config_resolution', function () { return pfisResolveConfig(parsed, evidenceText); });
-  parsed.account = pfisCleanText(ruleResult.accountOverride || configResult.account);
+  parsed.account = pfisResolveCanonicalAccount(ruleResult, configResult);
   parsed.cardName = pfisCleanText(ruleResult.cardNameOverride || configResult.cardName);
   parsed.resolvedType = pfisNormalizeType(ruleResult.typeOverride || parsed.type);
   const canonicalMerchant = pfisCleanText(ruleResult.merchantOverride || parsed.merchant);
@@ -780,7 +780,7 @@ function pfisBuildTransaction(parsed, params, sourceType, transactionId, sourceI
     type: type,
     // Never overwrite a source-provided instrument with a Config/Rule default.
     instrument: pfisCleanText(parsed.instrument || ruleResult.instrumentOverride || configResult.instrument),
-    account: pfisCleanText(ruleResult.accountOverride || configResult.account),
+    account: pfisResolveCanonicalAccount(ruleResult, configResult),
     cardName: pfisCleanText(ruleResult.cardNameOverride || configResult.cardName),
     isRecurring: !!ruleResult.isRecurring,
     isInternalTransfer: !!configResult.isInternal && (type === 'transfer' || type === 'card_payment'),
@@ -1239,15 +1239,19 @@ function pfisAreCounterpartyVariants(a, b) {
  * only when they are explicitly present in source text; otherwise the supplied
  * canonical account is retained as fallback evidence.
  */
-function pfisGetEvidenceAccountIdentity(rawEvidence, fallbackAccount) {
-  const rawKey = pfisNormalizeMerchant(rawEvidence);
-  const explicit = pfisUnique(pfisGetConfigRows().map(function (cfg) {
+function pfisGetEvidenceAccountIdentity(rawEvidence, fallbackAccount, explicitAlias) {
+  const rawCompact = pfisString(rawEvidence).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const aliasCompact = pfisCleanText(explicitAlias).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const configs = pfisGetConfigRows();
+  const matches = pfisUnique(configs.filter(function (cfg) {
     const account = pfisCleanText(cfg.account);
-    const accountKey = pfisNormalizeMerchant(account);
-    return accountKey && rawKey && rawKey.indexOf(accountKey) >= 0 ? account : '';
-  }).filter(Boolean));
-  if (explicit.length > 1) return { value: '', explicit: false, ambiguous: true };
-  if (explicit.length === 1) return { value: explicit[0], explicit: true, ambiguous: false };
+    const accountCompact = account.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!accountCompact) return false;
+    return (aliasCompact && aliasCompact === accountCompact) ||
+      (rawCompact && rawCompact.indexOf(accountCompact) >= 0);
+  }).map(function (cfg) { return pfisCleanText(cfg.account); }));
+  if (matches.length > 1) return { value: '', explicit: false, ambiguous: true };
+  if (matches.length === 1) return { value: matches[0], explicit: true, ambiguous: false };
   return { value: pfisCleanText(fallbackAccount), explicit: false, ambiguous: false };
 }
 
@@ -1574,6 +1578,12 @@ function pfisFindSameChannelDuplicate(incoming, sourceType, merchant) {
   if (selected) {
     return Object.assign({}, selected.selected, {
       relatedDuplicateTransactionIds: selected.relatedDuplicateTransactionIds
+    });
+  }
+  if (candidates.some(function (candidate) { return candidate.dateOnlyMatch; })) {
+    return Object.assign({}, candidates[0], {
+      exactDateTime: false, dateOnlyMatch: false, ambiguousDateOnlyMatch: true,
+      reason: 'ambiguous_date_only_same_channel_match'
     });
   }
   return candidates[0];
@@ -2818,7 +2828,7 @@ function pfisReclassifyTransactionFromEvidence(params, requestId) {
       transactionId: transactionId, requestId: requestId };
   }
   if (pfisString(current.account) && pfisString(configResult.account) &&
-      pfisString(current.account) !== pfisString(configResult.account)) {
+      pfisString(current.account) !== pfisString(configResult.account) && !configResult.identityEvidence) {
     return { success: false, status: 'UPDATE_REJECTED', error: 'CONFIG_ACCOUNT_MISMATCH',
       message: 'The configured account differs from the existing canonical account. Review the mapping manually; no fields were changed.',
       transactionId: transactionId, currentAccount: current.account,
@@ -2829,7 +2839,7 @@ function pfisReclassifyTransactionFromEvidence(params, requestId) {
   next.category = category;
   next.type = type;
   next.isInternalTransfer = !!configResult.isInternal && ['transfer', 'card_payment'].indexOf(type) >= 0;
-  if (!pfisString(next.account)) next.account = pfisString(configResult.account);
+  if (configResult.identityEvidence || !pfisString(next.account)) next.account = pfisString(configResult.account);
   if (!pfisString(next.cardName)) next.cardName = pfisString(configResult.cardName);
   if (!pfisString(next.instrument)) next.instrument = pfisString(configResult.instrument);
   next.ruleApplied = pfisSetCategoryFallbackMarker_(ruleResult.ruleApplied, false);
@@ -3776,9 +3786,16 @@ function pfisResolveConfig(parsed, rawEvidence) {
   const cardContextCompact = cardContextKey.replace(/\s+/g, '');
   const explicitAliasCompact = pfisCleanText(parsed.accountAlias).toLowerCase().replace(/[^a-z0-9]/g, '');
   const configs = pfisGetConfigRows();
+  const explicitAccountIdentity = pfisGetEvidenceAccountIdentity(rawEvidence, '', parsed.accountAlias);
+  if (explicitAccountIdentity.ambiguous) {
+    return { account: '', cardName: '', instrument: defaults.instrument,
+      isInternal: false, ambiguous: true, unresolved: false };
+  }
 
   const candidates = [];
   configs.forEach(function (cfg, i) {
+    if (explicitAccountIdentity.explicit &&
+        pfisNormalizeMerchant(cfg.account) !== pfisNormalizeMerchant(explicitAccountIdentity.value)) return;
     if (!pfisString(cfg.bank) && !pfisString(cfg.accountType) && !pfisString(cfg.accountCardSuffix) && !pfisString(cfg.merchantContains) && !pfisString(cfg.textPattern)) return;
     if (pfisString(cfg.bank) && pfisNormalizeBank(cfg.bank) !== bankKey) return;
     const cfgType = pfisNormalizeAccountType(cfg.accountType);
@@ -3794,7 +3811,8 @@ function pfisResolveConfig(parsed, rawEvidence) {
     const textPatternMatched = !!textPattern && ((!!rawKey && rawKey.indexOf(textPattern) >= 0) ||
       (!!textPatternCompact && !!explicitAliasCompact && explicitAliasCompact.indexOf(textPatternCompact) >= 0));
     let specificity = (pfisString(cfg.bank) ? 1 : 0) + (cfgType ? 1 : 0) + (cfgMerchant ? 2 : 0);
-    let identityEvidence = false;
+    let identityEvidence = !!explicitAccountIdentity.explicit;
+    if (identityEvidence) specificity += 10;
 
     if (numericSuffix) {
       const cfgId = pfisNormalizeConfiguredSuffix(configuredSuffixRaw);
@@ -3864,6 +3882,14 @@ function pfisResolveConfig(parsed, rawEvidence) {
     identityEvidence: !!best.identityEvidence
   };
 }
+
+function pfisResolveCanonicalAccount(ruleResult, configResult) {
+  const configuredAccount = pfisCleanText(configResult && configResult.account);
+  const ruleAccount = pfisCleanText(ruleResult && ruleResult.accountOverride);
+  if (configuredAccount && configResult && configResult.identityEvidence) return configuredAccount;
+  return ruleAccount || configuredAccount;
+}
+
 function pfisGetCategoryList() {
   if (PFIS_RUNTIME_CATEGORY_CACHE !== null) return PFIS_RUNTIME_CATEGORY_CACHE.slice();
   const sheet = pfisGetRequiredSheet(PFIS_SHEETS.categories);

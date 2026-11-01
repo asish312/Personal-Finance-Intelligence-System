@@ -5323,15 +5323,15 @@ function pfisBuildUpdateResponse(transaction, requestId, status, changedFields) 
 /**
  * Purpose collection is a user interaction, not an integrity-review flag.
  *
- * Ask only for expense transactions that have no meaningful Purpose and whose
- * merchant/transaction did not resolve to one specific active rule:
- * - blank/default-only Rule Applied: no specific rule matched;
- * - CATEGORY_FALLBACK: a known merchant matched only a broad merchant category
- *   fallback (for example, the merchant was recognised but the amount-specific
- *   transaction rule did not match).
+ * Ask for every expense that has no meaningful Purpose. A direct merchant/rule
+ * match recognises the merchant but does not prove what was purchased or whether
+ * this was a usual or different transaction. The prompt reason distinguishes:
+ * - no specific active rule match;
+ * - broad merchant/category fallback after a transaction-specific rule miss;
+ * - a recognised direct rule match with no trusted Purpose.
  *
- * A direct Rule ID match is treated as recognised. A trusted rule Purpose also
- * suppresses the prompt. No amount threshold is used.
+ * Only an explicitly trusted rule-generated Purpose suppresses the prompt.
+ * No amount threshold is used.
  */
 function pfisHasSpecificRuleMatch_(ruleApplied) {
   const marker = pfisString(ruleApplied).toUpperCase();
@@ -5357,9 +5357,11 @@ function pfisGetEnrichmentState(category, notes, categoryList, merchant, ruleApp
     .split('|').some(function (part) {
       return pfisString(part).toUpperCase().indexOf('CATEGORY_FALLBACK:') === 0;
     });
-  const requiresPurpose = isExpense && !hasMeaningfulPurpose && !hasSpecificRuleMatch;
+  const requiresPurpose = isExpense && !hasMeaningfulPurpose;
   const purposePromptReason = !requiresPurpose ? '' :
-    (isMerchantRuleFallback ? 'MERCHANT_RULE_VARIANCE' : 'UNMATCHED_MERCHANT_OR_TRANSACTION');
+    (isMerchantRuleFallback
+      ? 'MERCHANT_RULE_VARIANCE'
+      : (hasSpecificRuleMatch ? 'KNOWN_MERCHANT_TRANSACTION_CONTEXT' : 'UNMATCHED_MERCHANT_OR_TRANSACTION'));
 
   return {
     requiresCategoryClassification: !categoryIsActive || isDefaultCategoryFallback,

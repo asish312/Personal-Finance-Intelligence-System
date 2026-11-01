@@ -24,7 +24,7 @@ This document describes the mobile capture client. It is a build/maintenance gui
 11. If the backend returns <code>ASK_PURPOSE</code>, ask the user for a short factual purpose. Do not ask an AI model to invent it. Save the user's answer with one <code>action=update</code> request.
 12. Show the final backend receipt or review/error message.
 
-Purpose collection is backend-directed: ask for every expense whose User Notes/Purpose is still blank, including unmatched merchants, merchant-only fallback matches and recognised merchants with no trusted Purpose (the user may have made a different purchase). A direct rule match alone does not suppress the question; only an explicitly trusted rule-generated Purpose does. There is no amount threshold. Do not ask for income, investment, transfer or card-bill settlement entries. Category classification and integrity review take priority over purpose collection.
+Purpose collection is backend-directed: ask for every expense whose User Notes/Purpose is still blank, including unmatched merchants, merchant-only fallback matches and recognised merchants with no trusted Purpose (the user may have made a different purchase). A direct rule match alone does not suppress the question; only an explicitly trusted rule-generated Purpose does. There is no amount threshold. Do not ask for income, investment, transfer or card-bill settlement entries. Category classification and serious source/duplicate/type conflicts take priority. A separate account-mapping review may remain open while the user supplies Purpose; saving Purpose must not clear that review.
 
 ## Ten-field transaction contract
 

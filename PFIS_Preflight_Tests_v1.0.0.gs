@@ -328,6 +328,23 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       }
     }, startedAt);
 
+    pfisPreflightRunCase_(report, 'Multiple distinct same-channel source alerts can verify a uniquely reconciled event', function () {
+      var previousSourceCache = PFIS_RUNTIME_SOURCE_CACHE;
+      try {
+        PFIS_RUNTIME_SOURCE_CACHE = { allByTransaction: { 'PFIS-VERIFY-SAME-CHANNEL': [
+          { sourceId: 'SRC-VERIFY-1', sourceHash: 'HASH-VERIFY-1', sourceType: 'SMS', parseStatus: 'ACCEPTED' },
+          { sourceId: 'SRC-VERIFY-2', sourceHash: 'HASH-VERIFY-2', sourceType: 'SMS', parseStatus: 'DUPLICATE_SUPPRESSED' }
+        ] } };
+        var result = pfisGetVerificationState('PFIS-VERIFY-SAME-CHANNEL', 'VALID');
+        pfisPreflightAssert_(result.status === 'VERIFIED' && result.sourceCount === 2 &&
+          result.sourceTypes.length === 1 && result.sourceTypes[0] === 'SMS',
+          'Independent same-channel source evidence did not verify: ' + JSON.stringify(result));
+        return 'Two distinct same-channel alert hashes verify a transaction after a strong date-only event match';
+      } finally {
+        PFIS_RUNTIME_SOURCE_CACHE = previousSourceCache;
+      }
+    }, startedAt);
+
     pfisPreflightRunCase_(report, 'Parser still rejects shifted or unexplained extra fields', function () {
       var malformed = '2026-10-18 10:16:36|-150.00|Axis||Savings Account|UPI|transfer|DEMO PERSON|DEMO PERSON|DEMO-UTR-0001|NA';
       pfisPreflightAssert_(pfisParseTxnString(malformed) === null, 'Parser guessed the meaning of a shifted 11-field payload.');

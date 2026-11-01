@@ -75,6 +75,16 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
     }
 
     // Pure logic tests do not access or mutate any spreadsheet.
+    pfisPreflightRunCase_(report, 'Required card-payment event matcher functions are present', function () {
+      pfisPreflightAssert_(typeof pfisFindCardPaymentEventMatch === 'function',
+        'pfisFindCardPaymentEventMatch is missing from the transaction engine.');
+      pfisPreflightAssert_(typeof pfisGetPaymentIssuerKey === 'function',
+        'pfisGetPaymentIssuerKey is missing from the transaction engine.');
+      pfisPreflightAssert_(typeof pfisLinkPaymentEventSource === 'function',
+        'pfisLinkPaymentEventSource is missing from the transaction engine.');
+      return 'Card-payment event matcher, issuer resolver and source-link handler are all defined';
+    }, startedAt);
+
     pfisPreflightRunCase_(report, 'PFIS release identifiers remain v1.0.0', function () {
       pfisPreflightAssert_(ENGINE_VERSION === 'v1.0.0', 'Engine version must be v1.0.0.');
       pfisPreflightAssert_(SCHEMA_VERSION === 'v1.0.0', 'Physical workbook schema must remain v1.0.0.');

@@ -5232,8 +5232,10 @@ function pfisBuildTransactionResponse(transaction, requestId, status, changedFie
     purposePromptReason: enrichment.purposePromptReason || '',
     purposeQuestion: enrichment.requiresPurpose
       ? (enrichment.purposePromptReason === 'MERCHANT_RULE_VARIANCE'
-        ? 'This merchant is recognised, but this transaction did not match a specific configured rule. What was this expense for?'
-        : 'This merchant or transaction is not covered by an active PFIS rule. What was this expense for?')
+        ? 'This merchant is recognised, but this transaction did not match its configured transaction-specific rule. Is this a different or unusual purchase? What was this expense for?'
+        : (enrichment.purposePromptReason === 'KNOWN_MERCHANT_TRANSACTION_CONTEXT'
+          ? 'This merchant is recognised, but we still need to know what you purchased. Was this a usual or different transaction? What was this expense for?'
+          : 'This merchant or transaction is not covered by an active PFIS rule. What was this expense for?'))
       : '',
     requiresCategoryClassification: enrichment.requiresCategoryClassification,
     isDefaultCategoryFallback: enrichment.isDefaultCategoryFallback

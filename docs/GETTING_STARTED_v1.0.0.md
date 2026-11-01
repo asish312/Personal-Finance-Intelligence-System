@@ -25,8 +25,11 @@ Gemini is not called by the transaction engine or iOS Shortcut.
 3. **Build the mobile capture:** read [iOS Shortcut Implementation](IOS_SHORTCUT_IMPLEMENTATION_v1.0.0.md).
 4. **Configure the AI actions:** copy only the required prompts from [iOS Shortcut Prompt Library](../prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md).
 5. **Prepare or repair the workbook:** read [Gemini Workbook Guide](GEMINI_WORKBOOK_GUIDE_v1.0.0.md) and use the [Gemini Spreadsheet Repair Prompt](../prompts/GEMINI_SPREADSHEET_REPAIR_v1.0.0.md).
-6. **Install the backend:** deploy the engine and run the preflight suite as described below.
-7. **Optional:** configure [Gemini Purpose Enrichment](GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) only when you want a separate, human-approved Purpose suggestion process.
+6. **Check accounting definitions:** read [Account Balances](ACCOUNT_BALANCES.md), [Config](CONFIG.md), [Financial Accounting Contract](FINANCIAL_ACCOUNTING_CONTRACT.md) and [Dashboard Spec](DASHBOARD_SPEC.md) before interpreting liquidity/cash-flow figures.
+7. **Operate and maintain:** use [Ledger Cleanup Operations](LEDGER_CLEANUP_OPERATIONS_v1.0.0.md), [Gemini Daily Verifier](../prompts/GEMINI_DAILY_TRANSACTION_VERIFIER_v1.0.0.md), and [Gemini Legacy Duplicate Mapping](../prompts/GEMINI_LEGACY_DUPLICATE_MAPPING_v1.0.0.md) only for their documented workflows.
+8. **Create the in-workbook Help tab:** use [Gemini Help Sheet Setup](../prompts/GEMINI_HELP_SHEET_SETUP_v1.0.0.md) if the workbook does not already contain it.
+9. **Install the backend:** deploy the engine and run the preflight suite as described below.
+10. **Optional:** configure [Gemini Purpose Enrichment](GEMINI_PURPOSE_ENRICHMENT_v1.0.0.md) only when you want a separate, human-approved Purpose suggestion process.
 
 ## Repository file map
 

@@ -279,7 +279,13 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         var conflict = pfisAssessCrossCandidate(existing, existingSource, wrongAccount, wrongAccount.merchant);
         pfisPreflightAssert_(conflict.kind === 'CONFLICT',
           'A conflicting explicit account identity was not blocked: ' + JSON.stringify(conflict));
-        return 'Same-day same-amount beneficiary/account evidence links; different beneficiary does not; explicit account conflict is blocked';
+        var noAccount = Object.assign({}, incoming, {
+          account: '', rawEvidence: 'SBI debit INR 15250 on 01/11/26 transferred to Mr. SUSIL KUMARPAN.'
+        });
+        var insufficientIdentity = pfisAssessCrossCandidate(existing, existingSource, noAccount, noAccount.merchant);
+        pfisPreflightAssert_(insufficientIdentity.kind === 'NO_MATCH',
+          'Date/amount/party alone matched without account identity: ' + JSON.stringify(insufficientIdentity));
+        return 'Same-day same-amount beneficiary/account evidence links; different beneficiary, conflicting account and missing account identity are blocked';
       } finally {
         PFIS_RUNTIME_CONFIG_CACHE = previousConfigCache;
       }

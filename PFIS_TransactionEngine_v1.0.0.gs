@@ -3526,7 +3526,7 @@ function pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, con
     ['accountType', pfisFormatAccountType(parsed.accountType)],
     ['instrument', pfisCleanText(parsed.instrument || ruleResult.instrumentOverride || configResult.instrument)],
     ['type', pfisNormalizeType(ruleResult.typeOverride || parsed.type)],
-    ['account', pfisCleanText(ruleResult.accountOverride || configResult.account)],
+    ['account', pfisResolveCanonicalAccount(ruleResult, configResult)],
     ['cardName', pfisCleanText(ruleResult.cardNameOverride || configResult.cardName)],
     ['category', resolvedCategory],
     ['userNotes', pfisGetTrustedPurposeFromRule(

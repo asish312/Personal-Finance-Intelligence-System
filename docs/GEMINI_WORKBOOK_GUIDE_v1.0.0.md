@@ -60,3 +60,17 @@ Ask Gemini to report:
 - Confirmation that the actual Google Sheets formulas were recalculated and inspected.
 
 Do not accept "completed" if Gemini only describes what it intends to do or relies on XLSX cached values.
+
+
+## Account balances and dashboard accounting contracts
+
+Before editing Config, inspect [Config Contract](CONFIG.md) and [Account Balances](ACCOUNT_BALANCES.md).
+
+- Config A:I (optional J) is consumed by Apps Script for account/card mapping.
+- Config L:P is a separate reporting matrix. It is not part of the Apps Script Config schema.
+- Axis Savings baseline: ₹11,204.00 at 2026-10-20; displayed net activity ₹57,462.05; displayed live position ₹68,666.05.
+- The uploaded workbook formula for O2 still subtracts ₹202.02 from the raw ledger sum (₹57,664.07). Do not remove or disguise this difference until the source/transaction causing it is identified. Do not replace it with another arbitrary plug.
+- Preserve the V10 definition: Income (V6) - Net Consumption (V7) - Investments (V8). Credit card bill settlements are displayed separately and must not be subtracted again when the underlying purchases have already been included in consumption.
+- Dashboard liquidity cards must remain formula-linked to Config!P2:P5 and Card Reconciliation Log!P2:P5. The credit-card card formula intentionally uses the first four snapshot rows only; do not include duplicate LIVE rows 6:9 as well.
+- Distinguish ledger-derived positions from bank-verified available balances. Negative ledger positions are not automatically verified overdrafts.
+- Verify all formulas in the live Google Sheet. Cached XLSX values and __xludf.DUMMYFUNCTION wrappers are not evidence that Google Sheets formulas are correct or incorrect.

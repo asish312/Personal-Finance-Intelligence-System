@@ -5,7 +5,7 @@ This specification describes the live Executive Dashboard structure checked in t
 ## Layout order
 
 1. Primary KPI summary: Dashboard!B5:O10.
-2. Account Balances & Liquidity: Dashboard!B12:O14.
+2. Account Balances & Liquidity section: Dashboard!B12:O15 (four cards occupy rows 12:14; row 15 is the spacer below the cards).
 3. Section A — Cash Flow: begins at Dashboard!B16 (the heading row is 16).
 
 The liquidity cards are positioned between the primary KPI row and Section A, so users see account-level liquidity and card obligations before the cash-flow charts.

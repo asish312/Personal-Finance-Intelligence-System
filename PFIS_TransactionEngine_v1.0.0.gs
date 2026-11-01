@@ -1038,11 +1038,15 @@ function pfisStoreParseFailure(sourceType, evidenceText, params, requestId, mess
     extractedAmount: '', extractedDate: '', datePrecision: '', accountIdentifier: pfisExtractAccountIdentifier(evidenceText),
     extractedMerchant: '', extractedReferenceNo: '', linkedTxnId: '', ingestedAt: new Date(),
     processingError: ignoredNonFinancial ? '' : message, archivedFlag: false,
-    notes: ignoredNonFinancial
-      ? 'Non-financial OTP/verification alert; no ledger transaction was created.'
-      : (pfisTruthy(params.isReviewNeeded)
-        ? 'Caller requested human review; parsing failed and no ledger transaction was created.'
-        : 'Parser output could not be validated.'),
+    notes: pfisBuildSourceNotes_({
+      phase: ignoredNonFinancial ? 'NON_FINANCIAL_IGNORED' : 'PARSE_FAILED',
+      message: ignoredNonFinancial
+        ? 'Non-financial OTP/verification alert; no ledger transaction was created.'
+        : (pfisTruthy(params.isReviewNeeded)
+          ? 'Caller requested human review; parsing failed and no ledger transaction was created.'
+          : 'Parser output could not be validated.'),
+      humanReviewRequested: pfisTruthy(params.isReviewNeeded)
+    }, null, params),
     requestId: requestId, batchId: pfisString(params.batchId)
   });
   if (ignoredNonFinancial) {
@@ -3936,7 +3940,8 @@ function pfisParseTxnString(raw) {
   const amount = pfisParseAmount(parts[1], false);
   const bank = pfisCleanText(parts[2]);
   const accountType = pfisCleanText(parts[3]);
-  const accountAlias = isLegacyTenField ? '' : pfisCleanText(parts[4]);
+  const accountAliasRaw = isLegacyTenField ? '' : pfisCleanText(parts[4]);
+  const accountAlias = /^(?:na|n\/a|unknown|none|null|notavailable|unavailable|-)$/i.test(accountAliasRaw) ? '' : accountAliasRaw;
   const instrument = pfisCleanText(parts[isLegacyTenField ? 4 : 5]);
   const type = pfisNormalizeType(parts[isLegacyTenField ? 5 : 6]);
   const merchant = pfisCleanText(parts[isLegacyTenField ? 6 : 7]);

@@ -163,6 +163,13 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       return 'All 12 fields mapped, including SBI_CASHBACK_CC and received-time provenance';
     }, startedAt);
 
+    pfisPreflightRunCase_(report, 'NA account alias remains blank and cannot influence Config resolution', function () {
+      var parsed = pfisParseTxnString('2026-10-31 10:42:13|-100.00|SBI Card|Credit Card|NA|Credit Card|expense|FROOTLEHFZ|FROOTLEHFZ|NA|NA|TRANSACTION_TIME');
+      pfisPreflightAssert_(!!parsed, 'A valid transaction with an unknown account alias was rejected.');
+      pfisPreflightAssert_(parsed.accountAlias === '', 'NA was retained as a literal account alias.');
+      return 'NA account_alias normalizes to blank rather than acting as an identity token';
+    }, startedAt);
+
     pfisPreflightRunCase_(report, 'Received timestamp supplies a disclosed clock fallback without changing transaction date', function () {
       var parsed = pfisParseTxnString('2026-10-31 10:42:13|-37800.00|SBI Card|Credit Card|SBI_CASHBACK_CC|Credit Card|expense|FROOTLEHFZ|FROOTLEHFZ|NA|NA|RECEIVED_TIME_FALLBACK');
       var raw = 'Rs.37,800 spent on your SBI_CASHBACK_CC at FROOTLEHFZ on 31/10/26.';

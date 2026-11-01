@@ -2417,6 +2417,9 @@ function PFIS_PREVIEW_202611_DUPLICATE_RECONCILIATION() {
       duplicateSourceIds: duplicateSources.map(function (source) { return source.sourceId; }),
       survivorSourceIds: survivorSources.map(function (source) { return source.sourceId; }),
       matchedAccount: duplicateIdentity[0],
+      survivorAccountIdentity: survivorIdentity[0],
+      survivorCurrentAccount: survivor.account,
+      survivorAccountNeedsCorrection: pfisNormalizeMerchant(survivor.account) !== pfisNormalizeMerchant(survivorIdentity[0]),
       duplicateReference: duplicateRefs.join(','),
       survivorReference: survivorRefs.join(',')
     });
@@ -2451,6 +2454,31 @@ function PFIS_APPLY_202611_DUPLICATE_RECONCILIATION() {
   }
   const completed = [];
   const actor = 'PFIS_ADMIN_RECONCILIATION';
+  const survivorRepairs = [];
+  const survivorsToCheck = pfisUnique(preview.mappings.map(function (mapping) { return mapping.survivorId; }));
+  for (let i = 0; i < survivorsToCheck.length; i++) {
+    const survivorId = survivorsToCheck[i];
+    const evidence = preview.mappings.find(function (mapping) {
+      return mapping.survivorId === survivorId;
+    });
+    if (evidence && evidence.survivorAccountNeedsCorrection) {
+      const requestId = 'PFIS-ACCOUNT-REPAIR-' + survivorId;
+      const repair = pfisReclassifyTransactionFromEvidence({
+        transactionId: survivorId,
+        reason: 'Correct account from explicit SBI source identity',
+        actor: actor
+      }, requestId);
+      if (!repair || repair.success !== true) {
+        return {
+          success: false, status: 'ACCOUNT_REPAIR_BLOCKED',
+          completed: [], failed: { transactionId: survivorId, result: repair },
+          message: 'No duplicate rows were archived. Correct the account mapping issue before retrying.'
+        };
+      }
+      survivorRepairs.push({ transactionId: survivorId, status: repair.status,
+        correctedAccount: 'SBI_SAVINGS' });
+    }
+  }
   for (let i = 0; i < preview.mappings.length; i++) {
     const mapping = preview.mappings[i];
     if (mapping.status === 'ALREADY_RECONCILED') {
@@ -2496,8 +2524,8 @@ function PFIS_APPLY_202611_DUPLICATE_RECONCILIATION() {
   });
   return {
     success: true, status: 'RECONCILIATION_APPLIED',
-    completed: completed, verifications: verifications,
-    note: 'Source evidence was relinked and duplicate ledger rows were moved to Rejected & Archive Log. No financial facts were altered on surviving rows.'
+    completed: completed, survivorRepairs: survivorRepairs, verifications: verifications,
+    note: 'Source evidence was relinked and duplicate ledger rows were moved to Rejected & Archive Log. Surviving account classifications were corrected from explicit source evidence; financial amounts, transaction dates and references were not altered.'
   };
 }
 

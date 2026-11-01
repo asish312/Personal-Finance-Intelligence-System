@@ -1402,8 +1402,11 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
   const existingType = pfisNormalizeAccountType(existing.accountType);
   const incomingType = pfisNormalizeAccountType(incoming.accountType);
   const accountTypeConflict = !!existingType && !!incomingType && existingType !== incomingType;
-  const existingAccountIdentity = pfisGetEvidenceAccountIdentity(existingSource.rawBody, existing.account);
-  const incomingAccountIdentity = pfisGetEvidenceAccountIdentity(incoming.rawEvidence, incoming.account);
+  const existingSourceMeta = pfisParseProcessingMeta(existingSource.notes) || {};
+  const existingAccountIdentity = pfisGetEvidenceAccountIdentity(
+    existingSource.rawBody, existing.account, existingSourceMeta.accountAlias);
+  const incomingAccountIdentity = pfisGetEvidenceAccountIdentity(
+    incoming.rawEvidence, incoming.account, incoming.accountAlias);
   const accountIdentityConflict = !!existingAccountIdentity.value && !!incomingAccountIdentity.value &&
     pfisNormalizeMerchant(existingAccountIdentity.value) !== pfisNormalizeMerchant(incomingAccountIdentity.value);
   const accountIdentityAmbiguous = existingAccountIdentity.ambiguous || incomingAccountIdentity.ambiguous;
@@ -1418,8 +1421,9 @@ function pfisAssessCrossCandidate(existing, existingSource, incoming, incomingMe
     if (accountTypeConflict) return { kind: 'CONFLICT', reason: 'account_type_conflict' };
     if (accountIdentityAmbiguous) return { kind: 'CONFLICT', reason: 'account_identity_ambiguous' };
     if (accountIdentityConflict) return { kind: 'CONFLICT', reason: 'account_identity_conflict' };
-    if (!existingAccountIdentity.value || !incomingAccountIdentity.value) {
-      return { kind: 'NO_MATCH', reason: 'date_only_account_identity_unavailable' };
+    if (!existingAccountIdentity.value || !incomingAccountIdentity.value ||
+        !existingAccountIdentity.explicit || !incomingAccountIdentity.explicit) {
+      return { kind: 'NO_MATCH', reason: 'date_only_explicit_account_identity_unavailable' };
     }
     return {
       kind: 'MATCH',
@@ -1516,10 +1520,14 @@ function pfisFindSameChannelDuplicate(incoming, sourceType, merchant) {
       const hasPreciseTimes = pfisIsPrecision(source.datePrecision) && pfisIsPrecision(incoming.datePrecision);
       if (!hasPreciseTimes) {
         if (!sameDay || !sameAmount || !sameBank) return;
-        const sourceAccountIdentity = pfisGetEvidenceAccountIdentity(source.rawBody, existing.account);
-        const incomingAccountIdentity = pfisGetEvidenceAccountIdentity(incoming.rawEvidence, incoming.account);
+        const sourceMeta = pfisParseProcessingMeta(source.notes) || {};
+        const sourceAccountIdentity = pfisGetEvidenceAccountIdentity(
+          source.rawBody, existing.account, sourceMeta.accountAlias);
+        const incomingAccountIdentity = pfisGetEvidenceAccountIdentity(
+          incoming.rawEvidence, incoming.account, incoming.accountAlias);
         if (sourceAccountIdentity.ambiguous || incomingAccountIdentity.ambiguous) return;
         if (!sourceAccountIdentity.value || !incomingAccountIdentity.value ||
+            !sourceAccountIdentity.explicit || !incomingAccountIdentity.explicit ||
             pfisNormalizeMerchant(sourceAccountIdentity.value) !== pfisNormalizeMerchant(incomingAccountIdentity.value)) return;
         dateOnlyMatch = true;
         return;

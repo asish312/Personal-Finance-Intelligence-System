@@ -587,7 +587,7 @@ The visuals below are illustrative mockups, not live workbook charts or a claim 
 
 The current Dashboard_Calc contract is **Net Cash Flow = Income (V6) − Net Consumption (V7) − Investments (V8)**. Credit-card bill payments are reported separately in V9 and are not subtracted again when the original card purchases are already included in consumption. The uploaded workbook shows current-period net cash flow of +₹6,995.61 and a cumulative monthly operating surplus of ₹1,71,360.36 (₹1,71,360 rounded to whole rupees). See [Financial Accounting Contract](docs/FINANCIAL_ACCOUNTING_CONTRACT.md).
 
-The Executive Dashboard's Account Balances & Liquidity section is Dashboard!B12:O14, between the primary KPI summary and Section A cash-flow charts. See [Dashboard Specification](docs/DASHBOARD_SPEC.md).
+The Executive Dashboard's Account Balances & Liquidity section is Dashboard!B12:O15 (cards occupy rows 12:14; row 15 is a spacer), between the primary KPI summary and Section A cash-flow charts. See [Dashboard Specification](docs/DASHBOARD_SPEC.md).
 
 <p align="center">
   <a href="https://github.com/asish312/Personal-Finance-Intelligence-System/blob/main/docs/images/pfis-demo-financial-performance.svg"><img src="https://raw.githubusercontent.com/asish312/Personal-Finance-Intelligence-System/main/docs/images/pfis-demo-financial-performance.svg" alt="Illustrative PFIS cash flow, allocation and savings rate charts" width="100%"/></a>

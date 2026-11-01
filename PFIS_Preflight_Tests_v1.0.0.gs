@@ -424,8 +424,9 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       }, state) === 'ASK_PURPOSE', 'A broad merchant fallback must ask what this different transaction was for.');
       var exactRuleState = pfisGetEnrichmentState('Food & Dining', '', ['Food & Dining'], 'Test Merchant',
         'PR-TEST-001', 'expense');
-      pfisPreflightAssert_(exactRuleState.requiresPurpose === false,
-        'An exact active rule match must not ask for Purpose when no trusted rule text is configured.');
+      pfisPreflightAssert_(exactRuleState.requiresPurpose === true &&
+        exactRuleState.purposePromptReason === 'KNOWN_MERCHANT_TRANSACTION_CONTEXT',
+        'A known merchant with no trusted Purpose must ask whether this is a usual or different transaction.');
       var unmatchedExpenseState = pfisGetEnrichmentState('Shopping', '', ['Shopping'], 'New Merchant',
         '', 'expense');
       pfisPreflightAssert_(unmatchedExpenseState.requiresPurpose === true,

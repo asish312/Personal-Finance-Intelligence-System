@@ -21,15 +21,16 @@ A Section
 B Task
 C When to Use
 D Information to Provide
-E Copy-Ready Prompt
-F Safety Rule / Expected Result
+E Copy-Ready Prompt Template
+F Example Prompt (Copy Directly)
+G Safety Rule / Expected Result
 
 Make it mobile-readable:
 - Freeze row 1.
 - Turn on a filter for the header row.
 - Wrap all text.
 - Use a readable, consistent style.
-- Give columns practical widths: A 130px, B 180px, C 220px, D 260px, E 520px, F 300px.
+- Give columns practical widths: A 130px, B 180px, C 220px, D 260px, E 460px, F 460px, G 300px.
 - Use alternating row shading if available.
 - Keep one task per row.
 - Put a short "START HERE" instruction above or immediately below the header without breaking the filter table.

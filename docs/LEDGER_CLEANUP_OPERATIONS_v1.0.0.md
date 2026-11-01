@@ -72,6 +72,47 @@ For each eligible row the function:
 
 It is idempotent for the same archive decision and refuses conflicting archive IDs. Re-run the preview afterward; there should be no eligible rows left except those that remain blocked for human review. Do not apply the function if the preview contains an incorrect survivor.
 
+## 4. November 2026 date-only duplicate reconciliation
+
+The supplied 1-Nov-2026 evidence shows two separate payments, not five independent transactions:
+
+| Canonical survivor | Duplicate row(s) | Evidence |
+|---|---|---|
+| 202611-001 | 202611-003 | Both are SBI savings debits of ₹14,750 on 1-Nov-2026 to Sarada. The original YONO SMS for 001 includes reference 807793332; the second SBI notification has a different wording and no clock/reference. |
+| 202611-002 | 202611-004, 202611-005 | All are SBI savings debits of ₹15,250 on 1-Nov-2026 to Susil. The original YONO email for 002 includes reference 807746862; 004/005 are alternate SBI email/SMS templates without a clock/reference. |
+
+All five source records are `DATE_ONLY`. The new matching logic does not compare their midnight timestamps as real transaction times. It uses same signed amount, IST day, bank, account identity and normalized beneficiary; a reference conflict or ambiguous candidate set blocks automatic reconciliation. Amount and date by themselves are not enough.
+
+### Preview first — do not edit Transaction Log manually
+
+After copying the current engine and preflight files into the same Apps Script project, save the project and run:
+
+    PFIS_PREVIEW_202611_DUPLICATE_RECONCILIATION()
+
+Expected result for the attached workbook is three `ELIGIBLE` mappings and `PREVIEW_READY`. The function is read-only. It also confirms that the source evidence identifies `SBI_SAVINGS`, and indicates whether either survivor's account value needs correction.
+
+If any mapping is blocked, stop and inspect the returned reason. Do not apply a partial mapping by editing cells.
+
+### Apply only after the preview passes
+
+Run:
+
+    PFIS_APPLY_202611_DUPLICATE_RECONCILIATION()
+
+The function:
+1. reclassifies the surviving rows' account using their linked original source evidence where Config explicitly identifies `SBI_SAVINGS`;
+2. archives 202611-003 as a duplicate of 202611-001;
+3. archives 202611-004 and 202611-005 as duplicates of 202611-002;
+4. relinks each duplicate's Source Log entries to the survivor and marks those source entries `DUPLICATE_SUPPRESSED`;
+5. preserves Source Log Notes metadata, writes Change Log audit events and retains the full duplicate rows in Rejected & Archive Log;
+6. calculates verification from the distinct linked source alerts.
+
+The source record for 202611-001 and 202611-003 contains two distinct SMS alerts; after they are linked, the survivor can be `VERIFIED` even though both alerts are SMS. The 202611-002 group contains email and SMS evidence and can also be `VERIFIED`.
+
+The 202611-002 row has a separate `client_requested_review` flag. Reconciliation must not clear that human review request. It may be evidence-verified while still remaining Pending for the requested human review.
+
+The operation is audited and retries are designed to be safe. It does not alter transaction amounts, dates, references or beneficiary facts on the survivors. Check the returned `survivorRepairs`, `completed` and `verifications` before proceeding with live ingestion.
+
 ## 4. Card-payment classification
 
 The active Rules/Config rows now match:

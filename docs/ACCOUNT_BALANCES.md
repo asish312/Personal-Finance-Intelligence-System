@@ -50,7 +50,7 @@ The current Config!O2 formula is:
 
 The raw SUMIFS result before the subtraction is ₹57,664.07. The formula subtracts an additional hard-coded ₹202.02 to display ₹57,462.05 and reach the externally verified ₹68,666.05 balance.
 
-Therefore, the displayed net activity is **not currently a pure ledger sum**. The ₹202.02 is an unresolved reconciliation adjustment. Do not silently describe it as ledger activity, and do not remove it until the difference is reconciled to a specific omitted, duplicated or incorrect source/transaction record. The previously used artificial negative baseline plug of ₹88,457.26 is obsolete and must not be reintroduced.
+Therefore, the displayed net activity is **not currently a pure ledger sum**. The ₹202.02 is an unresolved reconciliation adjustment. Do not silently describe it as ledger activity, and do not remove it until the difference is reconciled to a specific omitted, duplicated or incorrect source/transaction record. The legacy artificial baseline plug is obsolete and must not be reintroduced.
 
 The safe target is to resolve the ₹202.02 difference in the underlying ledger/evidence, then make Net Ledger Activity a pure date-bounded SUMIFS. Keep the opening baseline at ₹11,204.00 unless a newer bank-verified baseline and anchor are deliberately recorded.
 

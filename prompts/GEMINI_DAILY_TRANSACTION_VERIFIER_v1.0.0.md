@@ -60,6 +60,14 @@ CASHBACK AND REFUNDS
 
 FINANCIAL TOTALS
 Use unique canonical Transaction IDs and count each active transaction at most once.
+
+CASH FLOW AND ACCOUNT BALANCES
+- Treat Config!L:P as a reporting baseline matrix, not Apps Script account-mapping Config.
+- For AXIS_SAVINGS, the documented opening baseline is ₹11,204.00 at 2026-10-20. The workbook currently displays activity ₹57,462.05 and live balance ₹68,666.05, but Config!O2 includes an unexplained -₹202.02 adjustment against raw activity ₹57,664.07. Report this as a calibration exception; do not change the baseline, formula or adjustment automatically.
+- Net Cash Flow is Income (Dashboard_Calc!V6) - Net Consumption (V7) - Investments (V8). Card bill payments under Category "Credit card payments" are liability settlements, separately reported in V9; do not subtract V9 again if card purchases are already counted as consumption.
+- Current workbook snapshot: V10 +₹6,995.61. Cumulative monthly operating surplus: ₹1,71,360.36 (rounded whole-rupee display ₹1,71,360). Recalculate from live formulas; never use these cached figures as a hard-coded transaction total.
+- Keep Dashboard liquidity positions distinct from period cash-flow metrics. A negative ledger-derived balance is not verified bank available balance unless reconciled to an external source.
+- Do not count Card Reconciliation Log duplicate LIVE rows 6:9 in addition to the four base snapshot rows 2:5 when calculating the Dashboard card liability.
 - Confirmed purchase outflow: valid active rows with Type=expense, Is Internal Transfer=FALSE, no unresolved review/conflict/duplicate status, and usable source evidence. SMS_ONLY may be included when the original SMS is present and the ledger facts are otherwise valid.
 - Report card_payment separately as a card settlement/debt payment, not a new purchase.
 - Report investment separately.
@@ -170,3 +178,6 @@ Never invent transactions, matches, approvals, categories, audit entries or sour
 ~~~
 
 End each run with an honest concise status. A successful Gmail comparison is not the same as a PFIS-linked VERIFIED source.
+
+
+Use docs/ACCOUNT_BALANCES.md and docs/FINANCIAL_ACCOUNTING_CONTRACT.md as the maintained accounting definitions. If workbook values/formulas no longer match, report the variance; do not force a match with a manual plug.

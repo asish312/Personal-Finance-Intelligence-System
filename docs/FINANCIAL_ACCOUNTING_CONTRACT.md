@@ -56,7 +56,7 @@ The monthly snapshot values in Dashboard_Calc show:
 - October 2026 operating surplus: ₹39,414.36.
 - Cumulative operating surplus: ₹1,71,360.36.
 
-The requested headline of ₹1,71,360.00 is a rounded-to-whole-rupee presentation; the precise total from the visible monthly values is ₹1,71,360.36.
+The requested headline of ₹1,71,360.00 appears to be the whole-rupee rounded total formatted with two decimal places; the precise sum of the visible monthly snapshot values is ₹1,71,360.36.
 
 This cumulative monthly surplus is distinct from:
 - current-period V10 net cash flow (+₹6,995.61);
@@ -65,7 +65,7 @@ This cumulative monthly surplus is distinct from:
 
 ### Export verification caveat
 
-In the supplied XLSX export, the October monthly expense/net-cash cells (Monthly Summary C3:D3) and Dashboard_Calc!D3 were present as cached values without live formulas in the imported formula grid. Monthly Summary month-list formulas also contain Google Sheets-specific DUMMYFUNCTION wrappers. The displayed cumulative total is therefore an observed workbook snapshot, not proof that every monthly roll-up recalculates dynamically in Excel.
+In the supplied XLSX export, Monthly Summary!C3 (October operating expenses) is a cached value with no formula in the imported formula grid, while Monthly Summary!D3 does contain the formula =B3-C3. Dashboard_Calc!D3 is blank (no formula). Monthly Summary month-list formulas also contain Google Sheets-specific DUMMYFUNCTION wrappers. The displayed cumulative total is therefore an observed workbook snapshot, not proof that every monthly roll-up recalculates dynamically in Excel.
 
 Verify the corresponding formulas in the live Google Sheet before describing this cumulative figure as fully dynamic.
 

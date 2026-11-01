@@ -20,10 +20,11 @@ This document describes the mobile capture client. It is a build/maintenance gui
 7. POST the JSON request to the Apps Script Web App.
 8. Read <code>success</code>, <code>status</code>, <code>nextAction</code>, <code>transaction</code>, <code>displayText</code> and <code>requestId</code>.
 9. Route the response using <code>nextAction</code>.
-10. If the backend explicitly requests category classification, run the category prompt, validate the exact answer against <code>allowedCategories</code>, and send one update only when valid.
-11. Show the final backend receipt or review/error message.
+10. If the backend requests category classification, run the category prompt, validate the exact answer against <code>allowedCategories</code>, and send one update only when valid.
+11. If the backend returns <code>ASK_PURPOSE</code>, ask the user for a short factual purpose. Do not ask an AI model to invent it. Save the user's answer with one <code>action=update</code> request.
+12. Show the final backend receipt or review/error message.
 
-Purpose/User Notes is optional. Do not create an ASK_PURPOSE step and do not block a receipt because Purpose is blank.
+Purpose collection is selective and backend-directed: ask for expenses with no specific enabled Rule ID match, including a completely unmatched merchant and a merchant-only fallback where the transaction-specific rule did not match. A direct rule match suppresses the question. There is no amount threshold. Category classification and integrity review take priority over purpose collection.
 
 ## Ten-field transaction contract
 
@@ -96,10 +97,11 @@ Use <code>nextAction</code> as the primary router.
 |---|---|
 | <code>SHOW_RECEIPT</code> | Display date/time, merchant, signed amount, category, account/card label, evidence status and Transaction ID. |
 | <code>CLASSIFY_CATEGORY</code> | Run the category prompt using current context and exact <code>allowedCategories</code>. Validate exact membership before sending one update. |
+| <code>ASK_PURPOSE</code> | Ask the user what the unmatched/different expense was for. Save only the user's answer through <code>action=update</code> with <code>purpose</code>, <code>transactionId</code>, <code>actor</code> and <code>reason</code>. |
 | <code>REVIEW</code> | Show review reason and validation flag. Do not auto-approve, archive, delete or rewrite financial facts. |
 | <code>SHOW_ERROR</code> | Show error/message and <code>requestId</code>. Never show a success receipt. |
 
-A marked automatic Miscellaneous fallback can require category classification even though it is not itself a financial-integrity review. Keep these distinct: <code>needsReview</code> is not the same as <code>requiresCategoryClassification</code>.
+A marked automatic Miscellaneous fallback can require category classification even though it is not itself a financial-integrity review. Keep these distinct: <code>needsReview</code>, <code>requiresCategoryClassification</code> and <code>requiresPurpose</code> are separate states. If category classification is required, do it before purpose collection. An <code>ASK_PURPOSE</code> response is not a review flag.
 
 ## Controlled human resolutions
 

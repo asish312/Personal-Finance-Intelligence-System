@@ -1663,6 +1663,18 @@ function pfisCompleteSuppressedSameChannelDuplicate(sourceInfo, requestId, notes
   }
 
   const transaction = pfisGetTransaction(transactionId, false);
+  const verification = transaction
+    ? pfisGetVerificationState(transactionId, transaction.validationFlag)
+    : { status: 'UNKNOWN' };
+  if (verification.status === 'VERIFIED') {
+    pfisAppendChangeOnce('same-channel-verification:' + transactionId + ':' + sourceId, {
+      transactionId: transactionId, targetTable: PFIS_SHEETS.transactions,
+      actor: 'system_reconciliation', field: 'Verification', oldValue: '',
+      newValue: 'VERIFIED',
+      reason: 'A distinct same-channel alert independently corroborated the same unique event using amount, date, account and recipient/merchant evidence.',
+      requestId: requestId
+    });
+  }
   const response = pfisBuildIngestResponse(transaction, requestId, sourceType, 'DUPLICATE_SUPPRESSED', sourceId);
   response.transactionInserted = false;
   response.sourceRecorded = true;
@@ -2027,8 +2039,6 @@ function pfisGetVerificationState(transactionId, validationFlag) {
   if (String(validationFlag || '').toUpperCase() === 'REJECTED') {
     return { status: 'REJECTED', source: '', sourceCount: 0, sourceTypes: [] };
   }
-  // Include conflicting linked evidence in counts while keeping it from falsely
-  // satisfying verification. A conflict must never be reported VERIFIED.
   const allLinked = pfisSourceRowsForTransaction(transactionId).filter(function (source) {
     return pfisString(source.sourceId) && pfisNormalizeSourceType(source.sourceType) &&
       pfisString(source.parseStatus).toUpperCase() !== 'SUPERSEDED';
@@ -2038,7 +2048,10 @@ function pfisGetVerificationState(transactionId, validationFlag) {
     return ['PARSE_FAILED', 'SUPERSEDED'].indexOf(status) < 0 && status.indexOf('PROCESSING_') !== 0;
   });
   const sourceTypes = pfisUnique(counted.map(function (source) { return pfisNormalizeSourceType(source.sourceType); }));
-  const sourceCount = counted.length;
+  const independentSourceKeys = pfisUnique(counted.map(function (source) {
+    return pfisString(source.sourceHash) || pfisString(source.sourceId);
+  }).filter(Boolean));
+  const sourceCount = independentSourceKeys.length;
   const hasLinkedConflict = counted.some(function (source) { return pfisString(source.parseStatus).toUpperCase() === 'CONFLICT'; });
   const hasAnyConflict = pfisSourceRowsForTransaction(transactionId).some(function (source) {
     return pfisString(source.parseStatus).toUpperCase() === 'CONFLICT';
@@ -2050,10 +2063,19 @@ function pfisGetVerificationState(transactionId, validationFlag) {
   if (sourceTypes.indexOf('SMS') >= 0 && sourceTypes.indexOf('EMAIL') >= 0) {
     return { status: 'VERIFIED', source: 'SMS+EMAIL', sourceCount: sourceCount, sourceTypes: sourceTypes };
   }
+  if (sourceCount >= 2) {
+    return {
+      status: 'VERIFIED',
+      source: sourceTypes.join('+') + ' (multiple independent alerts)',
+      sourceCount: sourceCount,
+      sourceTypes: sourceTypes
+    };
+  }
   if (sourceTypes.indexOf('SMS') >= 0) return { status: 'SMS_ONLY', source: 'SMS', sourceCount: sourceCount, sourceTypes: sourceTypes };
   if (sourceTypes.indexOf('EMAIL') >= 0) return { status: 'EMAIL_ONLY', source: 'EMAIL', sourceCount: sourceCount, sourceTypes: sourceTypes };
   return { status: 'UNKNOWN', source: '', sourceCount: sourceCount, sourceTypes: sourceTypes };
 }
+
 
 function pfisGetTransactionDatePrecision(transactionId) {
   const index = pfisBuildSourceIndex();
@@ -2239,9 +2261,17 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
     sourceSheet.getRange(sourceRow, 16).setValue(duplicateOf);
     sourceSheet.getRange(sourceRow, 9).setValue('DUPLICATE_SUPPRESSED');
     sourceSheet.getRange(sourceRow, 19).setValue(true);
-    sourceSheet.getRange(sourceRow, 20).setValue(
-      'Human-confirmed duplicate archived as ' + transactionId + '; linked to surviving transaction ' + duplicateOf +
-      '. Reason: ' + reason);
+    const duplicateSourceNote = 'Human-confirmed duplicate archived as ' + transactionId +
+      '; linked to surviving transaction ' + duplicateOf + '. Reason: ' + reason;
+    const duplicateSourceMeta = pfisParseProcessingMeta(source.notes);
+    if (duplicateSourceMeta && Object.keys(duplicateSourceMeta).length) {
+      duplicateSourceMeta.finalStatus = 'DUPLICATE_SUPPRESSED';
+      duplicateSourceMeta.finalNotes = duplicateSourceNote;
+      duplicateSourceMeta.deduplication = { duplicateOf: duplicateOf, reason: reason };
+      sourceSheet.getRange(sourceRow, 20).setValue(JSON.stringify(duplicateSourceMeta));
+    } else {
+      sourceSheet.getRange(sourceRow, 20).setValue(duplicateSourceNote);
+    }
   });
 
   pfisAppendChangeOnceBatch([
@@ -2263,6 +2293,212 @@ function pfisArchiveConfirmedDuplicate(transactionId, duplicateOf, reason, actor
   pfisInvalidateSourceCache();
   return { success: true, status: 'DUPLICATE_ARCHIVED', transactionId: transactionId,
     duplicateOf: duplicateOf, archiveRow: archiveRow, requestId: requestId };
+}
+
+
+/**
+ * Read-only, evidence-backed preview for the duplicate groups identified in the
+ * 1-Nov-2026 source audit. This function never changes the workbook.
+ */
+function PFIS_PREVIEW_202611_DUPLICATE_RECONCILIATION() {
+  const mappings = [
+    { duplicateId: '202611-003', survivorId: '202611-001', label: 'INR 14,750 — Sarada' },
+    { duplicateId: '202611-004', survivorId: '202611-002', label: 'INR 15,250 — Susil (email variant)' },
+    { duplicateId: '202611-005', survivorId: '202611-002', label: 'INR 15,250 — Susil (SMS confirmation)' }
+  ];
+  const schema = pfisCheckWorkbookStructure();
+  if (!schema.success) return {
+    success: false, dryRun: true, status: 'BLOCKED_SCHEMA',
+    checks: schema.checks.filter(function (item) { return item.status !== 'OK'; })
+  };
+  const archive = pfisGetSpreadsheet().getSheetByName(PFIS_SHEETS.archive);
+  if (!archive || archive.getLastColumn() < PFIS_TX_FIELDS.length) return {
+    success: false, dryRun: true, status: 'BLOCKED_ARCHIVE_SCHEMA',
+    message: 'Rejected & Archive Log does not contain the canonical A:AC schema.'
+  };
+
+  const results = mappings.map(function (mapping) {
+    const duplicateRow = pfisFindTransactionRow(mapping.duplicateId);
+    const survivorRow = pfisFindTransactionRow(mapping.survivorId);
+    if (duplicateRow < 2) {
+      const archivedRow = pfisFindRowByValue(archive, 1, mapping.duplicateId);
+      if (archivedRow >= 2) {
+        const archived = pfisObjectFromRow(
+          archive.getRange(archivedRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0], PFIS_TX_FIELDS);
+        if (pfisString(archived.validationFlag).toUpperCase() === 'DUPLICATE_REJECTED' &&
+            pfisGetDuplicateTargetFromReason_(archived.reviewReason) === mapping.survivorId) {
+          return Object.assign({}, mapping, { status: 'ALREADY_RECONCILED', archiveRow: archivedRow });
+        }
+      }
+      return Object.assign({}, mapping, {
+        status: 'BLOCKED_DUPLICATE_NOT_ACTIVE',
+        reason: 'Duplicate transaction is not active and no matching confirmed archive record exists.'
+      });
+    }
+    if (survivorRow < 2) return Object.assign({}, mapping, {
+      status: 'BLOCKED_SURVIVOR_NOT_ACTIVE',
+      reason: 'Surviving canonical transaction is not active.'
+    });
+
+    const duplicate = pfisObjectFromRow(
+      pfisGetRequiredSheet(PFIS_SHEETS.transactions).getRange(duplicateRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0],
+      PFIS_TX_FIELDS);
+    const survivor = pfisObjectFromRow(
+      pfisGetRequiredSheet(PFIS_SHEETS.transactions).getRange(survivorRow, 1, 1, PFIS_TX_FIELDS.length).getValues()[0],
+      PFIS_TX_FIELDS);
+    if (['DUPLICATE_CANDIDATE', 'DUPLICATE_REJECTED', 'SOURCE_CONFLICT', 'REJECTED'].indexOf(
+        pfisString(survivor.validationFlag).toUpperCase()) >= 0) {
+      return Object.assign({}, mapping, {
+        status: 'BLOCKED_SURVIVOR_NOT_CANONICAL',
+        reason: 'Survivor is itself a duplicate, rejected or source-conflict row.'
+      });
+    }
+    if (!pfisSameMoney(duplicate.amount, survivor.amount) ||
+        !pfisSameCalendarDay(duplicate.dateTime, survivor.dateTime) ||
+        pfisNormalizeBank(duplicate.bank) !== pfisNormalizeBank(survivor.bank) ||
+        pfisNormalizeAccountType(duplicate.accountType) !== pfisNormalizeAccountType(survivor.accountType)) {
+      return Object.assign({}, mapping, {
+        status: 'BLOCKED_FINANCIAL_FACT_MISMATCH',
+        reason: 'Signed amount, IST calendar day, bank or account type differs.'
+      });
+    }
+    if (!pfisAreCounterpartyVariants(duplicate.counterparty, survivor.counterparty)) {
+      return Object.assign({}, mapping, {
+        status: 'BLOCKED_COUNTERPARTY_MISMATCH',
+        reason: 'Normalized counterparty identity does not agree.'
+      });
+    }
+
+    const duplicateSources = pfisSourceRowsForTransaction(mapping.duplicateId).filter(function (source) {
+      return ['ACCEPTED', 'RECONCILED', 'DUPLICATE_SUPPRESSED'].indexOf(
+        pfisString(source.parseStatus).toUpperCase()) >= 0;
+    });
+    const survivorSources = pfisSourceRowsForTransaction(mapping.survivorId).filter(function (source) {
+      return ['ACCEPTED', 'RECONCILED', 'DUPLICATE_SUPPRESSED'].indexOf(
+        pfisString(source.parseStatus).toUpperCase()) >= 0;
+    });
+    if (!duplicateSources.length || !survivorSources.length) return Object.assign({}, mapping, {
+      status: 'BLOCKED_SOURCE_EVIDENCE_MISSING',
+      reason: 'Both records must have finalized linked Source Log evidence.'
+    });
+    const duplicateIdentity = pfisUnique(duplicateSources.map(function (source) {
+      return pfisGetEvidenceAccountIdentity(source.rawBody, duplicate.account, '').value;
+    }).filter(Boolean));
+    const survivorIdentity = pfisUnique(survivorSources.map(function (source) {
+      return pfisGetEvidenceAccountIdentity(source.rawBody, survivor.account, '').value;
+    }).filter(Boolean));
+    if (duplicateIdentity.length !== 1 || survivorIdentity.length !== 1 ||
+        duplicateIdentity[0] !== survivorIdentity[0] || duplicateIdentity[0] !== 'SBI_SAVINGS') {
+      return Object.assign({}, mapping, {
+        status: 'BLOCKED_ACCOUNT_IDENTITY_MISMATCH',
+        reason: 'Source evidence does not uniquely identify SBI_SAVINGS for both records.'
+      });
+    }
+    const duplicateRefs = pfisUnique(duplicateSources.map(function (source) {
+      return pfisNormalizeReference(source.extractedReferenceNo);
+    }).filter(Boolean));
+    const survivorRefs = pfisUnique(survivorSources.map(function (source) {
+      return pfisNormalizeReference(source.extractedReferenceNo);
+    }).filter(Boolean));
+    if (duplicateRefs.length && survivorRefs.length &&
+        !duplicateRefs.some(function (reference) { return survivorRefs.indexOf(reference) >= 0; })) {
+      return Object.assign({}, mapping, {
+        status: 'BLOCKED_REFERENCE_CONFLICT',
+        reason: 'Both sides contain reference numbers and none agree.'
+      });
+    }
+    const existingArchiveRow = pfisFindRowByValue(archive, 1, mapping.duplicateId);
+    if (existingArchiveRow >= 2) return Object.assign({}, mapping, {
+      status: 'BLOCKED_ARCHIVE_COLLISION',
+      reason: 'Archive already contains this Transaction ID with a different resolution.'
+    });
+    return Object.assign({}, mapping, {
+      status: 'ELIGIBLE',
+      duplicateSourceIds: duplicateSources.map(function (source) { return source.sourceId; }),
+      survivorSourceIds: survivorSources.map(function (source) { return source.sourceId; }),
+      matchedAccount: duplicateIdentity[0],
+      duplicateReference: duplicateRefs.join(','),
+      survivorReference: survivorRefs.join(',')
+    });
+  });
+  const blocked = results.filter(function (item) {
+    return item.status !== 'ELIGIBLE' && item.status !== 'ALREADY_RECONCILED';
+  });
+  return {
+    success: blocked.length === 0,
+    dryRun: true,
+    status: blocked.length ? 'BLOCKED_REVIEW_REQUIRED' : 'PREVIEW_READY',
+    eligible: results.filter(function (item) { return item.status === 'ELIGIBLE'; }).length,
+    alreadyReconciled: results.filter(function (item) { return item.status === 'ALREADY_RECONCILED'; }).length,
+    blocked: blocked.length,
+    mappings: results,
+    note: 'No Transaction Log, Source Log, Change Log or archive rows were modified.'
+  };
+}
+
+/**
+ * Apply only the fixed duplicate mappings after a successful preview.
+ * Each duplicate is archived through the existing audited CONFIRM_DUPLICATE
+ * implementation, which relinks all its source evidence to the survivor.
+ */
+function PFIS_APPLY_202611_DUPLICATE_RECONCILIATION() {
+  const preview = PFIS_PREVIEW_202611_DUPLICATE_RECONCILIATION();
+  if (!preview.success || preview.status !== 'PREVIEW_READY') {
+    if (preview.status === 'PREVIEW_READY' && preview.eligible === 0 && preview.alreadyReconciled === 3) {
+      return { success: true, status: 'ALREADY_RECONCILED', preview: preview };
+    }
+    return { success: false, status: 'APPLY_BLOCKED', preview: preview };
+  }
+  const completed = [];
+  const actor = 'PFIS_ADMIN_RECONCILIATION';
+  for (let i = 0; i < preview.mappings.length; i++) {
+    const mapping = preview.mappings[i];
+    if (mapping.status === 'ALREADY_RECONCILED') {
+      completed.push({ transactionId: mapping.duplicateId, status: 'ALREADY_RECONCILED' });
+      continue;
+    }
+    const requestId = 'PFIS-DUP-202611-' + mapping.duplicateId;
+    pfisFlagTransactionsForReview([mapping.duplicateId],
+      'duplicate_candidate_of:' + mapping.survivorId, 'DUPLICATE_CANDIDATE',
+      requestId, mapping.duplicateId,
+      'Preview-validated same event: signed amount, IST calendar day, SBI_SAVINGS account identity, beneficiary and reference compatibility.');
+    const result = pfisArchiveConfirmedDuplicate(
+      mapping.duplicateId, mapping.survivorId,
+      'Confirmed same payment notification; source evidence matches amount, date, SBI savings account and beneficiary.',
+      actor, requestId);
+    if (!result || result.success !== true || result.status !== 'DUPLICATE_ARCHIVED') {
+      return {
+        success: false, status: 'PARTIAL_APPLY_STOPPED',
+        completed: completed, failed: { transactionId: mapping.duplicateId, result: result },
+        message: 'Stopped immediately after an archive operation failed. Completed operations remain audited and can be safely previewed again.'
+      };
+    }
+    completed.push({ transactionId: mapping.duplicateId, duplicateOf: mapping.survivorId,
+      status: result.status, archiveRow: result.archiveRow });
+  }
+
+  const survivors = pfisUnique(preview.mappings.map(function (mapping) { return mapping.survivorId; }));
+  const verifications = [];
+  survivors.forEach(function (survivorId) {
+    const transaction = pfisGetTransaction(survivorId, false);
+    const verification = pfisGetVerificationState(survivorId, transaction && transaction.validationFlag);
+    if (verification.status === 'VERIFIED') {
+      pfisAppendChangeOnce('known-duplicate-group-verified:' + survivorId, {
+        transactionId: survivorId, targetTable: PFIS_SHEETS.transactions,
+        actor: actor, field: 'Verification', oldValue: '',
+        newValue: 'VERIFIED',
+        reason: 'Distinct original bank alerts corroborate the same unique payment event by amount, date, SBI_SAVINGS account and beneficiary. Source channels: ' + verification.source,
+        requestId: 'PFIS-DUP-202611-VERIFY-' + survivorId
+      });
+    }
+    verifications.push({ transactionId: survivorId, verificationStatus: verification.status,
+      sourceCount: verification.sourceCount, sourceTypes: verification.sourceTypes });
+  });
+  return {
+    success: true, status: 'RECONCILIATION_APPLIED',
+    completed: completed, verifications: verifications,
+    note: 'Source evidence was relinked and duplicate ledger rows were moved to Rejected & Archive Log. No financial facts were altered on surviving rows.'
+  };
 }
 
 /**

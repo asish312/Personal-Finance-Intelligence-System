@@ -5288,11 +5288,15 @@ function pfisRecommendNextAction(status, transaction, enrichment) {
   const state = enrichment || pfisGetEnrichmentState(
     tx.category, tx.userNotes, undefined, tx.merchant, tx.ruleApplied, tx.type
   );
-  // Resolve category first, then any independent integrity review, then ask for
-  // Purpose when an expense has no specific active-rule match.
+  // Category classification and hard integrity conflicts have priority. A
+  // non-hard review (e.g. unresolved card mapping) must not suppress a separate
+  // Purpose question; the review remains open after Purpose is saved.
   if (state.requiresCategoryClassification) return 'CLASSIFY_CATEGORY';
-  if (pfisTruthy(tx.needsReview)) return 'REVIEW';
+  if (hardReviewReasons.indexOf(reviewReason) >= 0 || pfisTruthy(tx.needsReview) &&
+      ['duplicate_candidate', 'source_conflict', 'unknown_transaction_type',
+        'same_reference_conflicting_transaction_facts'].indexOf(reviewReason) >= 0) return 'REVIEW';
   if (state.requiresPurpose) return 'ASK_PURPOSE';
+  if (pfisTruthy(tx.needsReview)) return 'REVIEW';
   return 'SHOW_RECEIPT';
 }
 

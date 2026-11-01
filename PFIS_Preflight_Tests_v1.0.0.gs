@@ -280,7 +280,8 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(conflict.kind === 'CONFLICT',
           'A conflicting explicit account identity was not blocked: ' + JSON.stringify(conflict));
         var noAccount = Object.assign({}, incoming, {
-          account: '', rawEvidence: 'SBI debit INR 15250 on 01/11/26 transferred to Mr. SUSIL KUMARPAN.'
+          account: 'SBI_SAVINGS',
+          rawEvidence: 'SBI debit INR 15250 on 01/11/26 transferred to Mr. SUSIL KUMARPAN.'
         });
         var insufficientIdentity = pfisAssessCrossCandidate(existing, existingSource, noAccount, noAccount.merchant);
         pfisPreflightAssert_(insufficientIdentity.kind === 'NO_MATCH',

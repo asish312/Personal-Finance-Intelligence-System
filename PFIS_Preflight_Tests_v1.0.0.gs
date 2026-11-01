@@ -1,5 +1,5 @@
 /**
- * PFIS Transaction Engine v1.0.0 — bounded preflight / regression harness
+ * PFIS Transaction Engine v1.1.0 — bounded preflight / regression harness
  *
  * INSTALLATION
  * 1. Replace the contents of the existing preflight file in the SAME Apps Script project as the transaction engine.
@@ -30,7 +30,7 @@ var PFIS_PREFLIGHT_TEMP_PREFIX = 'PFIS_AUTOTEST_TEMP_DO_NOT_USE_';
 function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
   var startedAt = Date.now();
   var report = {
-    suite: 'PFIS Transaction Engine v1.0.0 preflight',
+    suite: 'PFIS Transaction Engine v1.1.0 preflight',
     startedAt: new Date(startedAt).toISOString(),
     maxRuntimeMs: PFIS_PREFLIGHT_MAX_RUNTIME_MS,
     productionSpreadsheet: { status: 'NOT_CHECKED' },

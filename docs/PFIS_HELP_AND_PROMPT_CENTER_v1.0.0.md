@@ -19,8 +19,9 @@ The Help tab should be compact and mobile-friendly. Use columns:
 2. Task
 3. When to use
 4. Information to provide
-5. Copy-ready prompt
-6. Safety rule / expected result
+5. Copy-ready prompt template
+6. Example prompt (copy directly)
+7. Safety rule / expected result
 
 Wrap text, freeze the header row, use filters, set useful column widths and keep one task per row. Put a short "Start Here" section at the top and group prompt rows by task.
 

@@ -12,10 +12,11 @@ This document describes the mobile capture client. It is a build/maintenance gui
 ## End-to-end flow
 
 1. Receive or share a complete bank SMS/email.
-2. Preserve the full original message as <code>originalText</code>.
-3. Run the transaction extraction prompt.
+2. Preserve the full original message as <code>originalText</code> and capture metadata separately.
+3. Set <code>receivedAt</code> only when the trigger exposes the original SMS/email delivery time; set <code>capturedAt</code> to the Shortcut's current date/time.
+4. Run the transaction extraction prompt with <code>SOURCE_TYPE</code>, <code>RECEIVED_AT</code>, <code>CAPTURED_AT</code> and the complete original message.
 4. If the result is exactly <code>IGNORE</code>, stop because the message is not a completed financial event.
-5. Otherwise validate that the result contains exactly ten fields and nine pipe delimiters.
+5. Otherwise validate that new results contain exactly twelve fields and eleven pipe delimiters. The backend temporarily accepts legacy ten-field results, but new Shortcuts must use twelve fields.
 6. Read the device lock state. If the Shortcut defers interactive review because the device is locked, map that Boolean to <code>isReviewNeeded</code>. Do not send the old <code>deviceLocked</code> key.
 7. POST the JSON request to the Apps Script Web App.
 8. Read <code>success</code>, <code>status</code>, <code>nextAction</code>, <code>transaction</code>, <code>displayText</code> and <code>requestId</code>.
@@ -26,28 +27,62 @@ This document describes the mobile capture client. It is a build/maintenance gui
 
 Purpose collection is backend-directed: ask for every expense whose User Notes/Purpose is still blank, including unmatched merchants, merchant-only fallback matches and recognised merchants with no trusted Purpose (the user may have made a different purchase). A direct rule match alone does not suppress the question; only an explicitly trusted rule-generated Purpose does. There is no amount threshold. Do not ask for income, investment, transfer or card-bill settlement entries. Category classification and serious source/duplicate/type conflicts take priority. A separate account-mapping review may remain open while the user supplies Purpose; saving Purpose must not clear that review.
 
-## Ten-field transaction contract
+## Twelve-field transaction contract
 
-The exact order is:
+New Shortcut output uses exactly twelve fields in this order:
 
-<code>datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after</code>
+<code>datetime | signed_amount | bank | account_type | account_alias | instrument | type | merchant_name | counterparty | ref_no | balance_after | datetime_basis</code>
 
 | Position | Field | Requirement |
 |---:|---|---|
-| 1 | datetime | Actual event date/time. Use date-only form when no clock time exists. |
+| 1 | datetime | Actual transaction date/time where supplied. For missing event time, use original receipt time or capture time only as a labelled fallback. |
 | 2 | signed_amount | Debits/outflows negative; credits/inflows positive; two decimals. |
-| 3 | bank | Institution associated with the event. Do not invent it. |
-| 4 | account_type | Savings/current/credit card/wallet/etc.; optional when unknown. |
-| 5 | instrument | UPI/card/NEFT/IMPS/net banking/etc.; optional when unknown. |
-| 6 | type | expense/income/card_payment/investment/transfer/refund, or unresolved. |
-| 7 | merchant_name | Supported merchant, biller or readable event description. |
-| 8 | counterparty | Explicit sender/recipient when available. |
-| 9 | ref_no | Explicit UTR/RRN/order/reference only. |
-| 10 | balance_after | Actual post-transaction balance only; otherwise absent. |
+| 3 | bank | Institution associated with the event. |
+| 4 | account_type | Savings/current/credit card/wallet/cash, where supported. |
+| 5 | account_alias | Exact source-visible account/card product label such as SBI_CASHBACK_CC; otherwise NA. |
+| 6 | instrument | UPI/card/NEFT/IMPS/net banking/etc.; otherwise NA. |
+| 7 | type | expense/income/card_payment/investment/transfer/refund/NA. |
+| 8 | merchant_name | Supported merchant, biller or readable event descriptor. |
+| 9 | counterparty | Explicit sender/recipient/merchant where available. |
+| 10 | ref_no | Explicit UTR/RRN/order/reference only when provided. |
+| 11 | balance_after | Actual post-transaction balance only; otherwise NA. |
+| 12 | datetime_basis | TRANSACTION_TIME, RECEIVED_TIME_FALLBACK, CAPTURED_TIME_FALLBACK or DATE_ONLY. |
 
-The parser preserves empty positions when delimiters are present. Unknown optional fields should normally be represented as <code>NA</code>. Never remove a delimiter to represent a missing middle value. Never put a literal pipe character inside a field. Do not guess which field was omitted or shift values to repair a malformed payload.
+### Timestamp metadata and fallback rules
 
-The backend requires a trustworthy date, non-zero amount and bank. An unresolved type/category can be handled as a review/classification case; an unsafe date, amount or bank should remain a Source Log parse failure rather than a fabricated ledger row.
+Send these metadata properties in the HTTP request and include them in the AI input envelope:
+
+- <code>receivedAt</code>: original SMS/email delivery timestamp, only when the automation/email trigger genuinely exposes it. Use ISO 8601 with an explicit timezone offset, preferably <code>+05:30</code>. Never substitute the Shortcut's current time.
+- <code>capturedAt</code>: time the Shortcut processed or shared the message. Populate from **Current Date** every time, formatted as ISO 8601 with timezone offset.
+- <code>originalText</code>: the complete unmodified message body. Keep email subject/sender in their own request fields when available.
+
+Priority:
+1. Explicit transaction time in original message → <code>TRANSACTION_TIME</code>.
+2. Transaction date but no clock time + original message <code>receivedAt</code> → combine the transaction date with the receipt clock and mark <code>RECEIVED_TIME_FALLBACK</code>.
+3. No <code>receivedAt</code> + <code>capturedAt</code> → combine transaction date with capture clock and mark <code>CAPTURED_TIME_FALLBACK</code>.
+4. No clock metadata → keep date-only and mark <code>DATE_ONLY</code>.
+
+When transaction date is absent, use the full receipt timestamp, or capture timestamp only when receipt time is unavailable. Never use the receipt/capture date to replace an explicitly stated, different transaction date.
+
+Important distinctions:
+- An SMS automation trigger's **Date** may be used as <code>receivedAt</code> only after confirming it is the notification delivery timestamp, not merely processing time.
+- A manually shared SMS usually does not expose its original delivery time through the shared message text. Do not claim it does; use <code>capturedAt</code> as the last-resort fallback.
+- The same limitation can apply to shared emails. Use the message's actual received date only when the share/automation action exposes it.
+- A fallback timestamp is useful for sorting and timeline display, but it is not an exact transaction time. The backend records it as imprecise and excludes it from exact-time duplicate matching.
+
+Standardized AI input envelope:
+
+~~~text
+SOURCE_TYPE: SMS
+RECEIVED_AT: 2026-10-18T10:16:36+05:30
+CAPTURED_AT: 2026-10-18T10:17:02+05:30
+ORIGINAL MESSAGE:
+[complete original SMS/email]
+~~~
+
+The parser also accepts legacy ten-field payloads during rollout. Legacy fields are mapped using the previous order and account_alias is left blank. Do not produce new ten-field results.
+
+Unknown optional fields use <code>NA</code>; preserve every delimiter. Never put a literal pipe inside a field or guess which field was omitted. The backend still requires a trustworthy date, non-zero amount and bank. A real transaction with an unknown date remains a source-only parse failure until corrected; it must not be fabricated or ignored.
 
 ## HTTP request
 
@@ -64,8 +99,10 @@ Illustrative request; every value below is fictional:
 {
   "action": "ingest",
   "sourceType": "SMS",
-  "txnString": "14/10/2026 09:15:00|-845.50|Demo Bank|Savings Account|UPI|expense|Harbor Coffee|Harbor Coffee|DEMO-UTR-1001|NA",
-  "originalText": "DEMO BANK: INR 845.50 debited at Harbor Coffee on 14/10/2026 at 09:15. Ref DEMO-UTR-1001.",
+  "txnString": "2026-10-18 10:16:36|-150.00|Axis|Savings Account|NA|UPI|transfer|DEMO PERSON|DEMO PERSON|DEMO-UTR-0001|NA|TRANSACTION_TIME",
+  "originalText": "Axis Bank: INR 150.00 debited by UPI on 18/10/26 at 10:16:36. DEMO PERSON. Ref DEMO-UTR-0001.",
+  "receivedAt": "2026-10-18T10:16:36+05:30",
+  "capturedAt": "2026-10-18T10:17:02+05:30",
   "sender": "DEMO BANK",
   "requestId": "SHORTCUT-DEMO-001",
   "isReviewNeeded": false

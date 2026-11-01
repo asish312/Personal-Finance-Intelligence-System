@@ -60,9 +60,9 @@
  * Time zone: Asia/Kolkata
  */
 
-const ENGINE_VERSION = 'v1.0.0';
+const ENGINE_VERSION = 'v1.1.0';
 const SCHEMA_VERSION = 'v1.0.0';
-const PARSER_VERSION = 'v1.0.0';
+const PARSER_VERSION = 'v1.1.0';
 const PFIS_TIME_ZONE = 'Asia/Kolkata';
 const PFIS_MAX_READ_LIMIT = 100;
 const PFIS_MATCH_WINDOW_MS = 5 * 60 * 1000;
@@ -463,7 +463,7 @@ function pfisLogUnhandledRequestError(params, action, requestId, error) {
           // The Change Log event below records the request-level exception.
         } else {
           const record = {
-            sourceId: pfisMakeId('SRC-'), receivedAt: new Date(), sourceType: sourceType,
+            sourceId: pfisMakeId('SRC-'), receivedAt: pfisGetSourceLogReceivedAt(p), sourceType: sourceType,
             sender: pfisString(p.sender), subject: pfisString(p.subject), rawBody: evidenceText,
             sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'SERVER_ERROR',
             extractedAmount: '', extractedDate: '', datePrecision: '',
@@ -558,13 +558,13 @@ function pfisIngestSource(params, requestId, options) {
   const parsed = pfisPerfMeasure('pipe_parse', function () { return pfisParseTxnString(txnString); });
   if (!parsed) {
     return pfisStoreParseFailure(sourceType, evidenceText, params, requestId,
-      'Expected 10 pipe-separated fields; datetime, non-zero signed amount and bank are required.', opts);
+      'Expected 12 pipe-separated fields (legacy 10-field payloads are accepted); datetime, non-zero signed amount and bank are required.', opts);
   }
   parsed.rawEvidence = evidenceText;
   parsed.accountIdentifier = pfisExtractAccountIdentifier(evidenceText);
   // An internal midnight value is not a real timestamp unless the original
   // notification contains a clock time. Downgrade it before matching/logging.
-  pfisNormalizeSourceDatePrecision(parsed, evidenceText);
+  pfisNormalizeSourceDatePrecision(parsed, evidenceText, params);
   const ruleResult = pfisPerfMeasure('rules_evaluation', function () { return pfisEvaluateRules(parsed, evidenceText); });
   const configResult = pfisPerfMeasure('config_resolution', function () { return pfisResolveConfig(parsed, evidenceText); });
   parsed.account = pfisCleanText(ruleResult.accountOverride || configResult.account);
@@ -621,13 +621,13 @@ function pfisIngestSource(params, requestId, options) {
   if (!sourceRowNumber) {
     sourceRowNumber = pfisPerfMeasure('source_log_append', function () {
       return pfisAppendSourceRow({
-        sourceId: sourceId, receivedAt: new Date(), sourceType: sourceType,
+        sourceId: sourceId, receivedAt: pfisGetSourceLogReceivedAt(params), sourceType: sourceType,
         sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
         sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: processStatus,
         extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
         accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
         extractedReferenceNo: parsed.refNo, linkedTxnId: transactionId, ingestedAt: new Date(),
-        processingError: '', archivedFlag: false, notes: JSON.stringify(processMeta),
+        processingError: '', archivedFlag: false, notes: pfisBuildSourceNotes_(processMeta, parsed, params),
         requestId: requestId, batchId: pfisString(params.batchId)
       });
     });
@@ -816,13 +816,13 @@ function pfisLinkOppositeSource(match, parsed, evidenceText, params, requestId, 
   const processMeta = { phase: 'RECONCILE', reason: match.reason, transactionId: match.transactionId };
   const sourceRowNumber = pfisPerfMeasure('source_log_append', function () {
     return pfisAppendSourceRow({
-      sourceId: sourceId, receivedAt: new Date(), sourceType: sourceType,
+      sourceId: sourceId, receivedAt: pfisGetSourceLogReceivedAt(params), sourceType: sourceType,
       sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
       sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PROCESSING_RECONCILE',
       extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
       accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
       extractedReferenceNo: parsed.refNo, linkedTxnId: match.transactionId, ingestedAt: new Date(),
-      processingError: '', archivedFlag: false, notes: JSON.stringify(processMeta),
+      processingError: '', archivedFlag: false, notes: pfisBuildSourceNotes_(processMeta, parsed, params),
       requestId: requestId, batchId: pfisString(params.batchId)
     });
   });
@@ -863,13 +863,13 @@ function pfisRecordSourceConflict(match, parsed, evidenceText, params, requestId
     newTransactionId: transactionId
   };
   const sourceRow = pfisAppendSourceRow({
-    sourceId: sourceId, receivedAt: new Date(), sourceType: sourceType,
+    sourceId: sourceId, receivedAt: pfisGetSourceLogReceivedAt(params), sourceType: sourceType,
     sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
     sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PROCESSING_CONFLICT',
     extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
     accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
     extractedReferenceNo: parsed.refNo, linkedTxnId: transactionId, ingestedAt: new Date(),
-    processingError: match.reason, archivedFlag: false, notes: JSON.stringify(meta),
+    processingError: match.reason, archivedFlag: false, notes: pfisBuildSourceNotes_(meta, parsed, params),
     requestId: requestId, batchId: pfisString(params.batchId)
   });
 
@@ -909,7 +909,7 @@ function pfisRetryPreviouslyFailedSource(previousSource, params, requestId) {
   if (!txnString || !pfisParseTxnString(txnString)) {
     return {
       success: false, status: 'PARSE_FAILED', error: 'PARSE_FAILED',
-      message: 'This alert is already retained as PARSE_FAILED. Supply a valid 10-field txnString to retry; no transaction has been inserted yet.',
+      message: 'This alert is already retained as PARSE_FAILED. Supply a valid 12-field txnString (legacy 10-field payloads are accepted) to retry; no transaction has been inserted yet.',
       sourceId: previousSource.sourceId, transactionId: null, requestId: requestId
     };
   }
@@ -961,13 +961,15 @@ function pfisRecoverLegacyConflictSource(source, params, requestId) {
   if (!parsed) {
     return {
       success: false, status: 'CONFLICT_NEEDS_RECOVERY', error: 'INVALID_TXN_STRING',
-      message: 'This conflict source has no independent transaction row yet. Supply a valid 10-field txnString to record it.',
+      message: 'This conflict source has no independent transaction row yet. Supply a valid 12-field txnString (legacy 10-field payloads are accepted) to record it.',
       sourceId: source.sourceId, transactionId: null, requestId: requestId
     };
   }
 
   parsed.rawEvidence = String(source.rawBody || params.originalText || '');
+  pfisRestoreSourceTimeMetadata_(params, source);
   parsed.accountIdentifier = pfisExtractAccountIdentifier(parsed.rawEvidence);
+  pfisNormalizeSourceDatePrecision(parsed, parsed.rawEvidence, params);
   const meta = pfisParseProcessingMeta(source.notes);
   const candidates = pfisUnique((meta.candidateTransactionIds || []).concat(
     source.linkedTxnId ? [source.linkedTxnId] : []));
@@ -1025,12 +1027,12 @@ function pfisStoreParseFailure(sourceType, evidenceText, params, requestId, mess
   if (prior && PFIS_PROCESSING_SOURCE_STATUSES.indexOf(prior.parseStatus) >= 0) {
     return {
       success: false, status: 'PROCESSING_RECOVERY_REQUIRED', error: 'INVALID_RETRY_PAYLOAD',
-      message: 'This source already has a pending write. Resubmit its valid 10-field txnString; no second source row was created.',
+      message: 'This source already has a pending write. Resubmit its valid 12-field txnString (legacy 10-field payloads are accepted); no second source row was created.',
       sourceId: prior.sourceId, transactionId: prior.linkedTxnId || null, requestId: requestId
     };
   }
   const rowNumber = pfisAppendSourceRow({
-    sourceId: pfisMakeId('SRC-'), receivedAt: new Date(), sourceType: sourceType,
+    sourceId: pfisMakeId('SRC-'), receivedAt: pfisGetSourceLogReceivedAt(params), sourceType: sourceType,
     sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
     sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: ignoredNonFinancial ? 'NON_FINANCIAL_IGNORED' : 'PARSE_FAILED',
     extractedAmount: '', extractedDate: '', datePrecision: '', accountIdentifier: pfisExtractAccountIdentifier(evidenceText),
@@ -1073,12 +1075,14 @@ function pfisRecoverProcessingSource(source, txnString, params, requestId) {
   if (!parsed) {
     return {
       success: false, status: 'PROCESSING_RECOVERY_REQUIRED', error: 'PARSE_FAILED',
-      message: 'The source is in a recoverable processing state, but the submitted 10-field txnString is invalid.',
+      message: 'The source is in a recoverable processing state, but the submitted 12-field txnString (legacy 10-field payloads are accepted) is invalid.',
       sourceId: source.sourceId, transactionId: source.linkedTxnId, requestId: requestId
     };
   }
   parsed.rawEvidence = String(source.rawBody || params.originalText || '');
+  pfisRestoreSourceTimeMetadata_(params, source);
   parsed.accountIdentifier = pfisExtractAccountIdentifier(parsed.rawEvidence);
+  pfisNormalizeSourceDatePrecision(parsed, parsed.rawEvidence, params);
   const recoveryMeta = pfisParseProcessingMeta(source.notes);
   if (recoveryMeta.phase === 'DUPLICATE_SUPPRESSED') {
     const originalTransactionId = pfisString(recoveryMeta.duplicateCandidateId || source.linkedTxnId);
@@ -1313,14 +1317,14 @@ function pfisLinkPaymentEventSource(match, parsed, evidenceText, params, request
   const sourceId = pfisMakeId('SRC-');
   const transactionId = pfisString(match.transactionId);
   const sourceRowNumber = pfisAppendSourceRow({
-    sourceId: sourceId, receivedAt: new Date(), sourceType: sourceType,
+    sourceId: sourceId, receivedAt: pfisGetSourceLogReceivedAt(params), sourceType: sourceType,
     sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
     sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PROCESSING_RECONCILE',
     extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
     accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
     extractedReferenceNo: parsed.refNo, linkedTxnId: transactionId, ingestedAt: new Date(),
     processingError: '', archivedFlag: false,
-    notes: JSON.stringify({ phase: 'PAYMENT_EVENT_RECONCILE', reason: match.reason, transactionId: transactionId }),
+    notes: pfisBuildSourceNotes_({ phase: 'PAYMENT_EVENT_RECONCILE', reason: match.reason, transactionId: transactionId }, parsed, params),
     requestId: requestId, batchId: pfisString(params.batchId)
   });
   pfisEnrichBlankTransactionFields(transactionId, parsed, ruleResult, configResult, requestId);
@@ -1522,13 +1526,13 @@ function pfisRecordSuppressedSameChannelDuplicate(duplicate, parsed, evidenceTex
     reason: reason, datePrecision: parsed.datePrecision
   };
   const sourceRowNumber = pfisAppendSourceRow({
-    sourceId: sourceId, receivedAt: new Date(), sourceType: sourceType,
+    sourceId: sourceId, receivedAt: pfisGetSourceLogReceivedAt(params), sourceType: sourceType,
     sender: pfisString(params.sender), subject: pfisString(params.subject), rawBody: evidenceText,
     sourceHash: sourceHash, parserVersion: PARSER_VERSION, parseStatus: 'PROCESSING_DUPLICATE',
     extractedAmount: parsed.amount, extractedDate: parsed.datetime, datePrecision: parsed.datePrecision,
     accountIdentifier: parsed.accountIdentifier, extractedMerchant: parsed.merchant,
     extractedReferenceNo: parsed.refNo, linkedTxnId: transactionId, ingestedAt: new Date(),
-    processingError: '', archivedFlag: false, notes: JSON.stringify(meta),
+    processingError: '', archivedFlag: false, notes: pfisBuildSourceNotes_(meta, parsed, params),
     requestId: requestId, batchId: pfisString(params.batchId)
   });
 
@@ -1708,7 +1712,14 @@ function pfisFinalizeSource(rowNumber, status, notes, processingError) {
     // when processing finishes or recovers. Parse Status is the state transition.
     sheet.getRange(rowNumber, 9).setValue(status);
     sheet.getRange(rowNumber, 18).setValue(processingError || '');
-    sheet.getRange(rowNumber, 20).setValue(notes || '');
+    const existingNotes = pfisParseProcessingMeta(sheet.getRange(rowNumber, 20).getValue());
+    let finalNotes = notes || '';
+    if (existingNotes && Object.keys(existingNotes).length) {
+      existingNotes.finalStatus = status;
+      existingNotes.finalNotes = finalNotes;
+      finalNotes = JSON.stringify(existingNotes);
+    }
+    sheet.getRange(rowNumber, 20).setValue(finalNotes);
     pfisInvalidateSourceCache();
   });
 }
@@ -3673,6 +3684,7 @@ function pfisResolveConfig(parsed, rawEvidence) {
   const cardContextText = rawText.split(/\bat\s+/i)[0];
   const cardContextKey = pfisNormalizeMerchant(cardContextText);
   const cardContextCompact = cardContextKey.replace(/\s+/g, '');
+  const explicitAliasCompact = pfisCleanText(parsed.accountAlias).toLowerCase().replace(/[^a-z0-9]/g, '');
   const configs = pfisGetConfigRows();
 
   const candidates = [];
@@ -3688,7 +3700,9 @@ function pfisResolveConfig(parsed, rawEvidence) {
     const suffixCompact = configuredSuffixRaw.toLowerCase().replace(/[^a-z0-9]/g, '');
     const numericSuffix = !!configuredSuffixRaw && /^(?:[x*]{0,8}\d{2,8}|\d{4,8})$/i.test(configuredSuffixRaw.replace(/[\s-]/g, ''));
     const textPattern = pfisNormalizeMerchant(cfg.textPattern);
-    const textPatternMatched = !!textPattern && !!rawKey && rawKey.indexOf(textPattern) >= 0;
+    const textPatternCompact = textPattern.replace(/[^a-z0-9]/g, '');
+    const textPatternMatched = !!textPattern && ((!!rawKey && rawKey.indexOf(textPattern) >= 0) ||
+      (!!textPatternCompact && !!explicitAliasCompact && explicitAliasCompact.indexOf(textPatternCompact) >= 0));
     let specificity = (pfisString(cfg.bank) ? 1 : 0) + (cfgType ? 1 : 0) + (cfgMerchant ? 2 : 0);
     let identityEvidence = false;
 
@@ -3703,7 +3717,8 @@ function pfisResolveConfig(parsed, rawEvidence) {
       // Some existing rows use symbolic aliases in the suffix column (e.g.
       // AIRTELAXIS_CC / AMAZONPAY_CC). Treat them as product hints, not digits.
       const alias = suffixCompact.replace(/(?:creditcard|debitcard|cc|card)$/i, '');
-      const aliasMatched = !!alias && cardContextCompact.indexOf(alias) >= 0;
+      const aliasMatched = !!alias && (cardContextCompact.indexOf(alias) >= 0 ||
+        (!!explicitAliasCompact && explicitAliasCompact.indexOf(alias) >= 0));
       if (aliasMatched) { specificity += 6; identityEvidence = true; }
     }
 
@@ -3815,40 +3830,136 @@ function pfisApplyNotesTemplate(template, dateValue, monthOffset) {
 // Date/amount/input normalization
 // -----------------------------------------------------------------------------
 
-function pfisNormalizeSourceDatePrecision(parsed, evidenceText) {
-  if (!parsed || !(parsed.datetime instanceof Date) || parsed.datePrecision !== 'DATETIME') return parsed;
-  const time = Utilities.formatDate(parsed.datetime, PFIS_TIME_ZONE, 'HH:mm:ss');
+function pfisNormalizeSourceDatePrecision(parsed, evidenceText, params) {
+  if (!parsed || !(parsed.datetime instanceof Date) || isNaN(parsed.datetime.getTime())) return parsed;
   const raw = String(evidenceText || '');
-  const hasClockTime = /\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(raw) ||
-    /\b\d{1,2}\s*(?:AM|PM)\b/i.test(raw);
-  if (time === '00:00:00' && !hasClockTime) parsed.datePrecision = 'DATE_ONLY';
+  const paramsSafe = params && typeof params === 'object' ? params : {};
+  const hasSourceClockTime = pfisHasClockTimeInEvidence_(raw);
+  const receivedAt = pfisGetSourceReceivedAt(paramsSafe);
+  const capturedAt = pfisGetCapturedAt(paramsSafe);
+  let basis = pfisString(parsed.datetimeBasis).toUpperCase();
+
+  if (!basis || basis === 'NA') basis = parsed.datePrecision === 'DATETIME' ? 'TRANSACTION_TIME' : 'DATE_ONLY';
+  if (basis === 'TRANSACTION_TIME' && hasSourceClockTime) {
+    parsed.datetimeBasis = 'TRANSACTION_TIME';
+    parsed.datePrecision = 'DATETIME';
+    return parsed;
+  }
+  if (basis === 'TRANSACTION_TIME' && !hasSourceClockTime) basis = 'DATE_ONLY';
+
+  let fallbackClock = null;
+  let finalBasis = 'DATE_ONLY';
+  if (basis === 'RECEIVED_TIME_FALLBACK') {
+    if (receivedAt) { fallbackClock = receivedAt; finalBasis = 'RECEIVED_TIME_FALLBACK'; }
+    else if (capturedAt) { fallbackClock = capturedAt; finalBasis = 'CAPTURED_TIME_FALLBACK'; }
+  } else if (basis === 'CAPTURED_TIME_FALLBACK') {
+    if (capturedAt) { fallbackClock = capturedAt; finalBasis = 'CAPTURED_TIME_FALLBACK'; }
+    else if (receivedAt) { fallbackClock = receivedAt; finalBasis = 'RECEIVED_TIME_FALLBACK'; }
+  } else {
+    if (receivedAt) { fallbackClock = receivedAt; finalBasis = 'RECEIVED_TIME_FALLBACK'; }
+    else if (capturedAt) { fallbackClock = capturedAt; finalBasis = 'CAPTURED_TIME_FALLBACK'; }
+  }
+
+  if (fallbackClock) {
+    const transactionDay = Utilities.formatDate(parsed.datetime, PFIS_TIME_ZONE, 'yyyy-MM-dd');
+    const fallbackClockText = Utilities.formatDate(fallbackClock, PFIS_TIME_ZONE, 'HH:mm:ss');
+    const combined = pfisParseInputDate(transactionDay + ' ' + fallbackClockText);
+    if (combined && combined.date) {
+      parsed.datetime = combined.date;
+      parsed.datetimeBasis = finalBasis;
+      parsed.datePrecision = finalBasis;
+      return parsed;
+    }
+  }
+
+  const dateOnlyText = Utilities.formatDate(parsed.datetime, PFIS_TIME_ZONE, 'yyyy-MM-dd');
+  const dateOnly = pfisParseInputDate(dateOnlyText);
+  if (dateOnly) parsed.datetime = dateOnly.date;
+  parsed.datetimeBasis = 'DATE_ONLY';
+  parsed.datePrecision = 'DATE_ONLY';
   return parsed;
+}
+
+function pfisHasClockTimeInEvidence_(evidenceText) {
+  const raw = String(evidenceText || '');
+  return /\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(raw) || /\b\d{1,2}\s*(?:AM|PM)\b/i.test(raw);
+}
+
+function pfisParseShortcutTimestamp_(value) {
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+  const text = pfisString(value);
+  if (!text) return null;
+  const parsed = pfisParseInputDate(text);
+  return parsed && parsed.precision === 'DATETIME' ? parsed.date : null;
+}
+
+function pfisGetSourceReceivedAt(params) { return pfisParseShortcutTimestamp_(params && params.receivedAt); }
+function pfisGetCapturedAt(params) { return pfisParseShortcutTimestamp_(params && params.capturedAt); }
+function pfisGetSourceLogReceivedAt(params) { return pfisGetSourceReceivedAt(params) || pfisGetCapturedAt(params) || new Date(); }
+
+function pfisBuildSourceNotes_(baseMeta, parsed, params) {
+  let meta = {};
+  if (baseMeta && typeof baseMeta === 'object' && !Array.isArray(baseMeta)) meta = Object.assign({}, baseMeta);
+  else meta = pfisParseProcessingMeta(baseMeta);
+  const receivedAt = pfisGetSourceReceivedAt(params);
+  const capturedAt = pfisGetCapturedAt(params);
+  meta.accountAlias = pfisCleanText(parsed && parsed.accountAlias);
+  meta.datetimeBasis = pfisString(parsed && parsed.datetimeBasis) || 'DATE_ONLY';
+  meta.sourceReceivedAt = receivedAt ? receivedAt.toISOString() : '';
+  meta.capturedAt = capturedAt ? capturedAt.toISOString() : '';
+  meta.receivedAtBasis = receivedAt ? 'SOURCE_RECEIVED' : (capturedAt ? 'CAPTURED_FALLBACK' : 'BACKEND_INGESTED_FALLBACK');
+  return JSON.stringify(meta);
+}
+
+function pfisRestoreSourceTimeMetadata_(params, source) {
+  if (!params || typeof params !== 'object' || !source) return params;
+  const meta = pfisParseProcessingMeta(source.notes);
+  if (!pfisGetSourceReceivedAt(params) && meta.sourceReceivedAt) params.receivedAt = meta.sourceReceivedAt;
+  if (!pfisGetCapturedAt(params) && meta.capturedAt) params.capturedAt = meta.capturedAt;
+  if (!pfisGetSourceReceivedAt(params) && !pfisGetCapturedAt(params) && source.receivedAt) {
+    if (meta.receivedAtBasis === 'CAPTURED_FALLBACK') params.capturedAt = source.receivedAt;
+    else if (meta.receivedAtBasis === 'SOURCE_RECEIVED') params.receivedAt = source.receivedAt;
+  }
+  return params;
 }
 
 function pfisParseTxnString(raw) {
   if (typeof raw !== 'string') return null;
   const parts = raw.split('|').map(function (value) { return String(value === undefined || value === null ? '' : value).trim(); });
-  // Some Shortcuts concatenate an optional leading value as " | datetime|...".
-  // Accept only the unambiguous case: 11 fields with the first field empty. Do
-  // not guess how to repair arbitrary missing middle fields because that shifts
-  // the meaning of amount/account/type/merchant fields.
-  if (parts.length === 11 && parts[0] === '') parts.shift();
-  if (parts.length !== 10) return null;
+  // Some Shortcut versions prepend one empty value. Accept only this exact,
+  // unambiguous case for both supported layouts; never shift missing middle fields.
+  if ((parts.length === 11 || parts.length === 13) && parts[0] === '') parts.shift();
+  const isLegacyTenField = parts.length === 10;
+  if (!isLegacyTenField && parts.length !== 12) return null;
+
   const dateInfo = pfisParseInputDate(parts[0]);
   const amount = pfisParseAmount(parts[1], false);
   const bank = pfisCleanText(parts[2]);
-  const accountType = pfisCleanText(parts[3]); // optional by contract
-  const instrument = pfisCleanText(parts[4]);
-  const type = pfisNormalizeType(parts[5]);
-  const merchant = pfisCleanText(parts[6]);
-  const counterparty = pfisCleanText(parts[7]);
-  const refNo = pfisCleanText(parts[8]);
-  const balanceAfter = pfisParseAmount(parts[9], true);
+  const accountType = pfisCleanText(parts[3]);
+  const accountAlias = isLegacyTenField ? '' : pfisCleanText(parts[4]);
+  const instrument = pfisCleanText(parts[isLegacyTenField ? 4 : 5]);
+  const type = pfisNormalizeType(parts[isLegacyTenField ? 5 : 6]);
+  const merchant = pfisCleanText(parts[isLegacyTenField ? 6 : 7]);
+  const counterparty = pfisCleanText(parts[isLegacyTenField ? 7 : 8]);
+  const refNo = pfisCleanText(parts[isLegacyTenField ? 8 : 9]);
+  const balanceAfter = pfisParseAmount(parts[isLegacyTenField ? 9 : 10], true);
+  const basisRaw = isLegacyTenField ? '' : pfisCleanText(parts[11]).toUpperCase();
+  const allowedDateBases = ['TRANSACTION_TIME', 'RECEIVED_TIME_FALLBACK', 'CAPTURED_TIME_FALLBACK', 'DATE_ONLY'];
+  const datetimeBasis = isLegacyTenField
+    ? (dateInfo && dateInfo.precision === 'DATETIME' ? 'TRANSACTION_TIME' : 'DATE_ONLY')
+    : (basisRaw === 'NA' || basisRaw === '' ? '' : basisRaw);
+
   if (!dateInfo || !isFinite(amount) || amount === 0 || !bank) return null;
+  if (!isLegacyTenField && allowedDateBases.indexOf(datetimeBasis) < 0) return null;
+  if (datetimeBasis === 'TRANSACTION_TIME' && dateInfo.precision !== 'DATETIME') return null;
+  if (datetimeBasis === 'DATE_ONLY' && dateInfo.precision !== 'DATE_ONLY') return null;
+  if (datetimeBasis.indexOf('_FALLBACK') >= 0 && dateInfo.precision !== 'DATETIME') return null;
+
   return {
-    datetime: dateInfo.date, datePrecision: dateInfo.precision, amount: amount, bank: bank,
-    accountType: accountType, instrument: instrument, type: type, merchant: merchant,
-    counterparty: counterparty, refNo: refNo, balanceAfter: balanceAfter
+    datetime: dateInfo.date, datePrecision: dateInfo.precision, datetimeBasis: datetimeBasis,
+    amount: amount, bank: bank, accountType: accountType, accountAlias: accountAlias,
+    instrument: instrument, type: type, merchant: merchant, counterparty: counterparty,
+    refNo: refNo, balanceAfter: balanceAfter
   };
 }
 
@@ -4460,7 +4571,7 @@ function pfisDataIntegritySummary() {
       const parseStatus = pfisString(source.parseStatus).toUpperCase();
       if (linked && parseStatus !== 'SUPERSEDED' && !txIds[linked]) brokenLinks++;
       if (pfisString(source.extractedDate) && parseStatus !== 'SUPERSEDED' && parseStatus !== 'PARSE_FAILED' &&
-        ['DATETIME', 'DATE_ONLY'].indexOf(pfisString(source.datePrecision).toUpperCase()) < 0) {
+        ['DATETIME', 'DATE_ONLY', 'RECEIVED_TIME_FALLBACK', 'CAPTURED_TIME_FALLBACK'].indexOf(pfisString(source.datePrecision).toUpperCase()) < 0) {
         unknownDatePrecision++;
       }
     });

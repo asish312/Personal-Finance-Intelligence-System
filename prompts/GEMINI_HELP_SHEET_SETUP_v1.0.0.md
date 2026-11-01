@@ -46,7 +46,7 @@ Safety: This Help tab is instructions only; no transaction data is stored here.
 2. Section: INSERT
 Task: Add new transaction
 Information required: Complete original SMS/email, source type, actual date/time or date-only, signed amount, bank, account type, instrument, type if known, merchant, counterparty/reference/balance if present.
-Prompt: "Add this completed transaction to PFIS. Source type: [SMS/EMAIL]. Original message: [PASTE COMPLETE MESSAGE]. Extract exactly ten fields in this order: datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after. Use NA for unknown optional fields and keep all nine delimiters. Debit negative, credit positive. Validate date, non-zero amount and bank. Check idempotency/duplicate evidence. If the authenticated PFIS ingest endpoint can be invoked, submit one POST ingest and verify the returned Transaction ID and Source Log evidence. Otherwise return the payload and tell me it was not inserted. Never append a ledger row directly."
+Prompt: "Add this completed transaction to PFIS. Source type: [SMS/EMAIL]. Original message: [PASTE COMPLETE MESSAGE]. Extract exactly twelve fields in this order: datetime | signed_amount | bank | account_type | account_alias | instrument | type | merchant_name | counterparty | ref_no | balance_after | datetime_basis. Use NA for unknown optional fields and keep all eleven delimiters. Debit negative, credit positive. Preserve an explicit account/card alias. Use transaction time when stated; otherwise use the supplied original received timestamp, then capture timestamp, and label the fallback correctly. Check idempotency/duplicate evidence. If the authenticated PFIS ingest endpoint can be invoked, submit one POST ingest and verify the returned Transaction ID and Source Log evidence. Otherwise return the payload and tell me it was not inserted. Never append a ledger row directly."
 Safety: Never invent details, IDs, source hashes or a transaction time. A prompt-only environment cannot claim an insertion.
 
 3. Section: LOOKUP
@@ -87,8 +87,8 @@ Safety: Rejected & Archive Log preserves the record. No permanent delete.
 
 9. Section: REPROCESS
 Task: Reprocess failed source
-Information required: Source ID and corrected ten-field string.
-Prompt: "Inspect Source ID [SOURCE_ID]. If Parse Status is PARSE_FAILED, CONFLICT or DUPLICATE_CANDIDATE, validate this corrected ten-field string: [PASTE STRING]. Use the PFIS reprocesssource API only. Preserve original source history and verify new links. Do not create rows manually."
+Information required: Source ID and corrected twelve-field string (legacy ten-field payloads are accepted during migration).
+Prompt: "Inspect Source ID [SOURCE_ID]. If Parse Status is PARSE_FAILED, CONFLICT or DUPLICATE_CANDIDATE, validate this corrected twelve-field string (legacy ten-field payloads are accepted): [PASTE STRING]. Use the PFIS reprocesssource API only. Preserve original source history and verify new links. Do not create rows manually."
 Safety: Only eligible statuses; no reprocess of terminal archived records.
 
 10. Section: DAILY

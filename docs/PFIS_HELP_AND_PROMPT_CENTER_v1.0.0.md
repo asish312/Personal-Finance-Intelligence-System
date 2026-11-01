@@ -58,20 +58,23 @@ If the original message is unavailable, supply:
 
 Do not invent an account number, card suffix, reference, merchant, timestamp or balance.
 
-PFIS's canonical extraction string has exactly ten fields and nine pipe delimiters:
+PFIS's canonical extraction string now has exactly twelve fields and eleven pipe delimiters:
 
-**datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after**
+**datetime | signed_amount | bank | account_type | account_alias | instrument | type | merchant_name | counterparty | ref_no | balance_after | datetime_basis**
+
+The backend temporarily accepts legacy ten-field payloads during rollout; the missing account_alias is treated as blank and time precision is inferred from the old datetime field.
 
 Example only — all data below is fictional:
 
-    14/10/2026 09:15:00|-845.50|Demo Bank|Savings Account|UPI|expense|Harbor Coffee|Harbor Coffee|DEMO-UTR-1001|NA
+    2026-10-18 10:16:36|-150.00|Axis|Savings Account|NA|UPI|transfer|DEMO PERSON|DEMO PERSON|DEMO-UTR-0001|NA|TRANSACTION_TIME
 
 Rules:
-- Debit/outflow: negative amount.
-- Credit/inflow: positive amount.
-- Amount: numeric, two decimals.
-- Use NA for unknown optional fields, but preserve every delimiter.
+- Debit/outflow: negative amount; credit/inflow: positive amount; amount has two decimals.
+- account_alias preserves an explicitly stated card/account product label such as SBI_CASHBACK_CC; it is not the Config account code.
+- datetime_basis distinguishes source transaction time, message-received fallback, capture-time fallback and date-only precision.
+- Use NA for unknown optional fields, but preserve all eleven delimiters.
 - Never add a literal pipe inside a field.
+- Supply receivedAt only when the original message delivery time is available; always supply capturedAt from the Shortcut processing time. Do not pass capture time as receipt time.
 - The backend creates the Transaction ID, Source ID, source hash and audit/replay metadata. Gemini must not invent these values.
 
 ### B. Update an existing transaction
@@ -178,7 +181,7 @@ Do not choose for me. Explain the evidence and show the exact proposed resolutio
 
 ### 7. Reprocess a failed source
 
-"Review Source ID [SOURCE_ID] and its original Source Log message. Explain why it is PARSE_FAILED, CONFLICT or DUPLICATE_CANDIDATE. If I provide a corrected ten-field transaction string, validate every field and use the PFIS reprocesssource API only when that source status is eligible. Preserve the original message and previous source history. Do not create a second transaction manually."
+"Review Source ID [SOURCE_ID] and its original Source Log message. Explain why it is PARSE_FAILED, CONFLICT or DUPLICATE_CANDIDATE. If I provide a corrected twelve-field transaction string (legacy ten-field payloads remain accepted), validate every field and use the PFIS reprocesssource API only when that source status is eligible. Preserve the original message and previous source history. Do not create a second transaction manually."
 
 ### 8. Run the daily check
 
@@ -188,7 +191,7 @@ Do not choose for me. Explain the evidence and show the exact proposed resolutio
 
 | User request | Supported route | Human confirmation |
 |---|---|---|
-| Insert a completed transaction | ingest POST with full source evidence and ten-field string | No, for a clean validated transaction if the authorised endpoint can actually be invoked |
+| Insert a completed transaction | ingest POST with full source evidence and twelve-field string (legacy ten-field payloads remain accepted) | No, for a clean validated transaction if the authorised endpoint can actually be invoked |
 | Update Category / Type / Merchant / Purpose | update POST | User supplies the new value and reason |
 | Reclassify from already-linked evidence using current Rules/Config | reclassifyfromevidence POST | Only for an incomplete/provisional classification; never overwrite a valid human classification silently |
 | Reprocess eligible failed/conflicting source | reprocesssource POST | Corrected transaction string must be supplied and validated |

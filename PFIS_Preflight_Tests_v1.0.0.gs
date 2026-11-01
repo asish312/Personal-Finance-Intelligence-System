@@ -76,10 +76,10 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
 
     // Pure logic tests do not access or mutate any spreadsheet.
     pfisPreflightRunCase_(report, 'PFIS release identifiers remain v1.0.0', function () {
-      pfisPreflightAssert_(ENGINE_VERSION === 'v1.0.0', 'Engine version must remain v1.0.0.');
-      pfisPreflightAssert_(SCHEMA_VERSION === 'v1.0.0', 'Schema version must remain v1.0.0.');
-      pfisPreflightAssert_(PARSER_VERSION === 'v1.0.0', 'Parser version must remain v1.0.0.');
-      return 'Engine, schema and parser identifiers remain v1.0.0';
+      pfisPreflightAssert_(ENGINE_VERSION === 'v1.1.0', 'Engine version must be v1.1.0.');
+      pfisPreflightAssert_(SCHEMA_VERSION === 'v1.0.0', 'Physical workbook schema must remain v1.0.0.');
+      pfisPreflightAssert_(PARSER_VERSION === 'v1.1.0', 'Parser version must be v1.1.0.');
+      return 'Engine/parser v1.1.0; physical workbook schema remains v1.0.0';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Evidence reclassification is allowed through the POST router', function () {
@@ -150,6 +150,60 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       pfisPreflightAssert_(parsed.refNo === 'DEMO-UTR-0001', 'Reference field shifted.');
       pfisPreflightAssert_(parsed.balanceAfter === '', 'NA balance should be treated as absent, not numeric.');
       return 'Parsed all 10 fields correctly; NA balance normalized to blank';
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, '12-field parser preserves explicit account alias and timestamp basis', function () {
+      var input = '2026-10-31 10:42:13|-37800.00|SBI Card|Credit Card|SBI_CASHBACK_CC|Credit Card|expense|FROOTLEHFZ|FROOTLEHFZ|NA|NA|RECEIVED_TIME_FALLBACK';
+      var parsed = pfisParseTxnString(input);
+      pfisPreflightAssert_(!!parsed, 'Valid 12-field transaction payload was rejected.');
+      pfisPreflightAssert_(parsed.accountAlias === 'SBI_CASHBACK_CC', 'Account alias was lost or shifted.');
+      pfisPreflightAssert_(parsed.instrument === 'Credit Card' && parsed.type === 'expense', 'Instrument/type fields shifted.');
+      pfisPreflightAssert_(parsed.merchant === 'FROOTLEHFZ' && parsed.counterparty === 'FROOTLEHFZ', 'Merchant/counterparty fields shifted.');
+      pfisPreflightAssert_(parsed.datetimeBasis === 'RECEIVED_TIME_FALLBACK', 'Timestamp provenance was not retained.');
+      return 'All 12 fields mapped, including SBI_CASHBACK_CC and received-time provenance';
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'Received timestamp supplies a disclosed clock fallback without changing transaction date', function () {
+      var parsed = pfisParseTxnString('2026-10-31 10:42:13|-37800.00|SBI Card|Credit Card|SBI_CASHBACK_CC|Credit Card|expense|FROOTLEHFZ|FROOTLEHFZ|NA|NA|RECEIVED_TIME_FALLBACK');
+      var raw = 'Rs.37,800 spent on your SBI_CASHBACK_CC at FROOTLEHFZ on 31/10/26.';
+      pfisNormalizeSourceDatePrecision(parsed, raw, { receivedAt: '2026-10-31T10:42:13+05:30' });
+      var formatted = Utilities.formatDate(parsed.datetime, PFIS_TIME_ZONE, 'yyyy-MM-dd HH:mm:ss');
+      pfisPreflightAssert_(formatted === '2026-10-31 10:42:13', 'Received-time fallback changed unexpectedly: ' + formatted);
+      pfisPreflightAssert_(parsed.datePrecision === 'RECEIVED_TIME_FALLBACK', 'Fallback precision was not retained.');
+      pfisPreflightAssert_(!pfisIsPrecision(parsed.datePrecision), 'Fallback time must not qualify as exact transaction time for duplicate matching.');
+      return formatted + ' using RECEIVED_TIME_FALLBACK; excluded from exact-time duplicate matching';
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'Capture timestamp is the fallback only when source receipt time is unavailable', function () {
+      var parsed = pfisParseTxnString('2026-10-31 15:16:58|-37800.00|SBI Card|Credit Card|SBI_CASHBACK_CC|Credit Card|expense|FROOTLEHFZ|FROOTLEHFZ|NA|NA|CAPTURED_TIME_FALLBACK');
+      var raw = 'Rs.37,800 spent on your SBI_CASHBACK_CC at FROOTLEHFZ on 31/10/26.';
+      pfisNormalizeSourceDatePrecision(parsed, raw, { capturedAt: '2026-10-31T15:16:58+05:30' });
+      pfisPreflightAssert_(Utilities.formatDate(parsed.datetime, PFIS_TIME_ZONE, 'yyyy-MM-dd HH:mm:ss') === '2026-10-31 15:16:58',
+        'Capture timestamp fallback was not applied.');
+      pfisPreflightAssert_(parsed.datePrecision === 'CAPTURED_TIME_FALLBACK', 'Capture fallback basis was not retained.');
+      pfisPreflightAssert_(!pfisIsPrecision(parsed.datePrecision), 'Capture fallback must not qualify as exact transaction time.');
+      return 'CAPTURED_TIME_FALLBACK is applied and marked imprecise';
+    }, startedAt);
+
+    pfisPreflightRunCase_(report, 'Explicit account alias resolves symbolic Config account/card mapping', function () {
+      var previousConfigCache = PFIS_RUNTIME_CONFIG_CACHE;
+      try {
+        PFIS_RUNTIME_CONFIG_CACHE = [{
+          bank: 'SBI Card', accountType: 'Credit Card', accountCardSuffix: 'SBI_CASHBACK_CC',
+          merchantContains: '', account: 'SBI_CASHBACK_CC', cardName: 'SBI Cashback',
+          instrument: 'Credit Card', isInternal: false, priority: 10, textPattern: ''
+        }];
+        var parsed = {
+          bank: 'SBI Card', accountType: 'Credit Card', instrument: 'Credit Card',
+          merchant: 'FROOTLEHFZ', accountAlias: 'SBI_CASHBACK_CC'
+        };
+        var resolved = pfisResolveConfig(parsed, 'Rs.37,800 spent at FROOTLEHFZ.');
+        pfisPreflightAssert_(resolved.account === 'SBI_CASHBACK_CC', 'Explicit account alias did not resolve the configured account.');
+        pfisPreflightAssert_(resolved.cardName === 'SBI Cashback', 'Configured friendly card name was not resolved.');
+      } finally {
+        PFIS_RUNTIME_CONFIG_CACHE = previousConfigCache;
+      }
+      return 'AI-extracted account alias resolves its matching Config row and canonical friendly card label';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Parser still rejects shifted or unexplained extra fields', function () {

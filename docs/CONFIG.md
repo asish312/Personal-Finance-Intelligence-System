@@ -25,6 +25,8 @@ Optional J header: Text Pattern. The Apps Script reads J only when its header is
 
 The engine currently declares nine core Config fields A:I and optionally reads J. Do not insert or reorder columns in A:J.
 
+For a card whose SMS exposes a symbolic product label (for example SBI_CASHBACK_CC), set that exact label in **Account/Card Suffix** (column C). The extraction prompt preserves it as account_alias; the engine uses it as identity evidence to resolve this Config row. Keep column E as the canonical PFIS account code and column F as the friendly card name—do not use the raw alias as a substitute for a canonical Account code unless that is intentionally your configured account code.
+
 ## Current mapped rows relevant to cash flow
 
 The latest uploaded workbook contains the following account mappings:

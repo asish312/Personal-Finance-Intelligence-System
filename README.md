@@ -144,7 +144,7 @@ Imagine a fictional alert:
 | Stage | PFIS action | Result |
 |---|---|---|
 | Capture | Shortcut retains the full original message | Original evidence is preserved |
-| Parse | AI extraction returns ten structured fields | A consistent transaction payload |
+| Parse | AI extraction returns twelve structured fields | A consistent transaction payload |
 | Validate | Apps Script checks date, non-zero amount, bank and field structure | Malformed payloads do not contaminate the canonical ledger |
 | Configure | Rules and Config resolve type, category, merchant and account | Repeatable classification |
 | Reconcile | Exact replay, cross-channel and payment-event matchers inspect existing evidence | One event can have several supporting notifications |
@@ -152,28 +152,32 @@ Imagine a fictional alert:
 | Audit | Change Log records supported system/user changes | Explainable corrections |
 | Report | Workbook formulas and charts consume the ledger | Financial analysis |
 
-### The ten-field transaction contract
+### The twelve-field transaction contract
 
-The Shortcut sends the following <code>txnString</code> fields in this exact order:
+New Shortcut output sends these fields in this exact order:
 
 ~~~text
-datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after
+datetime | signed_amount | bank | account_type | account_alias | instrument | type | merchant_name | counterparty | ref_no | balance_after | datetime_basis
 ~~~
 
 | Field | Rule |
 |---|---|
-| datetime | Actual transaction date/time. Keep date-only precision when the source has no clock time. |
+| datetime | Actual transaction date/time. If the source omits its clock, use original message receipt time or capture time only as a disclosed fallback. |
 | signed_amount | Numeric, two decimals. Debits/outflows negative; credits/inflows positive. |
 | bank | Financial institution identified by the alert |
-| account_type | Savings, current, credit card, wallet, etc.; optional if unknown |
-| instrument | UPI, card, NEFT, IMPS, net banking, auto debit, etc.; optional if unknown |
+| account_type | Savings, current, credit card, wallet, cash, etc. |
+| account_alias | Exact source-visible account/card product label, e.g. SBI_CASHBACK_CC; otherwise NA |
+| instrument | UPI, card, NEFT, IMPS, net banking, auto debit, etc. |
 | type | expense, income, card_payment, investment, transfer, refund or unresolved |
 | merchant_name | Merchant, biller or readable event descriptor |
 | counterparty | Sender/recipient where the source identifies one |
 | ref_no | UTR/RRN/order/reference number only when explicitly provided |
-| balance_after | Actual post-transaction account balance only; otherwise blank/NA |
+| balance_after | Actual post-transaction account balance only; otherwise NA |
+| datetime_basis | TRANSACTION_TIME, RECEIVED_TIME_FALLBACK, CAPTURED_TIME_FALLBACK or DATE_ONLY |
 
-Do not use an available balance, credit limit, statement balance or minimum due as the transaction amount. Do not use the SMS/email arrival time as the transaction time. Do not shift fields to compensate for a missing middle value.
+The engine temporarily accepts legacy ten-field payloads while existing Shortcuts are updated. New Shortcuts must emit twelve fields. A fallback clock is stored as an imprecise timestamp and is not used for exact-time duplicate matching.
+
+Do not use an available balance, credit limit, statement balance or minimum due as the transaction amount. Do not replace an explicit transaction date with a different message-received date. Keep receivedAt (original delivery time) separate from capturedAt (Shortcut processing time).
 
 ### What if the parser cannot produce all fields?
 
@@ -188,7 +192,7 @@ That is the correct separation of evidence and ledger. The v1.0.0 API now includ
 5. If date, amount or bank cannot be trusted, keep it as a source-only case until corrected.
 6. On human correction, reprocess the exact original source and retain the original parse-failure history as superseded/audited evidence.
 
-This avoids two bad extremes: silently losing a real payment, or inserting invented financial facts just to satisfy a ten-field parser contract.
+This avoids two bad extremes: silently losing a real payment, or inserting invented financial facts just to satisfy a twelve-field parser contract.
 
 ### Duplicate and multi-notification policy
 
@@ -471,7 +475,7 @@ flowchart TD
   B --> C["Run extraction prompt"]
   C --> D{"Parser output"}
   D -->|"IGNORE"| E["Stop: not a completed transaction"]
-  D -->|"10 fields"| F["POST JSON to /exec"]
+  D -->|"12 fields (legacy 10 accepted)"| F["POST JSON to /exec"]
   F --> G{"nextAction"}
   G -->|"SHOW_RECEIPT"| H["Display receipt"]
   G -->|"CLASSIFY_CATEGORY"| I["Run category fallback + validate allowed value"]
@@ -512,9 +516,9 @@ For a caller-requested review, acknowledge only after a human checks the source:
 ### Extraction prompt — core rules
 
 Use the full copy/paste extraction instructions in [iOS Shortcut Prompt Library](prompts/IOS_SHORTCUT_PROMPTS_v1.0.0.md). The Shortcut extraction action must:
-- return exactly <code>IGNORE</code> or ten pipe-separated fields;
-- use the transaction time, not the notification delivery time;
-- preserve date-only precision; do not invent midnight as an event time;
+- return exactly <code>IGNORE</code> or twelve pipe-separated fields (legacy ten-field payloads are accepted temporarily);
+- use the transaction time when stated; otherwise use the original receipt timestamp, then capture timestamp, with an explicit datetime_basis fallback label;
+- preserve datetime_basis; do not invent midnight or mislabel a received/captured fallback as transaction time;
 - make debits negative and credits positive;
 - distinguish credit-card purchase (expense) from credit-card bill payment (card_payment);
 - set unknown optional fields to NA rather than shifting columns;

@@ -96,7 +96,7 @@ Saving Apps Script source does not update an already-versioned Web App deploymen
 
 Use fictional test data first. Verify:
 
-- A valid ten-field transaction creates one Transaction Log row and one Source Log row.
+- A valid twelve-field transaction (or a legacy ten-field payload during migration) creates one Transaction Log row and one Source Log row. The Source Log retains account alias and datetime-basis metadata.
 - The original source text remains intact in Source Log.
 - An exact replay does not create a second transaction.
 - A malformed financial notification remains a source-only PARSE_FAILED case.

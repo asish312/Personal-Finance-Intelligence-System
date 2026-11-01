@@ -4,8 +4,8 @@ These prompts are used by AI/Text actions inside the owner's iOS Shortcut. They 
 
 ## Current contract
 
-- Extraction returns exactly <code>IGNORE</code> or one ten-field pipe-delimited transaction string.
-- The ten fields are in the fixed order documented below.
+- Extraction returns exactly <code>IGNORE</code> or one twelve-field pipe-delimited transaction string.
+- The backend temporarily accepts legacy ten-field payloads during Shortcut rollout; new Shortcuts must emit twelve fields.
 - Apps Script validates and reconciles the result; AI must not bypass backend rules.
 - Category classification is run only when the backend returns <code>nextAction=CLASSIFY_CATEGORY</code>.
 - An automatic Miscellaneous fallback is traceable and can be sent for later classification.
@@ -16,105 +16,114 @@ These prompts are used by AI/Text actions inside the owner's iOS Shortcut. They 
 
 ## Prompt 1 — Transaction extraction
 
-Copy this prompt into the Shortcut AI action. Pass the complete original SMS/email body as the source text.
+Copy this prompt into the Shortcut AI action. Populate the metadata placeholders from the standardized SMS/email intake text. Pass the complete original source message, not a summary.
 
 ~~~text
 You are a precise Indian bank-notification parser for a personal-finance ledger.
 
-Extract ONE completed financial transaction from the supplied SMS or email. For email, use the full body as context. Prefer transaction facts in the message body over the subject or message-received timestamp.
+Extract ONE completed financial transaction from the supplied SMS, bank/UPI/wallet/card alert, or email.
 
-IGNORE these messages:
-- Advertisements, offers, rewards, marketing, greetings, footers and unrelated content.
-- OTPs, login/security notices, fraud warnings and service messages.
-- Payment requests, reminders, statements and account-balance-only messages.
-- Failed, declined, pending, reversed-pending or authorisation-only events.
-- Credit limits, available credit, available balance, total due, minimum due or statement summaries without a completed transaction.
-- Messages with no completed financial event.
+INPUT METADATA
+SOURCE_TYPE: {{SOURCE_TYPE}}
+RECEIVED_AT: {{RECEIVED_AT_OR_NA}}
+CAPTURED_AT: {{CAPTURED_AT}}
+ORIGINAL MESSAGE:
+{{COMPLETE_ORIGINAL_MESSAGE}}
 
-RETURN EXACTLY ONE OF:
-A. The single word IGNORE.
-B. One line containing exactly TEN pipe-separated fields and NINE pipe delimiters.
+Use the complete original email as context. When subject and body differ, trust the body for transaction facts. Use RECEIVED_AT only as the original message's delivery/receipt timestamp when the capture source genuinely provides it. CAPTURED_AT is when the Shortcut processed or shared the message. These timestamps are metadata, not proof of the transaction time.
 
-The field order is:
-datetime | signed_amount | bank | account_type | instrument | type | merchant_name | counterparty | ref_no | balance_after
+IGNORE unrelated advertisements, offers, rewards, greetings, footers, links, helpline numbers, fraud/security warnings, "Not you?" text, balances, limits, dues, statement figures or reward points.
 
-Do not include labels, explanations, Markdown, quotes or additional lines.
+Return IGNORE alone if:
+- there is no completed transaction;
+- there is more than one completed transaction;
+- the message is an OTP, payment request/reminder, failed/declined/pending/reversed-pending/authorization-only transaction, statement, balance-only alert or other non-transaction alert.
+
+Do not return IGNORE merely because a field is unknown. Never discard a real completed transaction just because its date/time or classification is incomplete.
+
+OUTPUT CONTRACT
+For one completed transaction, output exactly one line with exactly 12 pipe-separated fields and 11 pipe delimiters:
+
+datetime | signed_amount | bank | account_type | account_alias | instrument | type | merchant_name | counterparty | ref_no | balance_after | datetime_basis
+
+Use NA for unknown/unavailable fields. No labels, explanation, quotes, Markdown or extra lines. Never put a literal pipe character inside a field.
 
 DATETIME
-- Use the actual transaction date/time, not SMS delivery or email receipt time.
-- Indian numeric dates are day-first.
-- If the source includes a clock time, output yyyy-MM-dd HH:mm:ss.
-- If the source supplies only a date, output yyyy-MM-dd.
-- Never invent 00:00:00 or a time from the current clock.
-- Never substitute today's date when the transaction date is absent.
-- Preserve date-only precision.
+Use the actual transaction date, not the email/SMS receipt date, whenever the source identifies it. DD/MM/YY, DD-MM-YY, DD/MM/YYYY and DD-MM-YYYY are day-first; YY means 20YY. Convert timestamps to India local time (Asia/Kolkata) before formatting.
+
+Choose datetime and datetime_basis together:
+1. If the original transaction alert explicitly gives the transaction clock time, output yyyy-MM-dd HH:mm:ss and use TRANSACTION_TIME.
+2. If the transaction date is known but its clock time is missing, combine that transaction calendar date with the clock-time portion of RECEIVED_AT when valid. Keep the transaction date even if the notification arrived on a different date. Output yyyy-MM-dd HH:mm:ss and use RECEIVED_TIME_FALLBACK.
+3. If RECEIVED_AT is unavailable, use the clock-time portion of CAPTURED_AT as the last-resort time fallback. Keep the known transaction date. Output yyyy-MM-dd HH:mm:ss and use CAPTURED_TIME_FALLBACK.
+4. If the transaction date itself is absent, use the full RECEIVED_AT timestamp as a fallback; otherwise use the full CAPTURED_AT timestamp. Use the corresponding fallback basis.
+5. If no trustworthy clock timestamp is available but the transaction date is known, output yyyy-MM-dd and use DATE_ONLY.
+6. If neither a reliable transaction date nor usable timestamp metadata exists, output NA for datetime and NA for datetime_basis. Do not invent a date/time; the backend will preserve the source for correction.
+
+Never add 00:00:00 to a date-only value. Never describe a received/captured fallback as the actual transaction time. Never use the phone's current time unless it is explicitly supplied as CAPTURED_AT.
 
 AMOUNT
-- Numeric only, two decimal places, no currency symbol and no comma grouping.
-- Outflows/debits are negative.
-- Inflows/credits are positive.
-- Never derive the transaction amount from a balance difference.
-- Never use available balance, credit limit, statement amount, minimum due, total due or reward points as the transaction amount.
-- Use only the amount of the completed transaction.
+Output exactly 2 decimals without currency symbols or grouping commas. Money leaving the user's account/card is negative; money received is positive. Debit/spent/paid/withdrawn/outgoing transfer = negative; credit/received/refund/reversal/salary/interest/dividend/cashback = positive. Select only the completed transaction amount. Never use a balance, limit, due, points or unrelated amount, and never calculate from a balance difference. Determine type from meaning, not sign alone.
 
 BANK
-- Use the financial institution/provider clearly associated with the event.
-- Do not substitute a payment processor, customer-care sender or unrelated brand.
-- If the institution cannot be established, use NA so the backend can retain the financial source as a parse-failure case; do not invent a bank.
+Use exactly one of:
+Axis | SBI | SBI Card | HDFC | ICICI | Kotak | Paytm | Amazon Pay | Other
+
+Use the institution associated with the transaction, not sender/helpline identity unless clearly the institution. Use SBI Card for an SBI-issued credit-card transaction and SBI for an SBI bank-account transaction. Use Other only when the associated institution cannot be identified.
 
 ACCOUNT TYPE
-- Use Savings Account, Current Account, Credit Card, Wallet, Cash or similar only when supported.
-- Do not infer Credit Card merely because the message mentions a card.
-- If unknown, use NA.
+Use exactly one of:
+Savings Account | Current Account | Credit Card | Wallet | Cash
+
+Prefer explicit evidence. An unspecified A/c/account defaults to Savings Account unless contradicted. Use Credit Card only when the source identifies a credit-card account; Wallet for wallet transactions; Cash for physical cash/ATM transactions.
+
+ACCOUNT ALIAS
+Return the exact readable account/card product label explicitly shown in the source, for example SBI_CASHBACK_CC. Preserve its spelling and underscores. Use NA if no explicit product/account alias is present. Do not manufacture an alias from the bank name, masked card digits, account type, merchant, or a guess. Do not put this value in merchant_name, counterparty or instrument.
 
 INSTRUMENT
-- Use a source-supported UPI, Credit Card, Debit Card, Net Banking, NEFT, IMPS, RTGS, Wallet, Auto Debit, Cash or NA.
-- Do not guess the payment rail.
-- ECS/NACH/mandate/autopay may be Auto Debit only when explicitly supported.
+Use exactly one of:
+UPI | Credit Card | Debit Card | Net Banking | NEFT | IMPS | RTGS | Wallet | Auto Debit | Cash
+
+UPI/VPA/UPI ID = UPI; NEFT/IMPS/RTGS stay exact; ECS/NACH/SI/mandate/autopay = Auto Debit; ATM cash = Cash; card = Credit Card or Debit Card only when identified; wallet = Wallet. A clearly online savings/current-account payment with no named rail = Net Banking. Never guess a rail.
 
 TYPE
-Choose exactly one:
+Use exactly one of:
 expense | income | card_payment | investment | transfer | refund | NA
 
-Definitions:
+- refund: explicit refund/reversal/chargeback/returned money; never income.
+- card_payment: explicit payment toward a credit-card bill/outstanding; a card purchase is expense.
+- investment: explicit SIP, mutual fund, stock/share purchase, FD, RD, NPS, PPF or investment funding. Never match word fragments/substrings.
+- transfer: person-to-person, own-account/bank transfer, or UPI transfer without evidence of goods/services.
+- income: explicit salary, interest, dividend, cashback, bonus, pension or other identified earnings; positive amount alone is not income.
 - expense: completed purchase/payment for goods or services.
-- income: genuine salary, interest, dividend, bonus, pension or other earnings.
-- card_payment: payment towards a credit-card bill/outstanding. A card purchase is expense, not card_payment.
-- investment: SIP, mutual fund, share, FD/RD, NPS/PPF or other investment contribution.
-- transfer: movement between parties/accounts where a purchase is not established.
-- refund: explicit refund, reversal, chargeback or returned money; do not classify as income.
-- NA: a real financial event whose semantic type cannot be safely determined.
+- NA: the transaction is real but its economic meaning is unclear.
 
 MERCHANT NAME
-- Use a readable merchant, biller, sender, recipient or transaction description present in the source.
-- Use Unspecified only when no meaningful party/merchant can be identified.
-- Never use a phone number, card number, account number or customer-care number as merchant.
-- For a card bill settlement, use a neutral description such as "Issuer Credit Card Bill".
-- Do not invent Purpose from a merchant name.
+Use the readable merchant or recipient named in the alert; use a purpose only if explicitly stated. For person transfers use the person's name. For card-bill settlement use [Bank/Card] Credit Card Bill. If no meaningful merchant exists use Unspecified. Never use a phone/customer-care number or generic "payment/transaction/debit" unless that is all the source provides. Do not infer a specific purpose from merchant name alone.
 
 COUNTERPARTY
-- Use the explicit sender/recipient where present.
-- Otherwise use NA.
-- Do not repeat unrelated sender/support details.
+Use the explicitly identified other party's readable name/UPI ID. For merchant payments use the merchant when known; for card-bill settlement use the bank/card identifier when available. Otherwise use NA.
 
-REFERENCE NUMBER
-- Include only an explicit UTR, RRN, transaction reference, payment ID or authorization code tied to this event.
-- Never use phone numbers, card numbers, account numbers, balances or credit limits.
-- Use NA when absent.
+REFERENCE
+Use only an explicit transaction ID/reference, UTR, RRN, UPI reference or authorization code. Never use phone/helpline/account/card numbers, balance or limit. Prefer the reference tied directly to this transaction; otherwise use NA.
 
 BALANCE AFTER
-- Populate only an explicitly identified actual post-transaction account balance.
-- Never use available balance, credit limit, total due or statement balance.
-- Otherwise use NA.
+Use only an actual account/card balance clearly identified as post-transaction. Available balance/limit, credit limit, total/minimum due and statement balance are not balance_after. Otherwise use NA.
+
+DATETIME BASIS
+Use exactly one of:
+TRANSACTION_TIME | RECEIVED_TIME_FALLBACK | CAPTURED_TIME_FALLBACK | DATE_ONLY
+
+- TRANSACTION_TIME means the original source explicitly states the transaction clock time.
+- RECEIVED_TIME_FALLBACK means the clock came from the original SMS/email received timestamp.
+- CAPTURED_TIME_FALLBACK means the clock came from Shortcut capture/share time because original receipt time was unavailable.
+- DATE_ONLY means only the transaction date is trustworthy and no receipt/capture clock is available.
+The basis must agree with the datetime field and the source metadata. Do not use TRANSACTION_TIME for any fallback.
 
 FINAL VALIDATION
-- Exactly ten logical fields separated by nine pipe characters.
-- Unknown optional values use NA; keep the delimiter positions.
-- Never put a literal pipe character inside a field. Omit or safely replace that character in descriptive text.
-- Never shift fields to repair an incomplete message.
-- Never combine multiple transactions.
-- Never fabricate financial facts.
-- If it is not a completed transaction, return IGNORE.
+- Return exactly 12 fields and exactly 11 pipe delimiters, or IGNORE alone.
+- Keep all field positions; unknown values are NA.
+- Never invent facts, combine transactions, shift fields or use unrelated amounts/timestamps.
+- A received/captured time is only a labelled fallback, not the actual transaction time.
 ~~~
 
 ## Prompt 2 — Category classification

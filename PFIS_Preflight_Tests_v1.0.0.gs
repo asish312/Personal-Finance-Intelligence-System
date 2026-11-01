@@ -435,7 +435,19 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         'New Investment Counterparty', '', 'investment');
       pfisPreflightAssert_(nonExpenseState.requiresPurpose === false,
         'Purpose collection policy must not prompt for non-expense transactions.');
-      return 'Exact rule match suppresses prompt; unmatched merchant or merchant-only fallback asks Purpose; no amount threshold';
+      var mappingReviewState = pfisGetEnrichmentState('Shopping', '', ['Shopping'],
+        'Known Merchant', 'PR-TEST-001', 'expense');
+      pfisPreflightAssert_(pfisRecommendNextAction('ACCEPTED', {
+        category: 'Shopping', userNotes: '', merchant: 'Known Merchant', type: 'expense',
+        ruleApplied: 'PR-TEST-001', needsReview: true, reviewReason: 'config_mapping_unresolved'
+      }, mappingReviewState) === 'ASK_PURPOSE',
+        'A non-hard account-mapping review must not suppress the independent Purpose question.');
+      pfisPreflightAssert_(pfisRecommendNextAction('CONFLICT', {
+        category: 'Shopping', userNotes: '', merchant: 'Known Merchant', type: 'expense',
+        ruleApplied: 'PR-TEST-001', needsReview: true, reviewReason: 'source_conflict'
+      }, mappingReviewState) === 'REVIEW',
+        'A serious source conflict must retain review priority over Purpose.');
+      return 'All blank-purpose expenses ask; known merchant context is distinguished; only hard integrity conflicts block the Purpose question';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Conflicting merchant category evidence fails closed', function () {

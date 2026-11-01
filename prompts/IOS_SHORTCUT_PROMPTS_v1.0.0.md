@@ -174,10 +174,11 @@ Example update; synthetic values only:
 
 - Do not ask for Purpose during extraction. Wait for the backend's <code>nextAction</code>.
 - When the backend returns <code>ASK_PURPOSE</code>, ask the user for a short factual description of what the expense was for.
-- This applies to an expense with no specific active Rule ID match: an unknown/unmatched merchant, or a recognised merchant whose transaction only matched a broad merchant fallback because its transaction-specific rule did not match.
-- A direct rule match suppresses the prompt. A trusted rule-generated Purpose also suppresses it.
+- Ask for every expense whose User Notes/Purpose is blank: unknown/unmatched merchant, merchant-only fallback, and a recognised merchant with no trusted Purpose.
+- A direct rule match does not prove what was purchased. Ask whether this is the usual or a different transaction and request a short factual purpose.
+- Only an explicitly trusted rule-generated Purpose suppresses the prompt.
 - There is no amount threshold. Do not infer a purpose from the amount or merchant name.
-- If the merchant is recognised but this appears to be a different type of transaction, ask the user to describe that different transaction explicitly.
+- Do not ask for income, investment, transfer or credit-card bill settlement entries.
 - Submit only the user's answer through one <code>action=update</code> request containing <code>transactionId</code>, <code>purpose</code>, <code>actor</code> and a specific <code>reason</code>.
 - Do not send <code>isReviewNeeded</code> to represent a Purpose request. Purpose collection and integrity review are separate.
 - A blank answer may be skipped; do not fabricate a purpose. The transaction remains in the ledger with blank User Notes.

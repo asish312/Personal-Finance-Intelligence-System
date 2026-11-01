@@ -392,7 +392,11 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       pfisPreflightAssert_(tx.userNotes === '', 'A purpose was unexpectedly fabricated.');
       pfisPreflightAssert_(tx.needsReview === false && tx.validationFlag === 'VALID',
         'Blank purpose or Miscellaneous fallback incorrectly blocked transaction acceptance.');
-      return 'Missing category => Miscellaneous; blank Purpose => accepted transaction, not Needs Review';
+      var state = pfisGetEnrichmentState(tx.category, tx.userNotes, ['Miscellaneous'], tx.merchant,
+        tx.ruleApplied, tx.type);
+      pfisPreflightAssert_(state.requiresCategoryClassification === true && state.requiresPurpose === true,
+        'Unmatched expense should require category classification first and purpose next.');
+      return 'Unmatched expense => Miscellaneous classification first, then a Purpose question; no integrity-review blocker';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Different amount reuses merchant category only', function () {
@@ -409,14 +413,28 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
       pfisPreflightAssert_(result.notes === '' && result.autoPurpose === false, 'Amount-specific purpose leaked into fallback.');
       pfisPreflightAssert_(result.typeOverride === '' && result.accountOverride === '' && result.cardNameOverride === '',
         'Amount-specific type/account/card override leaked into fallback.');
-      var state = pfisGetEnrichmentState(result.category, '', ['Food & Dining', 'Transport', 'Bills & subscription'], 'Test Merchant');
-      pfisPreflightAssert_(state.requiresCategoryClassification === false && state.requiresPurpose === false,
-        'Missing purpose must not be a required enrichment field.');
+      var state = pfisGetEnrichmentState(result.category, '', ['Food & Dining', 'Transport', 'Bills & subscription'],
+        'Test Merchant', result.ruleApplied, 'expense');
+      pfisPreflightAssert_(state.requiresCategoryClassification === false && state.requiresPurpose === true &&
+        state.purposePromptReason === 'MERCHANT_RULE_VARIANCE',
+        'A merchant-only fallback must request purpose when the transaction-specific rule did not match.');
       pfisPreflightAssert_(pfisRecommendNextAction('ACCEPTED', {
-        category: result.category, userNotes: '', merchant: 'Test Merchant', needsReview: false,
-        reviewReason: ''
-      }, state) === 'SHOW_RECEIPT', 'A known category with blank purpose must not open a purpose prompt.');
-      return 'Amount mismatch retained category; blank purpose is optional and does not block receipt';
+        category: result.category, userNotes: '', merchant: 'Test Merchant', type: 'expense',
+        ruleApplied: result.ruleApplied, needsReview: false, reviewReason: ''
+      }, state) === 'ASK_PURPOSE', 'A broad merchant fallback must ask what this different transaction was for.');
+      var exactRuleState = pfisGetEnrichmentState('Food & Dining', '', ['Food & Dining'], 'Test Merchant',
+        'PR-TEST-001', 'expense');
+      pfisPreflightAssert_(exactRuleState.requiresPurpose === false,
+        'An exact active rule match must not ask for Purpose when no trusted rule text is configured.');
+      var unmatchedExpenseState = pfisGetEnrichmentState('Shopping', '', ['Shopping'], 'New Merchant',
+        '', 'expense');
+      pfisPreflightAssert_(unmatchedExpenseState.requiresPurpose === true,
+        'An unmatched expense must ask for Purpose regardless of amount.');
+      var nonExpenseState = pfisGetEnrichmentState('Investment & savings', '', ['Investment & savings'],
+        'New Investment Counterparty', '', 'investment');
+      pfisPreflightAssert_(nonExpenseState.requiresPurpose === false,
+        'Purpose collection policy must not prompt for non-expense transactions.');
+      return 'Exact rule match suppresses prompt; unmatched merchant or merchant-only fallback asks Purpose; no amount threshold';
     }, startedAt);
 
     pfisPreflightRunCase_(report, 'Conflicting merchant category evidence fails closed', function () {
@@ -1120,7 +1138,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         return 'Error written to Source Log and Change Log; no transaction inserted; retry lookup remains available';
       }, startedAt);
 
-      pfisPreflightRunCase_(report, 'Blank purpose is optional and is not queued', function () {
+      pfisPreflightRunCase_(report, 'Unmatched transaction requests purpose without creating an integrity-review blocker', function () {
         var suggestionTxnString = '02/10/2026 10:00:00|-126.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRPREFILL126|';
         var suggestionBody = 'PFIS synthetic purchase for purpose-prefill test: INR 126 at Test Merchant on 02/10/2026 10:00:00. Ref UTRPREFILL126.';
         var response = pfisRouteRequest(pfisPreflightParams_(testToken, {
@@ -1128,12 +1146,14 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           originalText: suggestionBody, sender: 'PFIS TEST SMS', requestId: 'PFIS-TEST-PURPOSE-PREFILL-001'
         }), 'POST');
         pfisPreflightAssert_(response && response.success === true, 'Suggestion test transaction failed to insert: ' + JSON.stringify(response));
-        pfisPreflightAssert_(response.requiresPurpose === false, 'Purpose must be optional even when historical suggestions exist.');
-        pfisPreflightAssert_(response.nextAction === 'SHOW_RECEIPT', 'Blank purpose should not open a prompt: ' + response.nextAction);
+        pfisPreflightAssert_(response.requiresPurpose === true, 'Merchant-specific rule mismatch should request Purpose.');
+        pfisPreflightAssert_(response.nextAction === 'ASK_PURPOSE', 'Merchant-only fallback should ask Purpose: ' + response.nextAction);
+        pfisPreflightAssert_(response.purposePromptReason === 'MERCHANT_RULE_VARIANCE',
+          'Backend did not explain why Purpose was requested.');
         pfisPreflightAssert_(response.purposeSuggestion === '',
-          'Optional purpose contract must not return a prompt default.');
+          'Purpose collection must not fabricate a default answer.');
         pfisPreflightAssert_(Array.isArray(response.purposeExamples) && response.purposeExamples.length === 0,
-          'Purpose examples should not be part of a required enrichment queue.');
+          'No exact merchant/type history should be returned when none exists.');
         pfisPreflightAssert_(response.transaction && response.transaction.userNotes === '',
           'Optional purpose must remain blank unless the user supplied it.');
 
@@ -1143,7 +1163,7 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(queueResponse && queueResponse.success === true, 'getneedsenrichment failed: ' + JSON.stringify(queueResponse));
         var queued = (queueResponse.data || []).filter(function (item) { return item.transactionId === response.transactionId; })[0];
         pfisPreflightAssert_(!queued, 'A purpose-only gap should not appear in the required enrichment queue.');
-        return 'Missing purpose remains blank, is not prompted, and is not added to the required enrichment queue';
+        return 'Merchant-rule variance prompts the user; blank Purpose remains blank and does not create an integrity-review blocker';
       }, startedAt);
 
       pfisPreflightRunCase_(report, 'Purpose suggestion is explicitly blank when no history matches', function () {
@@ -1154,13 +1174,22 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
           sender: 'PFIS TEST SMS', requestId: 'PFIS-TEST-PURPOSE-NO-HISTORY-001'
         }), 'POST');
         pfisPreflightAssert_(response && response.success === true, 'No-history test transaction failed: ' + JSON.stringify(response));
-        pfisPreflightAssert_(response.requiresPurpose === false, 'Purpose should remain optional when no history exists.');
-        pfisPreflightAssert_(response.nextAction === 'SHOW_RECEIPT', 'Missing purpose must not block the receipt.');
+        pfisPreflightAssert_(response.requiresPurpose === true, 'An unmatched expense should require Purpose.');
+        pfisPreflightAssert_(response.nextAction === 'CLASSIFY_CATEGORY',
+          'Category classification should happen before purpose collection: ' + response.nextAction);
         pfisPreflightAssert_(Object.prototype.hasOwnProperty.call(response, 'purposeSuggestion') && response.purposeSuggestion === '',
           'An optional purpose should not fabricate a default.');
         pfisPreflightAssert_(Array.isArray(response.purposeExamples) && response.purposeExamples.length === 0,
           'No purpose examples should be returned when no historical purpose exists.');
-        return 'No purpose history is normal; transaction is accepted with blank User Notes';
+        var categoryUpdate = pfisRouteRequest(pfisPreflightParams_(testToken, {
+          action: 'update', transactionId: response.transactionId, category: 'Shopping',
+          actor: 'PFIS_PREFLIGHT_TEST', reason: 'Human classified unmatched merchant transaction',
+          requestId: 'PFIS-TEST-PURPOSE-NO-HISTORY-CATEGORY'
+        }), 'POST');
+        pfisPreflightAssert_(categoryUpdate && categoryUpdate.success === true &&
+          categoryUpdate.nextAction === 'ASK_PURPOSE',
+          'After category classification, unmatched expense should ask Purpose: ' + JSON.stringify(categoryUpdate));
+        return 'Unknown merchant is classified first, then prompts for a human Purpose; no amount threshold';
       }, startedAt);
 
       pfisPreflightRunCase_(report, 'Default Miscellaneous fallback is traceable and remains classification-only', function () {
@@ -1203,10 +1232,12 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(correctedTxn.category === 'Transport' &&
           !pfisIsDefaultCategoryFallback_(correctedTxn.category, correctedTxn.ruleApplied),
           'Explicit category selection did not clear fallback provenance.');
-        return 'Default fallback remains auditable, does not create Needs Review, is queued for classification, and clears when a human selects an active category';
+        pfisPreflightAssert_(corrected.nextAction === 'ASK_PURPOSE',
+          'After category classification, the unmatched expense should request Purpose: ' + corrected.nextAction);
+        return 'Default fallback is classified first, then human Purpose is requested; neither step creates an integrity-review blocker';
       }, startedAt);
 
-      pfisPreflightRunCase_(report, 'End-to-end unmatched amount assigns category and accepts blank purpose', function () {
+      pfisPreflightRunCase_(report, 'End-to-end transaction-specific rule miss asks for purpose', function () {
         var txn = '04/10/2026 12:00:00|-50.00|Axis Bank|Savings Account|UPI|expense|Test Merchant|Test Merchant|UTRFALLBACK050|NA';
         var body = 'PFIS synthetic payment INR 50 to Test Merchant on 04/10/2026 12:00:00. Reference UTRFALLBACK050.';
         var response = pfisRouteRequest(pfisPreflightParams_(testToken, {
@@ -1219,10 +1250,14 @@ function PFIS_RUN_ALL_PREFLIGHT_TESTS() {
         pfisPreflightAssert_(response.transaction.userNotes === '', 'A purpose was inherited despite the amount rule not matching.');
         pfisPreflightAssert_(response.transaction.ruleType === 'MERCHANT_CATEGORY_FALLBACK',
           'Insertion did not report merchant-category fallback.');
-        pfisPreflightAssert_(response.nextAction === 'SHOW_RECEIPT', 'Blank purpose should not require another interaction: ' + response.nextAction);
-        pfisPreflightAssert_(response.requiresPurpose === false, 'The backend still marks purpose as required.');
+        pfisPreflightAssert_(response.nextAction === 'ASK_PURPOSE',
+          'Transaction-specific rule miss should ask for purpose: ' + response.nextAction);
+        pfisPreflightAssert_(response.requiresPurpose === true, 'Backend did not mark the merchant-rule variance purpose as required.');
+        pfisPreflightAssert_(response.purposeQuestion.indexOf('different') >= 0 ||
+          response.purposeQuestion.indexOf('specific configured rule') >= 0,
+          'Backend purpose question does not explain the rule mismatch.');
         pfisPreflightAssert_(response.needsReview === false, 'Missing purpose should not mark the transaction for review.');
-        return 'Insertion assigned category and accepted the transaction without asking for purpose';
+        return 'Insertion retained merchant category, asked the user what the different transaction was for, and kept Needs Review false';
       }, startedAt);
       pfisPreflightRunCase_(report, 'isReviewNeeded contract validates types, persists review, exposes queue and supports audited acknowledgement', function () {
         var beforeTransactions = pfisPreflightCountNonblankKeys_(txSheet, 1);

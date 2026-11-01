@@ -175,7 +175,7 @@ datetime | signed_amount | bank | account_type | account_alias | instrument | ty
 | balance_after | Actual post-transaction account balance only; otherwise NA |
 | datetime_basis | TRANSACTION_TIME, RECEIVED_TIME_FALLBACK, CAPTURED_TIME_FALLBACK or DATE_ONLY |
 
-The engine temporarily accepts legacy ten-field payloads while existing Shortcuts are updated. New Shortcuts must emit twelve fields. A fallback clock is stored as an imprecise timestamp and is not used for exact-time duplicate matching.
+The engine temporarily accepts legacy ten-field payloads while existing Shortcuts are updated. New Shortcuts must emit twelve fields. A received/captured fallback clock is stored as imprecise evidence and is never treated as an exact transaction time. When at least one side is date-only or has an imprecise fallback, the engine can still reconcile a unique event only when signed amount, IST calendar day, bank, account identity and normalized beneficiary/merchant agree, and no supplied references contradict. Amount plus date alone is never sufficient.
 
 Do not use an available balance, credit limit, statement balance or minimum due as the transaction amount. Do not replace an explicit transaction date with a different message-received date. Keep receivedAt (original delivery time) separate from capturedAt (Shortcut processing time).
 
@@ -691,6 +691,8 @@ All Shortcut writes use POST JSON.
 **Legacy maintenance functions (run manually in Apps Script after preview)**
 - <code>PFIS_PREVIEW_LEGACY_DUPLICATE_ARCHIVE_MIGRATION()</code> — read-only preview; requires an explicit surviving Transaction ID.
 - <code>PFIS_APPLY_LEGACY_DUPLICATE_ARCHIVE_MIGRATION()</code> — archives only eligible legacy rows, relinks source evidence and writes Change Log entries.
+- <code>PFIS_PREVIEW_202611_DUPLICATE_RECONCILIATION()</code> — read-only evidence check for the five November 2026 rows, with the three proposed duplicate-to-survivor links.
+- <code>PFIS_APPLY_202611_DUPLICATE_RECONCILIATION()</code> — applies only after the preview passes; corrects the survivor's account from explicit source evidence, archives the confirmed duplicate rows, relinks source evidence and audits each change.
 - Follow [Ledger Cleanup Operations](docs/LEDGER_CLEANUP_OPERATIONS_v1.0.0.md).
 
 **Read/diagnostic**
@@ -761,7 +763,8 @@ Purpose suggestions remain optional and live in Purpose Review Queue because the
 - Preserve the full original message in Source Log.
 - Use source hash/idempotency for exact retries; retry the exact original payload after timeouts.
 - Use write locking around transaction ID allocation, duplicate checks and row writes.
-- Do not merge on amount/date alone.
+- Do not merge on amount/date alone. Date-only matching requires a unique agreement on signed amount, IST day, bank, account identity and normalized beneficiary/merchant; contradictory references or multiple unresolved candidates stay in review.
+- Do not treat a received/captured fallback clock as an exact bank transaction time.
 - Do not silently delete a candidate.
 - Do not mark every missing optional field as Needs Review.
 - Do not expose full account/card numbers, secrets, raw bank message contents or personal identifiers in public examples.
